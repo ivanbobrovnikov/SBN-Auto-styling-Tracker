@@ -34,6 +34,42 @@ function newId() {
 function monthKey(dateStr) {
   return (dateStr || "").slice(0, 7);
 }
+function dateRangeFor(query) {
+  const period = query.period || "month";
+  const ref = query.date ? new Date(query.date) : new Date();
+  let start, end;
+  if (period === "day") {
+    const d = query.date || new Date().toISOString().slice(0, 10);
+    start = d + "T00:00:00.000Z";
+    end = d + "T23:59:59.999Z";
+  } else if (period === "week") {
+    const day = ref.getUTCDay(); // 0=Sun
+    const monday = new Date(ref);
+    monday.setUTCDate(ref.getUTCDate() - ((day + 6) % 7));
+    monday.setUTCHours(0, 0, 0, 0);
+    const sunday = new Date(monday);
+    sunday.setUTCDate(monday.getUTCDate() + 6);
+    sunday.setUTCHours(23, 59, 59, 999);
+    start = monday.toISOString();
+    end = sunday.toISOString();
+  } else if (period === "year") {
+    const y = query.date ? query.date.slice(0, 4) : String(ref.getUTCFullYear());
+    start = `${y}-01-01T00:00:00.000Z`;
+    end = `${y}-12-31T23:59:59.999Z`;
+  } else {
+    // month
+    const m = query.month || new Date().toISOString().slice(0, 7);
+    start = `${m}-01T00:00:00.000Z`;
+    const [y, mo] = m.split("-").map(Number);
+    const lastDay = new Date(y, mo, 0).getDate();
+    end = `${m}-${String(lastDay).padStart(2, "0")}T23:59:59.999Z`;
+  }
+  return { start, end };
+}
+function inRange(dateStr, start, end) {
+  if (!dateStr) return false;
+  return dateStr >= start && dateStr <= end;
+}
 function saleUpsellTotal(sale) {
   return (sale.upsells || []).reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
 }
@@ -42,24 +78,40 @@ function saleTotal(sale) {
 }
 
 function upsertSaleFromGHL(db, { date, customerName, car, employeeName, baseService, basePrice, ghlOpportunityId }) {
-  const emp = db.employees.find((e) => e.name.toLowerCase() === String(employeeName || "").toLowerCase());
+  // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
+  // this is how tag-teamed jobs (multiple techs on one car) get represented.
+  const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
+  const matched = [];
+  const unmatched = [];
+  rawNames.forEach((n) => {
+    const emp = db.employees.find((e) => e.name.toLowerCase() === n.toLowerCase());
+    if (emp) matched.push(emp);
+    else if (n) unmatched.push(n);
+  });
+
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   if (!sale) {
-    sale = { id: newId(), ghlOpportunityId, upsells: [], arrived: false, completed: false, paid: false };
+    sale = { id: newId(), ghlOpportunityId, upsells: [], status: "pending", completed: false, paid: false };
     db.sales.push(sale);
   }
   sale.date = date || sale.date || new Date().toISOString();
   sale.customerName = customerName || sale.customerName || "";
   sale.car = car || sale.car || "";
-  sale.employeeId = emp ? emp.id : sale.employeeId || null;
-  sale.employeeName = emp ? emp.name : employeeName || "Unassigned";
+  sale.employeeIds = matched.map((e) => e.id);
+  sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
   sale.baseService = baseService || sale.baseService || "";
   sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
   sale.syncedFromGHL = true;
-  if (sale.arrived === undefined) sale.arrived = false;
+  if (!sale.status) sale.status = "pending";
   if (sale.completed === undefined) sale.completed = false;
   if (sale.paid === undefined) sale.paid = false;
   return sale;
+}
+
+// Backward/forward-compatible accessor: some records may still use the old single employeeId shape.
+function saleEmployeeIds(sale) {
+  if (sale.employeeIds) return sale.employeeIds;
+  return sale.employeeId ? [sale.employeeId] : [];
 }
 
 // ---------- app setup ----------
@@ -207,7 +259,7 @@ app.post("/api/webhook/ghl", (req, res) => {
   if (!req.body.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
   const sale = upsertSaleFromGHL(db, req.body);
   saveDB(db);
-  res.json({ ok: true, saleId: sale.id, matchedEmployee: !!sale.employeeId });
+  res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
 });
 
 // Lets the owner test the automatic job-creation flow right from the dashboard,
@@ -217,27 +269,27 @@ app.post("/api/owner/simulate-webhook", requireOwner, (req, res) => {
   const fakeOpportunityId = "test_" + newId();
   const sale = upsertSaleFromGHL(db, { ...req.body, ghlOpportunityId: fakeOpportunityId });
   saveDB(db);
-  res.json({ ok: true, saleId: sale.id, matchedEmployee: !!sale.employeeId });
+  res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
 });
 
 // ---------- manual fallback entry (owner only — for walk-ins or if GHL sync misses one) ----------
 app.post("/api/sales", requireOwner, (req, res) => {
   const db = loadDB();
-  const { date, customerName, car, employeeId, baseService, basePrice } = req.body;
-  if (!car || !employeeId) return res.status(400).json({ error: "Car and employee are required." });
-  const emp = db.employees.find((e) => e.id === employeeId);
+  const { date, customerName, car, employeeIds, baseService, basePrice } = req.body;
+  if (!car || !employeeIds || !employeeIds.length) return res.status(400).json({ error: "Car and at least one employee are required." });
+  const names = employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean);
   const sale = {
     id: newId(),
     date: date || new Date().toISOString(),
     customerName: customerName || "",
     car,
-    employeeId,
-    employeeName: emp ? emp.name : "Removed employee",
+    employeeIds,
+    employeeNames: names.join(", ") || "Unassigned",
     baseService: baseService || "",
     basePrice: parseFloat(basePrice) || 0,
     syncedFromGHL: false,
     upsells: [],
-    arrived: false,
+    status: "pending",
     completed: false,
     paid: false,
   };
@@ -254,15 +306,21 @@ app.delete("/api/sales/:id", requireOwner, (req, res) => {
 });
 
 // ---------- manager job-status updates (arrived / completed / paid) ----------
+// Manager-safe employee list — names only, no commission rates or PINs.
+app.get("/api/manager/employees", requireManager, (req, res) => {
+  const db = loadDB();
+  res.json(db.employees.map((e) => ({ id: e.id, name: e.name })));
+});
+
 app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
-  const month = req.query.month || new Date().toISOString().slice(0, 7);
-  const jobs = db.sales.filter((s) => monthKey(s.date) === month);
+  const { start, end } = dateRangeFor(req.query);
+  const jobs = db.sales.filter((s) => inRange(s.date, start, end));
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, car: s.car,
-    employeeName: s.employeeName, baseService: s.baseService,
+    employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     total: saleTotal(s), upsellTotal: saleUpsellTotal(s),
-    arrived: !!s.arrived, completed: !!s.completed, paid: !!s.paid,
+    status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid,
   })));
 });
 
@@ -270,9 +328,14 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
-  ["arrived", "completed", "paid"].forEach((f) => {
-    if (req.body[f] !== undefined) sale[f] = !!req.body[f];
-  });
+  if (req.body.status !== undefined) sale.status = req.body.status;
+  if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
+  if (req.body.paid !== undefined) sale.paid = !!req.body.paid;
+  if (req.body.employeeIds !== undefined) {
+    sale.employeeIds = req.body.employeeIds;
+    const names = req.body.employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean);
+    sale.employeeNames = names.join(", ") || "Unassigned";
+  }
   saveDB(db);
   res.json({ ok: true });
 });
@@ -282,13 +345,16 @@ app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
-  if (req.session.role === "employee" && sale.employeeId !== req.session.employeeId) {
-    return res.status(403).json({ error: "This job isn't assigned to you." });
+  if (req.session.role === "employee" && !saleEmployeeIds(sale).includes(req.session.employeeId)) {
+    return res.status(403).json({ error: "You're not one of the techs assigned to this job." });
   }
   const { name, price } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: "Upsell name is required." });
   sale.upsells = sale.upsells || [];
-  sale.upsells.push({ id: newId(), name: name.trim(), price: parseFloat(price) || 0 });
+  // Attribute the upsell to whichever tech is actually logged in and adding it —
+  // this is what keeps credit correct even when a job is shared by multiple techs.
+  const attributedTo = req.session.role === "employee" ? req.session.employeeId : (req.body.employeeId || null);
+  sale.upsells.push({ id: newId(), name: name.trim(), price: parseFloat(price) || 0, employeeId: attributedTo });
   saveDB(db);
   res.json({ ok: true });
 });
@@ -297,8 +363,8 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.saleId);
   if (!sale) return res.status(404).json({ error: "Job not found." });
-  if (req.session.role === "employee" && sale.employeeId !== req.session.employeeId) {
-    return res.status(403).json({ error: "This job isn't assigned to you." });
+  if (req.session.role === "employee" && !saleEmployeeIds(sale).includes(req.session.employeeId)) {
+    return res.status(403).json({ error: "You're not one of the techs assigned to this job." });
   }
   sale.upsells = (sale.upsells || []).filter((u) => u.id !== req.params.upsellId);
   saveDB(db);
@@ -310,33 +376,44 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
   const db = loadDB();
   const employeeId = req.session.role === "owner" && req.query.employeeId ? req.query.employeeId : req.session.employeeId;
   const jobs = db.sales
-    .filter((s) => s.employeeId === employeeId)
-    .map((s) => ({
-      id: s.id,
-      date: s.date,
-      car: s.car,
-      baseService: s.baseService,
-      upsells: s.upsells || [],
-      upsellTotal: saleUpsellTotal(s),
-      // basePrice and total sale $ intentionally NOT sent to employees
-    }));
+    .filter((s) => saleEmployeeIds(s).includes(employeeId))
+    .map((s) => {
+      const teammates = saleEmployeeIds(s)
+        .filter((id) => id !== employeeId)
+        .map((id) => (db.employees.find((e) => e.id === id) || {}).name)
+        .filter(Boolean);
+      const mine = (s.upsells || []).filter((u) => u.employeeId === employeeId);
+      return {
+        id: s.id,
+        date: s.date,
+        car: s.car,
+        baseService: s.baseService,
+        teammates,
+        upsells: mine,
+        upsellTotal: mine.reduce((a, u) => a + (parseFloat(u.price) || 0), 0),
+        // basePrice and total sale $ intentionally NOT sent to employees
+      };
+    });
   res.json(jobs);
 });
 
 app.get("/api/my/performance", requireEmployee, (req, res) => {
   const db = loadDB();
   const employeeId = req.session.role === "owner" && req.query.employeeId ? req.query.employeeId : req.session.employeeId;
-  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const { start, end } = dateRangeFor(req.query);
   const emp = db.employees.find((e) => e.id === employeeId);
-  const mine = db.sales.filter((s) => s.employeeId === employeeId && monthKey(s.date) === month);
+  const mine = db.sales.filter((s) => saleEmployeeIds(s).includes(employeeId) && inRange(s.date, start, end));
 
-  const upsellRev = mine.reduce((a, s) => a + saleUpsellTotal(s), 0);
+  // Only upsells this specific person personally logged count toward their own numbers —
+  // even on a shared job, a teammate's upsell isn't credited to them.
+  const myUpsells = (s) => (s.upsells || []).filter((u) => u.employeeId === employeeId);
+  const upsellRev = mine.reduce((a, s) => a + myUpsells(s).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
   const cars = mine.length;
-  const carsWithUpsell = mine.filter((s) => (s.upsells || []).length > 0).length;
+  const carsWithUpsell = mine.filter((s) => myUpsells(s).length > 0).length;
   const attachRate = cars ? (carsWithUpsell / cars) * 100 : 0;
 
   const breakdown = {};
-  mine.forEach((s) => (s.upsells || []).forEach((u) => {
+  mine.forEach((s) => myUpsells(s).forEach((u) => {
     const k = u.name.trim();
     breakdown[k] = breakdown[k] || { name: k, count: 0, revenue: 0 };
     breakdown[k].count += 1;
@@ -346,7 +423,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   const commission = emp && emp.commissionRate ? upsellRev * (emp.commissionRate / 100) : 0;
 
   res.json({
-    month, cars, attachRate, upsellRevenue: upsellRev,
+    cars, attachRate, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: emp ? emp.commissionRate : 0, commission,
   });
@@ -355,42 +432,41 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
 // ---------- owner-only: everything ----------
 app.get("/api/owner/sales", requireOwner, (req, res) => {
   const db = loadDB();
-  const month = req.query.month;
-  const sales = db.sales.filter((s) => !month || monthKey(s.date) === month);
+  const { start, end } = dateRangeFor(req.query);
+  const sales = db.sales.filter((s) => inRange(s.date, start, end));
   res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s) })));
 });
 
 app.get("/api/owner/summary", requireOwner, (req, res) => {
   const db = loadDB();
-  const month = req.query.month || new Date().toISOString().slice(0, 7);
-  const sales = db.sales.filter((s) => monthKey(s.date) === month);
+  const { start, end } = dateRangeFor(req.query);
+  const sales = db.sales.filter((s) => inRange(s.date, start, end));
   const totalRevenue = sales.reduce((a, s) => a + saleTotal(s), 0);
   const totalUpsell = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
   const carCount = sales.length;
   const attachRate = carCount ? (sales.filter((s) => (s.upsells || []).length > 0).length / carCount) * 100 : 0;
 
+  // Base price isn't split per tech since jobs are tag-teamed — "cars worked" and each
+  // person's own logged upsell revenue are the numbers that stay unambiguous here.
   const perEmployee = db.employees.map((emp) => {
-    const empSales = sales.filter((s) => s.employeeId === emp.id);
-    return {
-      id: emp.id, name: emp.name,
-      cars: empSales.length,
-      revenue: empSales.reduce((a, s) => a + saleTotal(s), 0),
-      upsellRevenue: empSales.reduce((a, s) => a + saleUpsellTotal(s), 0),
-    };
+    const carsWorked = sales.filter((s) => saleEmployeeIds(s).includes(emp.id));
+    const myUpsellRevenue = sales.reduce((a, s) => a + (s.upsells || []).filter((u) => u.employeeId === emp.id).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
+    return { id: emp.id, name: emp.name, cars: carsWorked.length, upsellRevenue: myUpsellRevenue };
   });
 
   const leaderboard = [];
   const grouped = {};
   sales.forEach((s) => (s.upsells || []).forEach((u) => {
-    const key = u.name.trim() + "||" + (s.employeeName || "Unassigned");
-    grouped[key] = grouped[key] || { upsell: u.name.trim(), employee: s.employeeName || "Unassigned", count: 0, revenue: 0 };
+    const empName = (db.employees.find((e) => e.id === u.employeeId) || {}).name || "Unassigned";
+    const key = u.name.trim() + "||" + empName;
+    grouped[key] = grouped[key] || { upsell: u.name.trim(), employee: empName, count: 0, revenue: 0 };
     grouped[key].count += 1;
     grouped[key].revenue += parseFloat(u.price) || 0;
   }));
   Object.values(grouped).sort((a, b) => b.revenue - a.revenue).forEach((r) => leaderboard.push(r));
 
   res.json({
-    month, totalRevenue, totalUpsellRevenue: totalUpsell,
+    totalRevenue, totalUpsellRevenue: totalUpsell,
     upsellPercentOfRevenue: totalRevenue ? (totalUpsell / totalRevenue) * 100 : 0,
     carCount, attachRate, perEmployee, leaderboard,
   });
