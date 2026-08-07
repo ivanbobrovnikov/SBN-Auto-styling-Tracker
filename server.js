@@ -11,13 +11,16 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-too";
 
+// ---------- tiny JSON "database" ----------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const fresh = { employees: [], sales: [], ownerPinHash: null };
+    const fresh = { employees: [], managers: [], sales: [], ownerPinHash: null };
     fs.writeFileSync(DB_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
-  return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+  const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+  if (!db.managers) db.managers = [];
+  return db;
 }
 function saveDB(db) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
@@ -38,6 +41,28 @@ function saleTotal(sale) {
   return (parseFloat(sale.basePrice) || 0) + saleUpsellTotal(sale);
 }
 
+function upsertSaleFromGHL(db, { date, customerName, car, employeeName, baseService, basePrice, ghlOpportunityId }) {
+  const emp = db.employees.find((e) => e.name.toLowerCase() === String(employeeName || "").toLowerCase());
+  let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  if (!sale) {
+    sale = { id: newId(), ghlOpportunityId, upsells: [], arrived: false, completed: false, paid: false };
+    db.sales.push(sale);
+  }
+  sale.date = date || sale.date || new Date().toISOString();
+  sale.customerName = customerName || sale.customerName || "";
+  sale.car = car || sale.car || "";
+  sale.employeeId = emp ? emp.id : sale.employeeId || null;
+  sale.employeeName = emp ? emp.name : employeeName || "Unassigned";
+  sale.baseService = baseService || sale.baseService || "";
+  sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
+  sale.syncedFromGHL = true;
+  if (sale.arrived === undefined) sale.arrived = false;
+  if (sale.completed === undefined) sale.completed = false;
+  if (sale.paid === undefined) sale.paid = false;
+  return sale;
+}
+
+// ---------- app setup ----------
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -46,7 +71,7 @@ app.use(
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 24 * 90 },
+    cookie: { maxAge: 1000 * 60 * 60 * 24 * 90 }, // 90 days
   })
 );
 
@@ -54,14 +79,23 @@ function requireOwner(req, res, next) {
   if (req.session.role === "owner") return next();
   return res.status(401).json({ error: "Owner login required." });
 }
+function requireManager(req, res, next) {
+  if (req.session.role === "manager" || req.session.role === "owner") return next();
+  return res.status(401).json({ error: "Manager login required." });
+}
 function requireEmployee(req, res, next) {
-  if (req.session.role === "employee" || req.session.role === "owner") return next();
+  if (req.session.role === "employee" || req.session.role === "manager" || req.session.role === "owner") return next();
   return res.status(401).json({ error: "Login required." });
 }
 
+// ---------- session / login ----------
 app.get("/api/session", (req, res) => {
   const db = loadDB();
   if (req.session.role === "owner") return res.json({ role: "owner" });
+  if (req.session.role === "manager") {
+    const mgr = db.managers.find((m) => m.id === req.session.managerId);
+    if (mgr) return res.json({ role: "manager", managerId: mgr.id, name: mgr.name });
+  }
   if (req.session.role === "employee") {
     const emp = db.employees.find((e) => e.id === req.session.employeeId);
     if (emp) return res.json({ role: "employee", employeeId: emp.id, name: emp.name });
@@ -87,6 +121,12 @@ app.post("/api/login", (req, res) => {
     req.session.role = "owner";
     return res.json({ role: "owner" });
   }
+  const mgr = db.managers.find((m) => m.pinHash === hash(pin));
+  if (mgr) {
+    req.session.role = "manager";
+    req.session.managerId = mgr.id;
+    return res.json({ role: "manager", managerId: mgr.id, name: mgr.name });
+  }
   const emp = db.employees.find((e) => e.pinHash === hash(pin));
   if (emp) {
     req.session.role = "employee";
@@ -100,6 +140,7 @@ app.post("/api/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+// ---------- employees (owner only to manage; employee can read own record) ----------
 app.get("/api/employees", requireOwner, (req, res) => {
   const db = loadDB();
   res.json(db.employees.map((e) => ({ id: e.id, name: e.name, commissionRate: e.commissionRate })));
@@ -133,32 +174,53 @@ app.delete("/api/employees/:id", requireOwner, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- managers (owner only to manage) ----------
+app.get("/api/managers", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json(db.managers.map((m) => ({ id: m.id, name: m.name })));
+});
+
+app.post("/api/managers", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { name, pin } = req.body;
+  if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
+  const mgr = { id: newId(), name: name.trim(), pinHash: hash(pin) };
+  db.managers.push(mgr);
+  saveDB(db);
+  res.json({ id: mgr.id, name: mgr.name });
+});
+
+app.delete("/api/managers/:id", requireOwner, (req, res) => {
+  const db = loadDB();
+  db.managers = db.managers.filter((m) => m.id !== req.params.id);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// ---------- GHL webhook (public endpoint, protected by shared secret) ----------
+// Point your GoHighLevel workflow's Webhook action at:
+//   POST https://your-domain.com/api/webhook/ghl?secret=YOUR_WEBHOOK_SECRET
+// Body (JSON): { date, customerName, car, employeeName, baseService, basePrice, ghlOpportunityId }
 app.post("/api/webhook/ghl", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  const { date, customerName, car, employeeName, baseService, basePrice, ghlOpportunityId } = req.body;
-  if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
-
-  const emp = db.employees.find((e) => e.name.toLowerCase() === String(employeeName || "").toLowerCase());
-
-  let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
-  if (!sale) {
-    sale = { id: newId(), ghlOpportunityId, upsells: [] };
-    db.sales.push(sale);
-  }
-  sale.date = date || sale.date || new Date().toISOString();
-  sale.customerName = customerName || sale.customerName || "";
-  sale.car = car || sale.car || "";
-  sale.employeeId = emp ? emp.id : sale.employeeId || null;
-  sale.employeeName = emp ? emp.name : employeeName || "Unassigned";
-  sale.baseService = baseService || sale.baseService || "";
-  sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
-  sale.syncedFromGHL = true;
-
+  if (!req.body.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
+  const sale = upsertSaleFromGHL(db, req.body);
   saveDB(db);
-  res.json({ ok: true, saleId: sale.id, matchedEmployee: !!emp });
+  res.json({ ok: true, saleId: sale.id, matchedEmployee: !!sale.employeeId });
 });
 
+// Lets the owner test the automatic job-creation flow right from the dashboard,
+// without needing GoHighLevel wired up yet or any external tool.
+app.post("/api/owner/simulate-webhook", requireOwner, (req, res) => {
+  const db = loadDB();
+  const fakeOpportunityId = "test_" + newId();
+  const sale = upsertSaleFromGHL(db, { ...req.body, ghlOpportunityId: fakeOpportunityId });
+  saveDB(db);
+  res.json({ ok: true, saleId: sale.id, matchedEmployee: !!sale.employeeId });
+});
+
+// ---------- manual fallback entry (owner only — for walk-ins or if GHL sync misses one) ----------
 app.post("/api/sales", requireOwner, (req, res) => {
   const db = loadDB();
   const { date, customerName, car, employeeId, baseService, basePrice } = req.body;
@@ -175,6 +237,9 @@ app.post("/api/sales", requireOwner, (req, res) => {
     basePrice: parseFloat(basePrice) || 0,
     syncedFromGHL: false,
     upsells: [],
+    arrived: false,
+    completed: false,
+    paid: false,
   };
   db.sales.push(sale);
   saveDB(db);
@@ -188,6 +253,31 @@ app.delete("/api/sales/:id", requireOwner, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- manager job-status updates (arrived / completed / paid) ----------
+app.get("/api/manager/jobs", requireManager, (req, res) => {
+  const db = loadDB();
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const jobs = db.sales.filter((s) => monthKey(s.date) === month);
+  res.json(jobs.map((s) => ({
+    id: s.id, date: s.date, customerName: s.customerName, car: s.car,
+    employeeName: s.employeeName, baseService: s.baseService,
+    total: saleTotal(s), upsellTotal: saleUpsellTotal(s),
+    arrived: !!s.arrived, completed: !!s.completed, paid: !!s.paid,
+  })));
+});
+
+app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.params.id);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  ["arrived", "completed", "paid"].forEach((f) => {
+    if (req.body[f] !== undefined) sale[f] = !!req.body[f];
+  });
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// ---------- upsells ----------
 app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
@@ -215,6 +305,7 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
   res.json({ ok: true });
 });
 
+// ---------- employee's own data only — server enforces this, ignores any client-supplied id ----------
 app.get("/api/my/jobs", requireEmployee, (req, res) => {
   const db = loadDB();
   const employeeId = req.session.role === "owner" && req.query.employeeId ? req.query.employeeId : req.session.employeeId;
@@ -227,6 +318,7 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       baseService: s.baseService,
       upsells: s.upsells || [],
       upsellTotal: saleUpsellTotal(s),
+      // basePrice and total sale $ intentionally NOT sent to employees
     }));
   res.json(jobs);
 });
@@ -260,6 +352,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   });
 });
 
+// ---------- owner-only: everything ----------
 app.get("/api/owner/sales", requireOwner, (req, res) => {
   const db = loadDB();
   const month = req.query.month;
