@@ -22,6 +22,52 @@ async function api(path, opts = {}) {
 function money(n) { return "$" + (Math.round((n || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function pct(n) { return isFinite(n) ? Math.round(n) + "%" : "0%"; }
 
+// Reusable Day / Week / Month / Year selector. Calls onChange({period, date, month}) whenever it changes.
+function renderPeriodPicker(onChange, defaultPeriod = "month") {
+  let period = defaultPeriod;
+  const today = new Date().toISOString().slice(0, 10);
+  const dayInput = el("input", { type: "date", value: today, style: "display:none" });
+  const weekInput = el("input", { type: "date", value: today, style: "display:none" });
+  const monthInput = el("input", { type: "month", value: today.slice(0, 7) });
+  const yearInput = el("input", { type: "number", value: String(new Date().getFullYear()), style: "display:none;max-width:100px" });
+
+  function currentParams() {
+    if (period === "day") return { period, date: dayInput.value };
+    if (period === "week") return { period, date: weekInput.value };
+    if (period === "year") return { period, date: `${yearInput.value}-01-01` };
+    return { period: "month", month: monthInput.value };
+  }
+  function fire() { onChange(currentParams()); }
+
+  const periodTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px" });
+  ["day", "week", "month", "year"].forEach((p) => {
+    const btn = el("button", {
+      class: "tab-btn" + (p === period ? " active" : ""),
+      text: p.charAt(0).toUpperCase() + p.slice(1),
+    });
+    btn.addEventListener("click", () => {
+      period = p;
+      Array.from(periodTabs.children).forEach((c) => c.classList.remove("active"));
+      dayInput.style.display = p === "day" ? "" : "none";
+      weekInput.style.display = p === "week" ? "" : "none";
+      monthInput.style.display = p === "month" ? "" : "none";
+      yearInput.style.display = p === "year" ? "" : "none";
+      btn.classList.add("active");
+      fire();
+    });
+    periodTabs.appendChild(btn);
+  });
+
+  [dayInput, weekInput, monthInput, yearInput].forEach((inp) => inp.addEventListener("change", fire));
+
+  const wrap = el("div", { class: "field", style: "max-width:260px" }, [
+    el("label", { text: "Time period" }),
+    periodTabs,
+    dayInput, weekInput, monthInput, yearInput,
+  ]);
+  return { el: wrap, getParams: currentParams };
+}
+
 let session = { role: null };
 let currentTab = "jobs";
 
@@ -119,8 +165,9 @@ async function renderMyJobs(content) {
         el("div", {}, [
           el("div", { style: "font-weight:500", text: job.car }),
           el("div", { class: "muted", text: `${job.date ? job.date.slice(0, 10) : ""} · ${job.baseService || "Service not set"}` }),
+          job.teammates && job.teammates.length ? el("div", { class: "muted", style: "margin-top:2px", text: `With: ${job.teammates.join(", ")}` }) : null,
         ]),
-        el("div", { class: "mono", style: "color:var(--cyan)", text: money(job.upsellTotal) + " upsold" }),
+        el("div", { class: "mono", style: "color:var(--cyan)", text: money(job.upsellTotal) + " upsold by you" }),
       ]),
       upsellList,
       upsellForm,
@@ -145,14 +192,16 @@ function renderUpsellForm(jobId, onDone) {
 }
 
 async function renderPerformance(content) {
-  const monthPicker = el("input", { type: "month", value: new Date().toISOString().slice(0, 7) });
   const body = el("div");
-  async function load() {
-    const stats = await api(`/api/my/performance?month=${monthPicker.value}`);
+  const picker = renderPeriodPicker((params) => load(params), "month");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const stats = await api(`/api/my/performance?${qs}`);
     body.innerHTML = "";
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Your upsell revenue" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(stats.upsellRevenue) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars serviced" }), el("div", { class: "metric-value mono", text: stats.cars })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars worked" }), el("div", { class: "metric-value mono", text: stats.cars })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Attach rate" }), el("div", { class: "metric-value mono", text: pct(stats.attachRate) })]),
       stats.commissionRate > 0 ? el("div", { class: "metric" }, [el("div", { class: "metric-label", text: `Est. commission (${stats.commissionRate}%)` }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(stats.commission) })]) : null,
     ]));
@@ -169,8 +218,7 @@ async function renderPerformance(content) {
       ]));
     }
   }
-  content.appendChild(el("div", { class: "field", style: "max-width:200px" }, [el("label", { text: "Month" }), monthPicker]));
-  monthPicker.addEventListener("change", load);
+  content.appendChild(picker.el);
   content.appendChild(body);
   await load();
 }
@@ -186,10 +234,12 @@ async function renderOwnerTabContent(content) {
 }
 
 async function renderOwnerSummary(content) {
-  const monthPicker = el("input", { type: "month", value: new Date().toISOString().slice(0, 7) });
   const body = el("div");
-  async function load() {
-    const s = await api(`/api/owner/summary?month=${monthPicker.value}`);
+  const picker = renderPeriodPicker((params) => load(params), "month");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const s = await api(`/api/owner/summary?${qs}`);
     body.innerHTML = "";
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total revenue" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(s.totalRevenue) })]),
@@ -199,36 +249,41 @@ async function renderOwnerSummary(content) {
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars serviced" }), el("div", { class: "metric-value mono", text: s.carCount })]),
     ]));
     const empTable = el("table", {}, [
-      el("tr", {}, [el("th", { text: "Employee" }), el("th", { text: "Cars" }), el("th", { text: "Revenue" }), el("th", { text: "Upsell revenue" })]),
-      ...s.perEmployee.map((e) => el("tr", {}, [el("td", { text: e.name }), el("td", { class: "mono", text: e.cars }), el("td", { class: "mono", text: money(e.revenue) }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(e.upsellRevenue) })])),
+      el("tr", {}, [el("th", { text: "Employee" }), el("th", { text: "Cars worked" }), el("th", { text: "Their upsell revenue" })]),
+      ...s.perEmployee.map((e) => el("tr", {}, [el("td", { text: e.name }), el("td", { class: "mono", text: e.cars }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(e.upsellRevenue) })])),
     ]);
-    body.appendChild(el("div", { class: "card" }, [el("div", { class: "muted", style: "margin-bottom:10px", text: "PER-EMPLOYEE BREAKDOWN" }), empTable]));
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:10px", text: "PER-EMPLOYEE BREAKDOWN" }),
+      el("div", { class: "muted", style: "margin-bottom:10px;font-size:11.5px", text: "Cars worked counts every job a tech was part of, including tag-teamed ones. Upsell revenue only counts what that person personally logged." }),
+      empTable,
+    ]));
 
     const lbTable = el("table", {}, [
       el("tr", {}, [el("th", { text: "Upsell" }), el("th", { text: "Employee" }), el("th", { text: "Times sold" }), el("th", { text: "Revenue" })]),
       ...s.leaderboard.map((r) => el("tr", {}, [el("td", { text: r.upsell }), el("td", { class: "muted", text: r.employee }), el("td", { class: "mono", text: r.count }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(r.revenue) })])),
     ]);
-    body.appendChild(el("div", { class: "card" }, [el("div", { class: "muted", style: "margin-bottom:10px", text: "UPSELL LEADERBOARD BY EMPLOYEE" }), s.leaderboard.length ? lbTable : el("div", { class: "muted", text: "No upsells logged yet this month." })]));
+    body.appendChild(el("div", { class: "card" }, [el("div", { class: "muted", style: "margin-bottom:10px", text: "UPSELL LEADERBOARD BY EMPLOYEE" }), s.leaderboard.length ? lbTable : el("div", { class: "muted", text: "No upsells logged yet in this period." })]));
   }
-  content.appendChild(el("div", { class: "field", style: "max-width:200px" }, [el("label", { text: "Month" }), monthPicker]));
-  monthPicker.addEventListener("change", load);
+  content.appendChild(picker.el);
   content.appendChild(body);
   await load();
 }
 
 async function renderOwnerSales(content) {
-  const monthPicker = el("input", { type: "month", value: new Date().toISOString().slice(0, 7) });
   const body = el("div");
-  async function load() {
-    const sales = await api(`/api/owner/sales?month=${monthPicker.value}`);
+  const picker = renderPeriodPicker((params) => load(params), "month");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const sales = await api(`/api/owner/sales?${qs}`);
     body.innerHTML = "";
-    if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs this month." })); return; }
+    if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
     sales.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((s) => {
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: `${s.car} ${s.syncedFromGHL ? "🔗" : ""}` }),
-            el("div", { class: "muted", text: `${s.date ? s.date.slice(0, 10) : ""} · ${s.employeeName} · ${s.baseService || "no service set"}` }),
+            el("div", { class: "muted", text: `${s.date ? s.date.slice(0, 10) : ""} · ${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
             (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)}` }))) : null,
           ]),
           el("div", { style: "text-align:right" }, [
@@ -239,8 +294,7 @@ async function renderOwnerSales(content) {
       ]));
     });
   }
-  content.appendChild(el("div", { class: "field", style: "max-width:200px" }, [el("label", { text: "Month" }), monthPicker]));
-  monthPicker.addEventListener("change", load);
+  content.appendChild(picker.el);
   content.appendChild(body);
   await load();
 }
@@ -289,43 +343,70 @@ function clear(node) { node.innerHTML = ""; return node; }
 
 // ---------------- Manager job-status board (used by both manager and owner) ----------------
 async function renderManagerJobs(content) {
-  const monthPicker = el("input", { type: "month", value: new Date().toISOString().slice(0, 7) });
   const body = el("div");
-  async function load() {
-    const jobs = await api(`/api/manager/jobs?month=${monthPicker.value}`);
+  const employees = await api("/api/manager/employees");
+  const picker = renderPeriodPicker((params) => load(params), "day");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const jobs = await api(`/api/manager/jobs?${qs}`);
     body.innerHTML = "";
-    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs this month." })); return; }
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
     jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
-      const mkToggle = (field, label) => {
+      const statusBtn = (value, label) => {
+        const active = job.status === value;
+        return el("button", {
+          class: "tab-btn" + (active ? " active" : ""),
+          style: "border-color:" + (active ? "var(--green)" : "var(--border)") + ";color:" + (active ? "var(--green)" : "var(--sub)"),
+          onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ status: active ? "pending" : value }) }); load(); },
+          text: (active ? "✓ " : "") + label,
+        });
+      };
+      const boolBtn = (field, label) => {
         const active = job[field];
         return el("button", {
           class: "tab-btn" + (active ? " active" : ""),
           style: "border-color:" + (active ? "var(--green)" : "var(--border)") + ";color:" + (active ? "var(--green)" : "var(--sub)"),
-          onclick: async () => {
-            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ [field]: !active }) });
-            load();
-          },
+          onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ [field]: !active }) }); load(); },
           text: (active ? "✓ " : "") + label,
         });
       };
+
+      const assignWrap = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:8px" });
+      let selected = new Set(job.employeeIds || []);
+      employees.forEach((emp) => {
+        const chip = el("button", {
+          class: "tab-btn" + (selected.has(emp.id) ? " active" : ""),
+          onclick: async () => {
+            if (selected.has(emp.id)) selected.delete(emp.id); else selected.add(emp.id);
+            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ employeeIds: Array.from(selected) }) });
+            load();
+          },
+          text: emp.name,
+        });
+        assignWrap.appendChild(chip);
+      });
+
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:10px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: job.car }),
-            el("div", { class: "muted", text: `${job.date ? job.date.slice(0, 10) : ""} · ${job.customerName || ""} · ${job.employeeName} · ${job.baseService || "no service set"}` }),
+            el("div", { class: "muted", text: `${job.date ? job.date.slice(0, 10) : ""} · ${job.customerName || ""} · ${job.baseService || "no service set"}` }),
           ]),
           el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
         ]),
-        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
-          mkToggle("arrived", "Arrived"),
-          mkToggle("completed", "Service complete"),
-          mkToggle("paid", "Paid"),
+        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" }, [
+          statusBtn("arrived", "Arrived"),
+          statusBtn("no_show", "No-show"),
+          boolBtn("completed", "Service complete"),
+          boolBtn("paid", "Paid"),
         ]),
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
+        assignWrap,
       ]));
     });
   }
-  content.appendChild(el("div", { class: "field", style: "max-width:200px" }, [el("label", { text: "Month" }), monthPicker]));
-  monthPicker.addEventListener("change", load);
+  content.appendChild(picker.el);
   content.appendChild(body);
   await load();
 }
@@ -371,7 +452,7 @@ async function renderOwnerManagers(content) {
 async function renderTestTool(content) {
   const car = el("input", { placeholder: "Car (e.g. 2023 BMW M3)", value: "2023 BMW M3" });
   const customer = el("input", { placeholder: "Customer name", value: "Test Customer" });
-  const employeeName = el("input", { placeholder: "Employee name (must match Employees tab exactly)", value: "" });
+  const employeeName = el("input", { placeholder: "Employee name(s) — separate multiple with a comma", value: "" });
   const baseService = el("select", {}, [
     el("option", { value: "Window Tint", text: "Window Tint" }),
     el("option", { value: "PPF", text: "PPF" }),
@@ -384,7 +465,7 @@ async function renderTestTool(content) {
     el("div", { class: "muted", style: "margin-bottom:10px", text: "SIMULATE A JOB COMING IN FROM GOHIGHLEVEL — use this to test the whole flow before wiring up the real GHL webhook" }),
     el("div", { class: "field" }, [el("label", { text: "Car" }), car]),
     el("div", { class: "field" }, [el("label", { text: "Customer" }), customer]),
-    el("div", { class: "field" }, [el("label", { text: "Employee name" }), employeeName]),
+    el("div", { class: "field" }, [el("label", { text: "Employee name(s)" }), employeeName]),
     el("div", { class: "field" }, [el("label", { text: "Base service" }), baseService]),
     el("div", { class: "field" }, [el("label", { text: "Base price" }), basePrice]),
     el("button", { class: "primary", onclick: async () => {
