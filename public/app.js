@@ -47,6 +47,7 @@ function render() {
   const content = el("div", { id: "content" });
   app.appendChild(content);
   if (session.role === "owner") renderOwnerTabContent(content);
+  else if (session.role === "manager") renderManagerJobs(content);
   else renderEmployeeTabContent(content);
 }
 
@@ -78,9 +79,14 @@ function renderLogin() {
 }
 
 function renderTabs() {
-  const tabs = session.role === "owner"
-    ? [["owner-summary", "Dashboard"], ["owner-sales", "All jobs"], ["owner-team", "Team"]]
-    : [["jobs", "My jobs"], ["performance", "My performance"]];
+  let tabs;
+  if (session.role === "owner") {
+    tabs = [["owner-summary", "Dashboard"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-test", "Test tool"]];
+  } else if (session.role === "manager") {
+    tabs = [["manager-jobs", "Job status"]];
+  } else {
+    tabs = [["jobs", "My jobs"], ["performance", "My performance"]];
+  }
   const wrap = el("div", { class: "tabs" });
   tabs.forEach(([key, label]) => {
     wrap.appendChild(el("button", {
@@ -93,6 +99,7 @@ function renderTabs() {
   return wrap;
 }
 
+// ---------------- Employee views ----------------
 async function renderEmployeeTabContent(content) {
   if (currentTab === "performance") return renderPerformance(content);
   return renderMyJobs(content);
@@ -168,9 +175,13 @@ async function renderPerformance(content) {
   await load();
 }
 
+// ---------------- Owner views ----------------
 async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
+  if (currentTab === "owner-managers") return renderOwnerManagers(content);
+  if (currentTab === "manager-jobs") return renderManagerJobs(content);
+  if (currentTab === "owner-test") return renderTestTool(content);
   return renderOwnerSummary(content);
 }
 
@@ -275,5 +286,119 @@ async function renderOwnerTeam(content) {
 }
 
 function clear(node) { node.innerHTML = ""; return node; }
+
+// ---------------- Manager job-status board (used by both manager and owner) ----------------
+async function renderManagerJobs(content) {
+  const monthPicker = el("input", { type: "month", value: new Date().toISOString().slice(0, 7) });
+  const body = el("div");
+  async function load() {
+    const jobs = await api(`/api/manager/jobs?month=${monthPicker.value}`);
+    body.innerHTML = "";
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs this month." })); return; }
+    jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
+      const mkToggle = (field, label) => {
+        const active = job[field];
+        return el("button", {
+          class: "tab-btn" + (active ? " active" : ""),
+          style: "border-color:" + (active ? "var(--green)" : "var(--border)") + ";color:" + (active ? "var(--green)" : "var(--sub)"),
+          onclick: async () => {
+            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ [field]: !active }) });
+            load();
+          },
+          text: (active ? "✓ " : "") + label,
+        });
+      };
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row", style: "margin-bottom:10px" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: job.car }),
+            el("div", { class: "muted", text: `${job.date ? job.date.slice(0, 10) : ""} · ${job.customerName || ""} · ${job.employeeName} · ${job.baseService || "no service set"}` }),
+          ]),
+          el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+          mkToggle("arrived", "Arrived"),
+          mkToggle("completed", "Service complete"),
+          mkToggle("paid", "Paid"),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(el("div", { class: "field", style: "max-width:200px" }, [el("label", { text: "Month" }), monthPicker]));
+  monthPicker.addEventListener("change", load);
+  content.appendChild(body);
+  await load();
+}
+
+// ---------------- Owner: manage managers ----------------
+async function renderOwnerManagers(content) {
+  const nameInput = el("input", { placeholder: "Name" });
+  const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
+  const notice = el("div", { class: "notice" });
+  const list = el("div");
+
+  async function loadList() {
+    const managers = await api("/api/managers");
+    list.innerHTML = "";
+    if (managers.length === 0) list.appendChild(el("div", { class: "muted", text: "No managers added yet." }));
+    managers.forEach((m) => {
+      list.appendChild(el("div", { class: "card row" }, [
+        el("div", { style: "flex:1;font-weight:500", text: m.name }),
+        el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+      ]));
+    });
+  }
+
+  content.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD MANAGER — they get their own PIN and a Job Status dashboard only (no revenue, no commissions, no team management)" }),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput,
+      el("button", { class: "primary", onclick: async () => {
+        try {
+          await api("/api/managers", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value }) });
+          nameInput.value = ""; pinInput.value = "";
+          notice.className = "notice ok"; notice.textContent = "Added.";
+          loadList();
+        } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
+      }, text: "Add" }),
+    ]),
+    notice,
+  ]));
+  content.appendChild(list);
+  await loadList();
+}
+
+// ---------------- Owner: built-in webhook test tool ----------------
+async function renderTestTool(content) {
+  const car = el("input", { placeholder: "Car (e.g. 2023 BMW M3)", value: "2023 BMW M3" });
+  const customer = el("input", { placeholder: "Customer name", value: "Test Customer" });
+  const employeeName = el("input", { placeholder: "Employee name (must match Employees tab exactly)", value: "" });
+  const baseService = el("select", {}, [
+    el("option", { value: "Window Tint", text: "Window Tint" }),
+    el("option", { value: "PPF", text: "PPF" }),
+    el("option", { value: "Ceramic Coating", text: "Ceramic Coating" }),
+  ]);
+  const basePrice = el("input", { type: "number", placeholder: "Base price", value: "899" });
+  const notice = el("div", { class: "notice" });
+
+  content.appendChild(el("div", { class: "card", style: "max-width:480px" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "SIMULATE A JOB COMING IN FROM GOHIGHLEVEL — use this to test the whole flow before wiring up the real GHL webhook" }),
+    el("div", { class: "field" }, [el("label", { text: "Car" }), car]),
+    el("div", { class: "field" }, [el("label", { text: "Customer" }), customer]),
+    el("div", { class: "field" }, [el("label", { text: "Employee name" }), employeeName]),
+    el("div", { class: "field" }, [el("label", { text: "Base service" }), baseService]),
+    el("div", { class: "field" }, [el("label", { text: "Base price" }), basePrice]),
+    el("button", { class: "primary", onclick: async () => {
+      try {
+        await api("/api/owner/simulate-webhook", { method: "POST", body: JSON.stringify({
+          date: new Date().toISOString(), customerName: customer.value, car: car.value,
+          employeeName: employeeName.value, baseService: baseService.value, basePrice: basePrice.value,
+        }) });
+        notice.className = "notice ok";
+        notice.textContent = "Test job created — check the \"All jobs\" or \"Job status\" tab to see it.";
+      } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
+    }, text: "Create test job" }),
+    notice,
+  ]));
+}
 
 boot();
