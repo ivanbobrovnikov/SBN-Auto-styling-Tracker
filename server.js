@@ -125,9 +125,16 @@ app.use(express.static(path.join(__dirname, "public")));
 const AUTH_COOKIE = "sbn_auth";
 const AUTH_MAX_AGE = 1000 * 60 * 60 * 24 * 365; // 1 year — stays logged in on a phone indefinitely
 
+function toBase64Url(buf) {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function fromBase64Url(str) {
+  const b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(b64, "base64");
+}
 function signAuth(payload) {
-  const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+  const data = toBase64Url(Buffer.from(JSON.stringify(payload)));
+  const sig = toBase64Url(crypto.createHmac("sha256", SESSION_SECRET).update(data).digest());
   return `${data}.${sig}`;
 }
 function verifyAuth(token) {
@@ -135,9 +142,9 @@ function verifyAuth(token) {
   const parts = token.split(".");
   if (parts.length !== 2) return null;
   const [data, sig] = parts;
-  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+  const expected = toBase64Url(crypto.createHmac("sha256", SESSION_SECRET).update(data).digest());
   if (sig !== expected) return null;
-  try { return JSON.parse(Buffer.from(data, "base64url").toString()); } catch (e) { return null; }
+  try { return JSON.parse(fromBase64Url(data).toString()); } catch (e) { return null; }
 }
 function setAuthCookie(res, payload) {
   res.cookie(AUTH_COOKIE, signAuth(payload), { maxAge: AUTH_MAX_AGE, httpOnly: true, sameSite: "lax" });
