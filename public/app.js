@@ -93,7 +93,7 @@ function render() {
   const content = el("div", { id: "content" });
   app.appendChild(content);
   if (session.role === "owner") renderOwnerTabContent(content);
-  else if (session.role === "manager") renderManagerJobs(content);
+  else if (session.role === "manager") renderManagerTabContent(content);
   else renderEmployeeTabContent(content);
 }
 
@@ -127,9 +127,9 @@ function renderLogin() {
 function renderTabs() {
   let tabs;
   if (session.role === "owner") {
-    tabs = [["owner-summary", "Dashboard"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-test", "Test tool"]];
+    tabs = [["owner-summary", "Dashboard"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-test", "Test tool"]];
   } else if (session.role === "manager") {
-    tabs = [["manager-jobs", "Job status"]];
+    tabs = [["manager-jobs", "Job status"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
   } else {
     tabs = [["jobs", "My jobs"], ["performance", "My performance"]];
   }
@@ -141,7 +141,7 @@ function renderTabs() {
       text: label,
     }));
   });
-  wrap.appendChild(el("button", { class: "tab-btn", style: "margin-left:auto", onclick: async () => { await api("/api/logout", { method: "POST" }); session = { role: null }; render(); }, text: "Log out" }));
+  wrap.appendChild(el("button", { class: "tab-btn", style: "margin-left:auto", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); }, text: "Log out" }));
   return wrap;
 }
 
@@ -224,11 +224,18 @@ async function renderPerformance(content) {
 }
 
 // ---------------- Owner views ----------------
+async function renderManagerTabContent(content) {
+  if (currentTab === "owner-search") return renderSearch(content);
+  if (currentTab === "manager-performance") return renderManagerPerformance(content);
+  return renderManagerJobs(content);
+}
+
 async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
   if (currentTab === "manager-jobs") return renderManagerJobs(content);
+  if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-test") return renderTestTool(content);
   return renderOwnerSummary(content);
 }
@@ -341,17 +348,101 @@ async function renderOwnerTeam(content) {
 
 function clear(node) { node.innerHTML = ""; return node; }
 
-// ---------------- Manager job-status board (used by both manager and owner) ----------------
-async function renderManagerJobs(content) {
+// ---------------- Search — find a job by customer name, phone, email, or car ----------------
+async function renderSearch(content) {
+  const input = el("input", { placeholder: "Search by name, phone, email, or car...", style: "max-width:400px" });
+  const results = el("div", { style: "margin-top:14px" });
+  let timer;
+  async function runSearch() {
+    const q = input.value.trim();
+    if (!q) { results.innerHTML = ""; return; }
+    const rows = await api(`/api/manager/search?q=${encodeURIComponent(q)}`);
+    results.innerHTML = "";
+    if (rows.length === 0) { results.appendChild(el("div", { class: "muted", text: "No matches." })); return; }
+    rows.forEach((s) => {
+      results.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: s.car }),
+            el("div", { class: "muted", text: `${s.customerName || ""}${s.customerPhone ? " · " + s.customerPhone : ""}${s.customerEmail ? " · " + s.customerEmail : ""}` }),
+            el("div", { class: "muted", text: `${s.date ? s.date.slice(0, 10) : ""} · ${s.employeeNames} · ${s.baseService || ""}` }),
+          ]),
+          el("div", { style: "text-align:right" }, [
+            el("div", { class: "mono", style: "color:var(--amber)", text: money(s.total) }),
+            el("div", { class: "muted", style: "font-size:11.5px", text: `${s.status || "pending"}${s.completed ? " · complete" : ""}${s.paid ? " · paid" : ""}` }),
+          ]),
+        ]),
+      ]));
+    });
+  }
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(runSearch, 300); });
+  content.appendChild(el("div", { class: "field" }, [el("label", { text: "Look up a customer, vehicle, or job" }), input]));
+  content.appendChild(results);
+}
+
+// ---------------- Manager's own performance — managers upsell too ----------------
+async function renderManagerPerformance(content) {
   const body = el("div");
-  const employees = await api("/api/manager/employees");
-  const picker = renderPeriodPicker((params) => load(params), "day");
+  const picker = renderPeriodPicker((params) => load(params), "month");
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
+    const stats = await api(`/api/manager/performance?${qs}`);
+    body.innerHTML = "";
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Your upsell revenue" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(stats.upsellRevenue) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars you upsold" }), el("div", { class: "metric-value mono", text: stats.cars })]),
+      stats.commissionRate > 0 ? el("div", { class: "metric" }, [el("div", { class: "metric-label", text: `Est. commission (${stats.commissionRate}%)` }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(stats.commission) })]) : null,
+    ]));
+    if (stats.top && stats.top.length) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "STRONG SUIT" }),
+        ...stats.top.map((t) => el("div", { class: "row", style: "margin-bottom:4px" }, [el("span", { text: t.name }), el("span", { class: "mono muted", text: `${t.count}x · ${money(t.revenue)}` })])),
+      ]));
+    }
+    if (stats.growthArea) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "GROWTH AREA" }),
+        el("div", { class: "row" }, [el("span", { text: stats.growthArea.name }), el("span", { class: "mono muted", text: `${stats.growthArea.count}x · ${money(stats.growthArea.revenue)}` })]),
+      ]));
+    }
+  }
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
+}
+
+// ---------------- Manager job-status board (used by both manager and owner) ----------------
+function renderDayNav(onChange) {
+  const dateInput = el("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
+  function fire() { onChange({ period: "day", date: dateInput.value }); }
+  function shift(delta) {
+    const d = new Date(dateInput.value + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + delta);
+    dateInput.value = d.toISOString().slice(0, 10);
+    fire();
+  }
+  const prev = el("button", { class: "ghost", text: "< Prev day" });
+  prev.addEventListener("click", () => shift(-1));
+  const next = el("button", { class: "ghost", text: "Next day >" });
+  next.addEventListener("click", () => shift(1));
+  const todayBtn = el("button", { class: "ghost", text: "Today" });
+  todayBtn.addEventListener("click", () => { dateInput.value = new Date().toISOString().slice(0, 10); fire(); });
+  dateInput.addEventListener("change", fire);
+  const wrap = el("div", { style: "display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap" }, [prev, dateInput, next, todayBtn]);
+  return { el: wrap, getParams: () => ({ period: "day", date: dateInput.value }) };
+}
+
+async function renderManagerJobs(content) {
+  const body = el("div");
+  const employees = await api("/api/manager/employees");
+  const nav = renderDayNav((params) => load(params));
+  async function load(params) {
+    const p = params || nav.getParams();
+    const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/manager/jobs?${qs}`);
     body.innerHTML = "";
-    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs on this day." })); return; }
     jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
       const statusBtn = (value, label) => {
         const active = job.status === value;
@@ -372,7 +463,7 @@ async function renderManagerJobs(content) {
         });
       };
 
-      const assignWrap = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:8px" });
+      const assignWrap = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap" });
       let selected = new Set(job.employeeIds || []);
       employees.forEach((emp) => {
         const chip = el("button", {
@@ -387,15 +478,19 @@ async function renderManagerJobs(content) {
         assignWrap.appendChild(chip);
       });
 
+      const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)}` })));
+      const upsellForm = renderUpsellForm(job.id, () => load());
+
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:10px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: job.car }),
-            el("div", { class: "muted", text: `${job.date ? job.date.slice(0, 10) : ""} · ${job.customerName || ""} · ${job.baseService || "no service set"}` }),
+            el("div", { class: "muted", text: `${job.customerName || ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }),
+            el("div", { class: "muted", text: job.baseService || "no service set" }),
           ]),
           el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
         ]),
-        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" }, [
+        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
           statusBtn("arrived", "Arrived"),
           statusBtn("no_show", "No-show"),
           boolBtn("completed", "Service complete"),
@@ -403,10 +498,14 @@ async function renderManagerJobs(content) {
         ]),
         el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
         assignWrap,
+        el("div", { style: "margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px" }, [
+          upsellList,
+          upsellForm,
+        ]),
       ]));
     });
   }
-  content.appendChild(picker.el);
+  content.appendChild(nav.el);
   content.appendChild(body);
   await load();
 }
@@ -415,6 +514,7 @@ async function renderManagerJobs(content) {
 async function renderOwnerManagers(content) {
   const nameInput = el("input", { placeholder: "Name" });
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
+  const rateInput = el("input", { type: "number", placeholder: "Commission %", style: "max-width:130px" });
   const notice = el("div", { class: "notice" });
   const list = el("div");
 
@@ -423,20 +523,24 @@ async function renderOwnerManagers(content) {
     list.innerHTML = "";
     if (managers.length === 0) list.appendChild(el("div", { class: "muted", text: "No managers added yet." }));
     managers.forEach((m) => {
+      const rate = el("input", { type: "number", value: m.commissionRate || 0, style: "max-width:80px" });
+      rate.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: m.name }),
+        rate,
+        el("span", { class: "muted", text: "% commission" }),
         el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
       ]));
     });
   }
 
   content.appendChild(el("div", { class: "card" }, [
-    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD MANAGER — they get their own PIN and a Job Status dashboard only (no revenue, no commissions, no team management)" }),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput,
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD MANAGER — they get their own PIN, a Job Status dashboard, search, and their own upsell performance (no shop-wide revenue or other people's commissions)" }),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput,
       el("button", { class: "primary", onclick: async () => {
         try {
-          await api("/api/managers", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value }) });
-          nameInput.value = ""; pinInput.value = "";
+          await api("/api/managers", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value }) });
+          nameInput.value = ""; pinInput.value = ""; rateInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
         } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
@@ -452,6 +556,8 @@ async function renderOwnerManagers(content) {
 async function renderTestTool(content) {
   const car = el("input", { placeholder: "Car (e.g. 2023 BMW M3)", value: "2023 BMW M3" });
   const customer = el("input", { placeholder: "Customer name", value: "Test Customer" });
+  const phone = el("input", { placeholder: "Customer phone", value: "555-123-4567" });
+  const email = el("input", { placeholder: "Customer email", value: "test@example.com" });
   const employeeName = el("input", { placeholder: "Employee name(s) — separate multiple with a comma", value: "" });
   const baseService = el("select", {}, [
     el("option", { value: "Window Tint", text: "Window Tint" }),
@@ -465,17 +571,19 @@ async function renderTestTool(content) {
     el("div", { class: "muted", style: "margin-bottom:10px", text: "SIMULATE A JOB COMING IN FROM GOHIGHLEVEL — use this to test the whole flow before wiring up the real GHL webhook" }),
     el("div", { class: "field" }, [el("label", { text: "Car" }), car]),
     el("div", { class: "field" }, [el("label", { text: "Customer" }), customer]),
+    el("div", { class: "field" }, [el("label", { text: "Phone" }), phone]),
+    el("div", { class: "field" }, [el("label", { text: "Email" }), email]),
     el("div", { class: "field" }, [el("label", { text: "Employee name(s)" }), employeeName]),
     el("div", { class: "field" }, [el("label", { text: "Base service" }), baseService]),
     el("div", { class: "field" }, [el("label", { text: "Base price" }), basePrice]),
     el("button", { class: "primary", onclick: async () => {
       try {
         await api("/api/owner/simulate-webhook", { method: "POST", body: JSON.stringify({
-          date: new Date().toISOString(), customerName: customer.value, car: car.value,
+          date: new Date().toISOString(), customerName: customer.value, customerPhone: phone.value, customerEmail: email.value, car: car.value,
           employeeName: employeeName.value, baseService: baseService.value, basePrice: basePrice.value,
         }) });
         notice.className = "notice ok";
-        notice.textContent = "Test job created — check the \"All jobs\" or \"Job status\" tab to see it.";
+        notice.textContent = "Test job created — check \"All jobs\", \"Job status\", or \"Search\" to see it.";
       } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
     }, text: "Create test job" }),
     notice,
