@@ -1,6 +1,6 @@
 require("dotenv").config();
 const express = require("express");
-const session = require("express-session");
+const cookieParser = require("cookie-parser");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -77,7 +77,7 @@ function saleTotal(sale) {
   return (parseFloat(sale.basePrice) || 0) + saleUpsellTotal(sale);
 }
 
-function upsertSaleFromGHL(db, { date, customerName, car, employeeName, baseService, basePrice, ghlOpportunityId }) {
+function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, baseService, basePrice, ghlOpportunityId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
   const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
@@ -96,6 +96,8 @@ function upsertSaleFromGHL(db, { date, customerName, car, employeeName, baseServ
   }
   sale.date = date || sale.date || new Date().toISOString();
   sale.customerName = customerName || sale.customerName || "";
+  sale.customerPhone = customerPhone || sale.customerPhone || "";
+  sale.customerEmail = customerEmail || sale.customerEmail || "";
   sale.car = car || sale.car || "";
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
@@ -117,39 +119,60 @@ function saleEmployeeIds(sale) {
 // ---------- app setup ----------
 const app = express();
 app.use(express.json());
+app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "public")));
-app.use(
-  session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 24 * 90 }, // 90 days
-  })
-);
+
+const AUTH_COOKIE = "sbn_auth";
+const AUTH_MAX_AGE = 1000 * 60 * 60 * 24 * 365; // 1 year — stays logged in on a phone indefinitely
+
+function signAuth(payload) {
+  const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+  return `${data}.${sig}`;
+}
+function verifyAuth(token) {
+  if (!token) return null;
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  const [data, sig] = parts;
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+  if (sig !== expected) return null;
+  try { return JSON.parse(Buffer.from(data, "base64url").toString()); } catch (e) { return null; }
+}
+function setAuthCookie(res, payload) {
+  res.cookie(AUTH_COOKIE, signAuth(payload), { maxAge: AUTH_MAX_AGE, httpOnly: true, sameSite: "lax" });
+}
+
+// Every request gets req.auth populated from the signed cookie — no server-side session
+// store involved, so logins survive server restarts and redeploys.
+app.use((req, res, next) => {
+  req.auth = verifyAuth(req.cookies[AUTH_COOKIE]) || { role: null };
+  next();
+});
 
 function requireOwner(req, res, next) {
-  if (req.session.role === "owner") return next();
+  if (req.auth.role === "owner") return next();
   return res.status(401).json({ error: "Owner login required." });
 }
 function requireManager(req, res, next) {
-  if (req.session.role === "manager" || req.session.role === "owner") return next();
+  if (req.auth.role === "manager" || req.auth.role === "owner") return next();
   return res.status(401).json({ error: "Manager login required." });
 }
 function requireEmployee(req, res, next) {
-  if (req.session.role === "employee" || req.session.role === "manager" || req.session.role === "owner") return next();
+  if (req.auth.role === "employee" || req.auth.role === "manager" || req.auth.role === "owner") return next();
   return res.status(401).json({ error: "Login required." });
 }
 
 // ---------- session / login ----------
 app.get("/api/session", (req, res) => {
   const db = loadDB();
-  if (req.session.role === "owner") return res.json({ role: "owner" });
-  if (req.session.role === "manager") {
-    const mgr = db.managers.find((m) => m.id === req.session.managerId);
+  if (req.auth.role === "owner") return res.json({ role: "owner" });
+  if (req.auth.role === "manager") {
+    const mgr = db.managers.find((m) => m.id === req.auth.id);
     if (mgr) return res.json({ role: "manager", managerId: mgr.id, name: mgr.name });
   }
-  if (req.session.role === "employee") {
-    const emp = db.employees.find((e) => e.id === req.session.employeeId);
+  if (req.auth.role === "employee") {
+    const emp = db.employees.find((e) => e.id === req.auth.id);
     if (emp) return res.json({ role: "employee", employeeId: emp.id, name: emp.name });
   }
   return res.json({ role: null, ownerPinSet: !!db.ownerPinHash });
@@ -162,7 +185,7 @@ app.post("/api/setup/owner-pin", (req, res) => {
   if (!pin || String(pin).length < 4) return res.status(400).json({ error: "PIN must be at least 4 digits." });
   db.ownerPinHash = hash(pin);
   saveDB(db);
-  req.session.role = "owner";
+  setAuthCookie(res, { role: "owner" });
   res.json({ ok: true });
 });
 
@@ -170,26 +193,25 @@ app.post("/api/login", (req, res) => {
   const db = loadDB();
   const { pin } = req.body;
   if (db.ownerPinHash && hash(pin) === db.ownerPinHash) {
-    req.session.role = "owner";
+    setAuthCookie(res, { role: "owner" });
     return res.json({ role: "owner" });
   }
   const mgr = db.managers.find((m) => m.pinHash === hash(pin));
   if (mgr) {
-    req.session.role = "manager";
-    req.session.managerId = mgr.id;
+    setAuthCookie(res, { role: "manager", id: mgr.id });
     return res.json({ role: "manager", managerId: mgr.id, name: mgr.name });
   }
   const emp = db.employees.find((e) => e.pinHash === hash(pin));
   if (emp) {
-    req.session.role = "employee";
-    req.session.employeeId = emp.id;
+    setAuthCookie(res, { role: "employee", id: emp.id });
     return res.json({ role: "employee", employeeId: emp.id, name: emp.name });
   }
   return res.status(401).json({ error: "Incorrect PIN." });
 });
 
 app.post("/api/logout", (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  res.clearCookie(AUTH_COOKIE);
+  res.json({ ok: true });
 });
 
 // ---------- employees (owner only to manage; employee can read own record) ----------
@@ -229,17 +251,27 @@ app.delete("/api/employees/:id", requireOwner, (req, res) => {
 // ---------- managers (owner only to manage) ----------
 app.get("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json(db.managers.map((m) => ({ id: m.id, name: m.name })));
+  res.json(db.managers.map((m) => ({ id: m.id, name: m.name, commissionRate: m.commissionRate || 0 })));
 });
 
 app.post("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, pin } = req.body;
+  const { name, pin, commissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
-  const mgr = { id: newId(), name: name.trim(), pinHash: hash(pin) };
+  const mgr = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0 };
   db.managers.push(mgr);
   saveDB(db);
-  res.json({ id: mgr.id, name: mgr.name });
+  res.json({ id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate });
+});
+
+app.patch("/api/managers/:id", requireOwner, (req, res) => {
+  const db = loadDB();
+  const mgr = db.managers.find((m) => m.id === req.params.id);
+  if (!mgr) return res.status(404).json({ error: "Not found." });
+  if (req.body.commissionRate !== undefined) mgr.commissionRate = parseFloat(req.body.commissionRate) || 0;
+  if (req.body.pin) mgr.pinHash = hash(req.body.pin);
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 app.delete("/api/managers/:id", requireOwner, (req, res) => {
@@ -317,7 +349,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   const { start, end } = dateRangeFor(req.query);
   const jobs = db.sales.filter((s) => inRange(s.date, start, end));
   res.json(jobs.map((s) => ({
-    id: s.id, date: s.date, customerName: s.customerName, car: s.car,
+    id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     total: saleTotal(s), upsellTotal: saleUpsellTotal(s),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid,
@@ -345,16 +377,19 @@ app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
-  if (req.session.role === "employee" && !saleEmployeeIds(sale).includes(req.session.employeeId)) {
+  if (req.auth.role === "employee" && !saleEmployeeIds(sale).includes(req.auth.id)) {
     return res.status(403).json({ error: "You're not one of the techs assigned to this job." });
   }
   const { name, price } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: "Upsell name is required." });
   sale.upsells = sale.upsells || [];
-  // Attribute the upsell to whichever tech is actually logged in and adding it —
-  // this is what keeps credit correct even when a job is shared by multiple techs.
-  const attributedTo = req.session.role === "employee" ? req.session.employeeId : (req.body.employeeId || null);
-  sale.upsells.push({ id: newId(), name: name.trim(), price: parseFloat(price) || 0, employeeId: attributedTo });
+  // Whoever is actually logged in and adding this — tech or manager — gets personal credit for it.
+  const upsell = { id: newId(), name: name.trim(), price: parseFloat(price) || 0, employeeId: null, managerId: null };
+  if (req.auth.role === "employee") upsell.employeeId = req.auth.id;
+  else if (req.auth.role === "manager") upsell.managerId = req.auth.id;
+  else if (req.body.employeeId) upsell.employeeId = req.body.employeeId;
+  else if (req.body.managerId) upsell.managerId = req.body.managerId;
+  sale.upsells.push(upsell);
   saveDB(db);
   res.json({ ok: true });
 });
@@ -363,7 +398,7 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.saleId);
   if (!sale) return res.status(404).json({ error: "Job not found." });
-  if (req.session.role === "employee" && !saleEmployeeIds(sale).includes(req.session.employeeId)) {
+  if (req.auth.role === "employee" && !saleEmployeeIds(sale).includes(req.auth.id)) {
     return res.status(403).json({ error: "You're not one of the techs assigned to this job." });
   }
   sale.upsells = (sale.upsells || []).filter((u) => u.id !== req.params.upsellId);
@@ -374,7 +409,7 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
 // ---------- employee's own data only — server enforces this, ignores any client-supplied id ----------
 app.get("/api/my/jobs", requireEmployee, (req, res) => {
   const db = loadDB();
-  const employeeId = req.session.role === "owner" && req.query.employeeId ? req.query.employeeId : req.session.employeeId;
+  const employeeId = req.auth.role === "owner" && req.query.employeeId ? req.query.employeeId : req.auth.id;
   const jobs = db.sales
     .filter((s) => saleEmployeeIds(s).includes(employeeId))
     .map((s) => {
@@ -399,7 +434,7 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
 
 app.get("/api/my/performance", requireEmployee, (req, res) => {
   const db = loadDB();
-  const employeeId = req.session.role === "owner" && req.query.employeeId ? req.query.employeeId : req.session.employeeId;
+  const employeeId = req.auth.role === "owner" && req.query.employeeId ? req.query.employeeId : req.auth.id;
   const { start, end } = dateRangeFor(req.query);
   const emp = db.employees.find((e) => e.id === employeeId);
   const mine = db.sales.filter((s) => saleEmployeeIds(s).includes(employeeId) && inRange(s.date, start, end));
@@ -427,6 +462,59 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: emp ? emp.commissionRate : 0, commission,
   });
+});
+
+// ---------- manager's own upsell performance — managers upsell too, and get credited personally ----------
+app.get("/api/manager/performance", requireManager, (req, res) => {
+  const db = loadDB();
+  const managerId = req.auth.role === "owner" && req.query.managerId ? req.query.managerId : req.auth.id;
+  const { start, end } = dateRangeFor(req.query);
+  const mgr = db.managers.find((m) => m.id === managerId);
+
+  const myUpsells = (s) => (s.upsells || []).filter((u) => u.managerId === managerId);
+  const relevant = db.sales.filter((s) => inRange(s.date, start, end) && myUpsells(s).length > 0);
+  const upsellRev = relevant.reduce((a, s) => a + myUpsells(s).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
+  const cars = relevant.length;
+
+  const breakdown = {};
+  relevant.forEach((s) => myUpsells(s).forEach((u) => {
+    const k = u.name.trim();
+    breakdown[k] = breakdown[k] || { name: k, count: 0, revenue: 0 };
+    breakdown[k].count += 1;
+    breakdown[k].revenue += parseFloat(u.price) || 0;
+  }));
+  const sorted = Object.values(breakdown).sort((a, b) => b.revenue - a.revenue);
+  const commission = mgr && mgr.commissionRate ? upsellRev * (mgr.commissionRate / 100) : 0;
+
+  res.json({
+    cars, upsellRevenue: upsellRev,
+    top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
+    commissionRate: mgr ? mgr.commissionRate : 0, commission,
+  });
+});
+
+// ---------- contact/vehicle search — find a job by customer name, phone, email, or car ----------
+app.get("/api/manager/search", requireManager, (req, res) => {
+  const db = loadDB();
+  const q = String(req.query.q || "").trim().toLowerCase();
+  if (!q) return res.json([]);
+  const results = db.sales.filter((s) =>
+    (s.customerName || "").toLowerCase().includes(q) ||
+    (s.customerPhone || "").toLowerCase().includes(q) ||
+    (s.customerEmail || "").toLowerCase().includes(q) ||
+    (s.car || "").toLowerCase().includes(q) ||
+    (s.employeeNames || "").toLowerCase().includes(q)
+  );
+  res.json(results
+    .sort((a, b) => (a.date < b.date ? 1 : -1))
+    .slice(0, 50)
+    .map((s) => ({
+      id: s.id, date: s.date, car: s.car, customerName: s.customerName,
+      customerPhone: s.customerPhone, customerEmail: s.customerEmail,
+      employeeNames: s.employeeNames, baseService: s.baseService,
+      total: saleTotal(s), status: s.status, completed: !!s.completed, paid: !!s.paid,
+    }))
+  );
 });
 
 // ---------- owner-only: everything ----------
