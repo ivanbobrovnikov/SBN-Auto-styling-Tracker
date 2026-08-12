@@ -29,27 +29,47 @@ function formatDateTime(iso) {
 }
 
 // Reusable Day / Week / Month / Year selector. Calls onChange({period, date, month}) whenever it changes.
+function nextOrTodayTuesday(fromDateStr) {
+  const d = new Date(fromDateStr + "T00:00:00Z");
+  const day = d.getUTCDay(); // 0=Sun ... 2=Tue
+  const diff = (2 - day + 7) % 7;
+  d.setUTCDate(d.getUTCDate() + diff);
+  return d.toISOString().slice(0, 10);
+}
+
 function renderPeriodPicker(onChange, defaultPeriod = "month") {
   let period = defaultPeriod;
   const today = new Date().toISOString().slice(0, 10);
-  const dayInput = el("input", { type: "date", value: today, style: "display:none" });
-  const weekInput = el("input", { type: "date", value: today, style: "display:none" });
-  const monthInput = el("input", { type: "month", value: today.slice(0, 7) });
-  const yearInput = el("input", { type: "number", value: String(new Date().getFullYear()), style: "display:none;max-width:100px" });
+  const vis = (key) => (period === key ? "" : "display:none");
+  const dayInput = el("input", { type: "date", value: today, style: vis("day") });
+  const weekInput = el("input", { type: "date", value: today, style: vis("week") });
+  const monthInput = el("input", { type: "month", value: today.slice(0, 7), style: vis("month") });
+  const yearInput = el("input", { type: "number", value: String(new Date().getFullYear()), style: vis("year") + ";max-width:100px" });
+  const payPeriodInput = el("input", { type: "date", value: nextOrTodayTuesday(today), style: vis("payperiod") });
+  const payPeriodLabel = el("div", { class: "muted", style: `font-size:11.5px;${vis("payperiod")}` });
+
+  function updatePayPeriodLabel() {
+    const end = new Date(payPeriodInput.value + "T00:00:00Z");
+    const start = new Date(end);
+    start.setUTCDate(start.getUTCDate() - 13);
+    const fmt = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)}`;
+  }
 
   function currentParams() {
     if (period === "day") return { period, date: dayInput.value };
     if (period === "week") return { period, date: weekInput.value };
     if (period === "year") return { period, date: `${yearInput.value}-01-01` };
+    if (period === "payperiod") return { period, date: payPeriodInput.value };
     return { period: "month", month: monthInput.value };
   }
   function fire() { onChange(currentParams()); }
 
-  const periodTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px" });
-  ["day", "week", "month", "year"].forEach((p) => {
+  const periodTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" });
+  [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["payperiod", "Pay period"]].forEach(([p, label]) => {
     const btn = el("button", {
       class: "tab-btn" + (p === period ? " active" : ""),
-      text: p.charAt(0).toUpperCase() + p.slice(1),
+      text: label,
     });
     btn.addEventListener("click", () => {
       period = p;
@@ -58,6 +78,9 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
       weekInput.style.display = p === "week" ? "" : "none";
       monthInput.style.display = p === "month" ? "" : "none";
       yearInput.style.display = p === "year" ? "" : "none";
+      payPeriodInput.style.display = p === "payperiod" ? "" : "none";
+      payPeriodLabel.style.display = p === "payperiod" ? "" : "none";
+      if (p === "payperiod") updatePayPeriodLabel();
       btn.classList.add("active");
       fire();
     });
@@ -65,11 +88,14 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
   });
 
   [dayInput, weekInput, monthInput, yearInput].forEach((inp) => inp.addEventListener("change", fire));
+  payPeriodInput.addEventListener("change", () => { updatePayPeriodLabel(); fire(); });
+  if (period === "payperiod") updatePayPeriodLabel();
 
-  const wrap = el("div", { class: "field", style: "max-width:260px" }, [
+  const wrap = el("div", { class: "field", style: "max-width:320px" }, [
     el("label", { text: "Time period" }),
     periodTabs,
-    dayInput, weekInput, monthInput, yearInput,
+    dayInput, weekInput, monthInput, yearInput, payPeriodInput,
+    payPeriodLabel,
   ]);
   return { el: wrap, getParams: currentParams };
 }
@@ -263,7 +289,7 @@ async function renderOwnerTabContent(content) {
 // shop-wide combined total for comparison. This is the page built specifically for running pay.
 async function renderOwnerPayroll(content) {
   const body = el("div");
-  const picker = renderPeriodPicker((params) => load(params), "month");
+  const picker = renderPeriodPicker((params) => load(params), "payperiod");
 
   function personCard(p, subtitle) {
     const upsellRows = p.upsells.length
