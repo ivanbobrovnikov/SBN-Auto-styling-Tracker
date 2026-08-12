@@ -340,13 +340,59 @@ async function renderOwnerPayroll(content) {
   await load();
 }
 
+function openPrintableReport(title, s, periodLabel) {
+  const win = window.open("", "_blank");
+  const rowsEmp = s.perEmployee.map((e) => `<tr><td>${e.name}</td><td>${e.cars}</td><td>${money(e.upsellRevenue)}</td></tr>`).join("");
+  const rowsLb = s.leaderboard.map((r) => `<tr><td>${r.upsell}</td><td>${r.employee}</td><td>${r.count}</td><td>${money(r.revenue)}</td></tr>`).join("");
+  win.document.write(`
+    <html><head><title>${title}</title>
+    <style>
+      body { font-family: Arial, sans-serif; color: #111; padding: 30px; }
+      h1 { font-size: 20px; margin-bottom: 2px; }
+      .sub { color: #666; font-size: 13px; margin-bottom: 20px; }
+      .metrics { display: flex; gap: 24px; margin-bottom: 24px; flex-wrap: wrap; }
+      .metric { border: 1px solid #ddd; border-radius: 6px; padding: 10px 16px; }
+      .metric-label { font-size: 11px; color: #666; text-transform: uppercase; }
+      .metric-value { font-size: 20px; font-weight: 600; }
+      table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 13px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; }
+      th { color: #666; font-weight: 600; }
+      h2 { font-size: 14px; margin: 20px 0 8px; }
+    </style></head>
+    <body>
+      <h1>SBN Autostyling Tracker — ${title}</h1>
+      <div class="sub">${periodLabel}</div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-label">Total revenue</div><div class="metric-value">${money(s.totalRevenue)}</div></div>
+        <div class="metric"><div class="metric-label">Total upsell revenue</div><div class="metric-value">${money(s.totalUpsellRevenue)}</div></div>
+        <div class="metric"><div class="metric-label">Upsell % of revenue</div><div class="metric-value">${pct(s.upsellPercentOfRevenue)}</div></div>
+        <div class="metric"><div class="metric-label">Cars serviced</div><div class="metric-value">${s.carCount}</div></div>
+      </div>
+      <h2>Per-employee breakdown</h2>
+      <table><tr><th>Employee</th><th>Cars worked</th><th>Upsell revenue</th></tr>${rowsEmp}</table>
+      <h2>Upsell leaderboard</h2>
+      <table><tr><th>Upsell</th><th>Employee</th><th>Times sold</th><th>Revenue</th></tr>${rowsLb}</table>
+    </body></html>
+  `);
+  win.document.close();
+  setTimeout(() => win.print(), 300);
+}
+
 async function renderOwnerSummary(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "month");
+  let lastSummary = null, lastQs = "";
+  const actions = el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" }, [
+    el("button", { class: "ghost", text: "Print report", onclick: () => { if (lastSummary) openPrintableReport("Dashboard report", lastSummary, lastQs); } }),
+    el("a", { href: "#", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Export CSV", onclick: (e) => { e.preventDefault(); window.location.href = `/api/owner/export/csv?${lastQs}`; } }),
+    el("a", { href: "/api/owner/backup", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Download full backup" }),
+  ]);
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
+    lastQs = qs;
     const s = await api(`/api/owner/summary?${qs}`);
+    lastSummary = s;
     body.innerHTML = "";
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total revenue" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(s.totalRevenue) })]),
@@ -372,6 +418,7 @@ async function renderOwnerSummary(content) {
     body.appendChild(el("div", { class: "card" }, [el("div", { class: "muted", style: "margin-bottom:10px", text: "UPSELL LEADERBOARD BY EMPLOYEE" }), s.leaderboard.length ? lbTable : el("div", { class: "muted", text: "No upsells logged yet in this period." })]));
   }
   content.appendChild(picker.el);
+  content.appendChild(actions);
   content.appendChild(body);
   await load();
 }
