@@ -652,13 +652,18 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
     const myUpsellRevenue = sales.reduce((a, s) => a + (s.upsells || []).filter((u) => u.employeeId === emp.id).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
     return { id: emp.id, name: emp.name, cars: carsWorked.length, upsellRevenue: myUpsellRevenue };
   });
+  // Managers upsell too — same idea, but they're not "assigned" to cars the way techs are,
+  // so there's no cars-worked count for them, just their own upsell revenue.
+  const perManager = db.managers.map((mgr) => {
+    const myUpsellRevenue = sales.reduce((a, s) => a + (s.upsells || []).filter((u) => u.managerId === mgr.id).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
+    return { id: mgr.id, name: mgr.name, upsellRevenue: myUpsellRevenue };
+  });
 
   const leaderboard = [];
   const grouped = {};
-  sales.forEach((s) => (s.upsells || []).forEach((u) => {
-    const empName = (db.employees.find((e) => e.id === u.employeeId) || {}).name || "Unassigned";
-    const key = u.name.trim() + "||" + empName;
-    grouped[key] = grouped[key] || { upsell: u.name.trim(), employee: empName, count: 0, revenue: 0 };
+  sales.forEach((s) => resolveUpsellNames(s.upsells, db).forEach((u) => {
+    const key = u.name.trim() + "||" + u.attributedToName;
+    grouped[key] = grouped[key] || { upsell: u.name.trim(), employee: u.attributedToName, count: 0, revenue: 0 };
     grouped[key].count += 1;
     grouped[key].revenue += parseFloat(u.price) || 0;
   }));
@@ -667,7 +672,7 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   res.json({
     totalRevenue, totalUpsellRevenue: totalUpsell,
     upsellPercentOfRevenue: totalRevenue ? (totalUpsell / totalRevenue) * 100 : 0,
-    carCount, attachRate, perEmployee, leaderboard,
+    carCount, attachRate, perEmployee, perManager, leaderboard,
   });
 });
 
