@@ -133,7 +133,7 @@ function renderLogin() {
 function renderTabs() {
   let tabs;
   if (session.role === "owner") {
-    tabs = [["owner-summary", "Dashboard"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-test", "Test tool"]];
+    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-test", "Test tool"]];
   } else if (session.role === "manager") {
     tabs = [["manager-jobs", "Job status"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
   } else {
@@ -250,12 +250,68 @@ async function renderManagerTabContent(content) {
 
 async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
+  if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
   if (currentTab === "manager-jobs") return renderManagerJobs(content);
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-test") return renderTestTool(content);
   return renderOwnerSummary(content);
+}
+
+// Payroll — every person's own upsells grouped together, their commission owed, and the
+// shop-wide combined total for comparison. This is the page built specifically for running pay.
+async function renderOwnerPayroll(content) {
+  const body = el("div");
+  const picker = renderPeriodPicker((params) => load(params), "month");
+
+  function personCard(p, subtitle) {
+    const upsellRows = p.upsells.length
+      ? p.upsells.map((u) => el("div", { class: "row", style: "margin-bottom:3px" }, [
+          el("span", { style: "font-size:13px", text: u.name }),
+          el("span", { class: "mono muted", style: "font-size:13px", text: `${u.count}x · ${money(u.revenue)}` }),
+        ]))
+      : [el("div", { class: "muted", style: "font-size:12.5px", text: "No upsells logged in this period." })];
+
+    return el("div", { class: "card" }, [
+      el("div", { class: "row", style: "margin-bottom:2px" }, [
+        el("div", { class: "oswald", style: "font-size:15px", text: p.name }),
+        el("div", { class: "mono", style: "color:var(--cyan);font-size:16px", text: money(p.upsellRevenue) }),
+      ]),
+      el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: subtitle }),
+      el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-bottom:8px" }, upsellRows),
+      p.commissionRate > 0
+        ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
+            el("span", { class: "muted", style: "font-size:12.5px", text: `Commission owed (${p.commissionRate}% of upsells)` }),
+            el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.commission) }),
+          ])
+        : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No commission rate set for this person." }),
+    ]);
+  }
+
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const d = await api(`/api/owner/payroll?${qs}`);
+    body.innerHTML = "";
+
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Combined upsell revenue — everyone" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(d.shopTotalUpsellRevenue) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission owed" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.employees.reduce((a, e) => a + e.commission, 0) + d.managers.reduce((a, m) => a + m.commission, 0)) })]),
+    ]));
+
+    body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "EMPLOYEES — EACH PERSON'S OWN UPSELLS" }));
+    if (d.employees.length === 0) body.appendChild(el("div", { class: "muted", text: "No employees added yet." }));
+    d.employees.forEach((e) => body.appendChild(personCard(e, `${e.carsWorked} car${e.carsWorked !== 1 ? "s" : ""} worked · ${e.upsellCount} upsell${e.upsellCount !== 1 ? "s" : ""} sold`)));
+
+    if (d.managers.length > 0) {
+      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "MANAGERS — EACH PERSON'S OWN UPSELLS" }));
+      d.managers.forEach((m) => body.appendChild(personCard(m, `${m.upsellCount} upsell${m.upsellCount !== 1 ? "s" : ""} sold`)));
+    }
+  }
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
 }
 
 async function renderOwnerSummary(content) {
