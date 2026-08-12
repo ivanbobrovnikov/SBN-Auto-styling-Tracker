@@ -547,6 +547,43 @@ app.get("/api/owner/sales", requireOwner, (req, res) => {
   res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db) })));
 });
 
+// Payroll view — every person's own upsells grouped together (for paying commission),
+// plus the shop-wide combined total for comparison. Owner-only.
+app.get("/api/owner/payroll", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const sales = db.sales.filter((s) => inRange(s.date, start, end));
+  const shopTotalUpsellRevenue = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
+
+  function personBreakdown(idField, id) {
+    const mine = [];
+    sales.forEach((s) => (s.upsells || []).forEach((u) => { if (u[idField] === id) mine.push(u); }));
+    const revenue = mine.reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
+    const grouped = {};
+    mine.forEach((u) => {
+      const k = u.name.trim();
+      grouped[k] = grouped[k] || { name: k, count: 0, revenue: 0 };
+      grouped[k].count += 1;
+      grouped[k].revenue += parseFloat(u.price) || 0;
+    });
+    return { revenue, count: mine.length, items: Object.values(grouped).sort((a, b) => b.revenue - a.revenue) };
+  }
+
+  const employees = db.employees.map((emp) => {
+    const b = personBreakdown("employeeId", emp.id);
+    const carsWorked = sales.filter((s) => saleEmployeeIds(s).includes(emp.id)).length;
+    const commission = emp.commissionRate ? b.revenue * (emp.commissionRate / 100) : 0;
+    return { id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items };
+  });
+  const managers = db.managers.map((mgr) => {
+    const b = personBreakdown("managerId", mgr.id);
+    const commission = mgr.commissionRate ? b.revenue * (mgr.commissionRate / 100) : 0;
+    return { id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items };
+  });
+
+  res.json({ shopTotalUpsellRevenue, employees, managers });
+});
+
 app.get("/api/owner/summary", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
