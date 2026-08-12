@@ -52,6 +52,15 @@ function dateRangeFor(query) {
     sunday.setUTCHours(23, 59, 59, 999);
     start = monday.toISOString();
     end = sunday.toISOString();
+  } else if (period === "payperiod") {
+    // Your biweekly pay period: 14 days ending on the payroll-processing Tuesday you pick,
+    // starting the Wednesday 13 days before it.
+    const endDate = query.date ? new Date(query.date + "T23:59:59.999Z") : new Date();
+    const startDate = new Date(endDate);
+    startDate.setUTCDate(startDate.getUTCDate() - 13);
+    startDate.setUTCHours(0, 0, 0, 0);
+    start = startDate.toISOString();
+    end = endDate.toISOString();
   } else if (period === "year") {
     const y = query.date ? query.date.slice(0, 4) : String(ref.getUTCFullYear());
     start = `${y}-01-01T00:00:00.000Z`;
