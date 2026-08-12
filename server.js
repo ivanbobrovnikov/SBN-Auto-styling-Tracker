@@ -443,10 +443,12 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
 // ---------- employee's own data only — server enforces this, ignores any client-supplied id ----------
 // The full schedule — every job, not just ones a tech is assigned to. Assignment (who worked
 // the car) is now purely a manager-entered record for pay purposes; it doesn't gate who can
-// log an upsell. Every upsell already knows who personally sold it (resolveUpsellNames).
+// log an upsell. But what shows here is only the upsells THIS person personally logged —
+// not a teammate's, even on a shared car. (Managers still see everyone's, on their own board.)
 app.get("/api/my/jobs", requireEmployee, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
+  const myId = req.auth.id;
   const jobs = db.sales
     .filter((s) => inRange(s.date, start, end))
     .map((s) => ({
@@ -456,7 +458,7 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       baseService: s.baseService,
       employeeNames: s.employeeNames || "Unassigned",
       status: s.status || "pending",
-      upsells: resolveUpsellNames(s.upsells, db),
+      upsells: resolveUpsellNames((s.upsells || []).filter((u) => u.employeeId === myId), db),
       // basePrice and total sale $ intentionally NOT sent to employees
     }));
   res.json(jobs);
