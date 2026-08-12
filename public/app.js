@@ -21,6 +21,12 @@ async function api(path, opts = {}) {
 }
 function money(n) { return "$" + (Math.round((n || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function pct(n) { return isFinite(n) ? Math.round(n) + "%" : "0%"; }
+function formatDateTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso.slice(0, 10);
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
 
 // Reusable Day / Week / Month / Year selector. Calls onChange({period, date, month}) whenever it changes.
 function renderPeriodPicker(onChange, defaultPeriod = "month") {
@@ -131,7 +137,7 @@ function renderTabs() {
   } else if (session.role === "manager") {
     tabs = [["manager-jobs", "Job status"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
   } else {
-    tabs = [["jobs", "My jobs"], ["performance", "My performance"]];
+    tabs = [["jobs", "My jobs"], ["schedule", "Schedule"], ["performance", "My performance"]];
   }
   const wrap = el("div", { class: "tabs" });
   tabs.forEach(([key, label]) => {
@@ -148,6 +154,7 @@ function renderTabs() {
 // ---------------- Employee views ----------------
 async function renderEmployeeTabContent(content) {
   if (currentTab === "performance") return renderPerformance(content);
+  if (currentTab === "schedule") return renderSchedule(content);
   return renderMyJobs(content);
 }
 
@@ -164,7 +171,7 @@ async function renderMyJobs(content) {
       el("div", { class: "row" }, [
         el("div", {}, [
           el("div", { style: "font-weight:500", text: job.car }),
-          el("div", { class: "muted", text: `${job.date ? job.date.slice(0, 10) : ""} · ${job.baseService || "Service not set"}` }),
+          el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || "Service not set"}` }),
           job.teammates && job.teammates.length ? el("div", { class: "muted", style: "margin-top:2px", text: `With: ${job.teammates.join(", ")}` }) : null,
         ]),
         el("div", { class: "mono", style: "color:var(--cyan)", text: money(job.upsellTotal) + " upsold by you" }),
@@ -173,6 +180,35 @@ async function renderMyJobs(content) {
       upsellForm,
     ]));
   });
+}
+
+// Full shop schedule — every booked job, not just ones assigned to this person.
+// No price or customer contact info shown here; that's manager/owner-only.
+async function renderSchedule(content) {
+  const body = el("div");
+  const nav = renderDayNav((params) => load(params));
+  async function load(params) {
+    const p = params || nav.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const jobs = await api(`/api/my/schedule?${qs}`);
+    body.innerHTML = "";
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
+    jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: job.car }),
+            el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || "no service set"}` }),
+            el("div", { class: "muted", text: `Assigned: ${job.employeeNames}` }),
+          ]),
+          el("div", { class: "muted", text: job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : "Upcoming" }),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(nav.el);
+  content.appendChild(body);
+  await load();
 }
 
 function renderUpsellForm(jobId, onDone) {
@@ -290,11 +326,12 @@ async function renderOwnerSales(content) {
         el("div", { class: "row" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: `${s.car} ${s.syncedFromGHL ? "🔗" : ""}` }),
-            el("div", { class: "muted", text: `${s.date ? s.date.slice(0, 10) : ""} · ${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
+            el("div", { class: "muted", text: `${formatDateTime(s.date)} · ${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
             (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)}` }))) : null,
           ]),
           el("div", { style: "text-align:right" }, [
             el("div", { class: "mono", style: "color:var(--amber);font-size:17px", text: money(s.total) }),
+            s.paid ? el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: "Unpaid" }),
             el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${s.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
           ]),
         ]),
@@ -365,11 +402,11 @@ async function renderSearch(content) {
           el("div", {}, [
             el("div", { style: "font-weight:500", text: s.car }),
             el("div", { class: "muted", text: `${s.customerName || ""}${s.customerPhone ? " · " + s.customerPhone : ""}${s.customerEmail ? " · " + s.customerEmail : ""}` }),
-            el("div", { class: "muted", text: `${s.date ? s.date.slice(0, 10) : ""} · ${s.employeeNames} · ${s.baseService || ""}` }),
+            el("div", { class: "muted", text: `${formatDateTime(s.date)} · ${s.employeeNames} · ${s.baseService || ""}` }),
           ]),
           el("div", { style: "text-align:right" }, [
             el("div", { class: "mono", style: "color:var(--amber)", text: money(s.total) }),
-            el("div", { class: "muted", style: "font-size:11.5px", text: `${s.status || "pending"}${s.completed ? " · complete" : ""}${s.paid ? " · paid" : ""}` }),
+            el("div", { class: "muted", style: "font-size:11.5px", text: `${s.status || "pending"}${s.completed ? " · complete" : ""}${s.paid ? " · paid (" + (s.paymentMethod === "cash" ? "cash" : "card") + ")" : " · unpaid"}` }),
           ]),
         ]),
       ]));
@@ -462,6 +499,15 @@ async function renderManagerJobs(content) {
           text: (active ? "✓ " : "") + label,
         });
       };
+      const paymentBtn = (value, label) => {
+        const active = job.paymentMethod === value;
+        return el("button", {
+          class: "tab-btn" + (active ? " active" : ""),
+          style: "border-color:" + (active ? "var(--green)" : "var(--border)") + ";color:" + (active ? "var(--green)" : "var(--sub)"),
+          onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ paymentMethod: active ? null : value }) }); load(); },
+          text: (active ? "✓ " : "") + label,
+        });
+      };
 
       const assignWrap = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap" });
       let selected = new Set(job.employeeIds || []);
@@ -485,7 +531,7 @@ async function renderManagerJobs(content) {
         el("div", { class: "row", style: "margin-bottom:10px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: job.car }),
-            el("div", { class: "muted", text: `${job.customerName || ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }),
+            el("div", { class: "muted", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }),
             el("div", { class: "muted", text: job.baseService || "no service set" }),
           ]),
           el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
@@ -494,7 +540,8 @@ async function renderManagerJobs(content) {
           statusBtn("arrived", "Arrived"),
           statusBtn("no_show", "No-show"),
           boolBtn("completed", "Service complete"),
-          boolBtn("paid", "Paid"),
+          paymentBtn("cash", "Paid — Cash"),
+          paymentBtn("card", "Paid — Card"),
         ]),
         el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
         assignWrap,
