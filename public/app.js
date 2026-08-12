@@ -137,7 +137,7 @@ function renderTabs() {
   } else if (session.role === "manager") {
     tabs = [["manager-jobs", "Job status"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
   } else {
-    tabs = [["jobs", "My jobs"], ["schedule", "Schedule"], ["performance", "My performance"]];
+    tabs = [["schedule", "Schedule"], ["performance", "My performance"]];
   }
   const wrap = el("div", { class: "tabs" });
   tabs.forEach(([key, label]) => {
@@ -154,55 +154,37 @@ function renderTabs() {
 // ---------------- Employee views ----------------
 async function renderEmployeeTabContent(content) {
   if (currentTab === "performance") return renderPerformance(content);
-  if (currentTab === "schedule") return renderSchedule(content);
-  return renderMyJobs(content);
+  return renderSchedule(content);
 }
 
-async function renderMyJobs(content) {
-  const jobs = await api("/api/my/jobs");
-  content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: `Logged in as ${session.name}` }));
-  if (jobs.length === 0) { content.appendChild(el("div", { class: "muted", text: "No jobs assigned to you yet." })); return; }
-  jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
-    const upsellForm = renderUpsellForm(job.id, () => renderMyJobs(clear(content)));
-    const upsellList = el("div", {}, (job.upsells || []).map((u) =>
-      el("span", { class: "pill", text: `${u.name} — ${money(u.price)}` })
-    ));
-    content.appendChild(el("div", { class: "card" }, [
-      el("div", { class: "row" }, [
-        el("div", {}, [
-          el("div", { style: "font-weight:500", text: job.car }),
-          el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || "Service not set"}` }),
-          job.teammates && job.teammates.length ? el("div", { class: "muted", style: "margin-top:2px", text: `With: ${job.teammates.join(", ")}` }) : null,
-        ]),
-        el("div", { class: "mono", style: "color:var(--cyan)", text: money(job.upsellTotal) + " upsold by you" }),
-      ]),
-      upsellList,
-      upsellForm,
-    ]));
-  });
-}
-
-// Full shop schedule — every booked job, not just ones assigned to this person.
-// No price or customer contact info shown here; that's manager/owner-only.
+// Full schedule — every booked job, every employee sees the same list. Clicking any car
+// lets you log an upsell on it, regardless of whether you're the one assigned to work it.
+// Who worked the car (employeeNames) is a manager-entered record now, shown for context only.
+// No base price or total sale $ shown here — that stays owner/manager-only.
 async function renderSchedule(content) {
   const body = el("div");
   const nav = renderDayNav((params) => load(params));
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
-    const jobs = await api(`/api/my/schedule?${qs}`);
+    const jobs = await api(`/api/my/jobs?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
     jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
+      const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) =>
+        el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })
+      ));
+      const upsellForm = renderUpsellForm(job.id, () => load());
       body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "row" }, [
+        el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: job.car }),
             el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || "no service set"}` }),
-            el("div", { class: "muted", text: `Assigned: ${job.employeeNames}` }),
+            el("div", { class: "muted", text: `Worked by: ${job.employeeNames}` }),
           ]),
           el("div", { class: "muted", text: job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : "Upcoming" }),
         ]),
+        el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [upsellList, upsellForm]),
       ]));
     });
   }
@@ -327,7 +309,7 @@ async function renderOwnerSales(content) {
           el("div", {}, [
             el("div", { style: "font-weight:500", text: `${s.car} ${s.syncedFromGHL ? "🔗" : ""}` }),
             el("div", { class: "muted", text: `${formatDateTime(s.date)} · ${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
-            (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)}` }))) : null,
+            (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }))) : null,
           ]),
           el("div", { style: "text-align:right" }, [
             el("div", { class: "mono", style: "color:var(--amber);font-size:17px", text: money(s.total) }),
@@ -397,6 +379,9 @@ async function renderSearch(content) {
     results.innerHTML = "";
     if (rows.length === 0) { results.appendChild(el("div", { class: "muted", text: "No matches." })); return; }
     rows.forEach((s) => {
+      const upsellPills = (s.upsells || []).length
+        ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })))
+        : null;
       results.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row" }, [
           el("div", {}, [
@@ -409,6 +394,7 @@ async function renderSearch(content) {
             el("div", { class: "muted", style: "font-size:11.5px", text: `${s.status || "pending"}${s.completed ? " · complete" : ""}${s.paid ? " · paid (" + (s.paymentMethod === "cash" ? "cash" : "card") + ")" : " · unpaid"}` }),
           ]),
         ]),
+        upsellPills,
       ]));
     });
   }
@@ -524,7 +510,7 @@ async function renderManagerJobs(content) {
         assignWrap.appendChild(chip);
       });
 
-      const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)}` })));
+      const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })));
       const upsellForm = renderUpsellForm(job.id, () => load());
 
       body.appendChild(el("div", { class: "card" }, [
