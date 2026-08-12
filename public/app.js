@@ -343,6 +343,7 @@ async function renderOwnerPayroll(content) {
 function openPrintableReport(title, s, periodLabel) {
   const win = window.open("", "_blank");
   const rowsEmp = s.perEmployee.map((e) => `<tr><td>${e.name}</td><td>${e.cars}</td><td>${money(e.upsellRevenue)}</td></tr>`).join("");
+  const rowsMgr = (s.perManager || []).map((m) => `<tr><td>${m.name}</td><td>${money(m.upsellRevenue)}</td></tr>`).join("");
   const rowsLb = s.leaderboard.map((r) => `<tr><td>${r.upsell}</td><td>${r.employee}</td><td>${r.count}</td><td>${money(r.revenue)}</td></tr>`).join("");
   win.document.write(`
     <html><head><title>${title}</title>
@@ -370,6 +371,7 @@ function openPrintableReport(title, s, periodLabel) {
       </div>
       <h2>Per-employee breakdown</h2>
       <table><tr><th>Employee</th><th>Cars worked</th><th>Upsell revenue</th></tr>${rowsEmp}</table>
+      ${rowsMgr ? `<h2>Manager upsells</h2><table><tr><th>Manager</th><th>Upsell revenue</th></tr>${rowsMgr}</table>` : ""}
       <h2>Upsell leaderboard</h2>
       <table><tr><th>Upsell</th><th>Employee</th><th>Times sold</th><th>Revenue</th></tr>${rowsLb}</table>
     </body></html>
@@ -410,6 +412,17 @@ async function renderOwnerSummary(content) {
       el("div", { class: "muted", style: "margin-bottom:10px;font-size:11.5px", text: "Cars worked counts every job a tech was part of, including tag-teamed ones. Upsell revenue only counts what that person personally logged." }),
       empTable,
     ]));
+
+    if (s.perManager && s.perManager.length > 0) {
+      const mgrTable = el("table", {}, [
+        el("tr", {}, [el("th", { text: "Manager" }), el("th", { text: "Their upsell revenue" })]),
+        ...s.perManager.map((m) => el("tr", {}, [el("td", { text: m.name }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(m.upsellRevenue) })])),
+      ]);
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:10px", text: "MANAGER UPSELLS" }),
+        mgrTable,
+      ]));
+    }
 
     const lbTable = el("table", {}, [
       el("tr", {}, [el("th", { text: "Upsell" }), el("th", { text: "Employee" }), el("th", { text: "Times sold" }), el("th", { text: "Revenue" })]),
