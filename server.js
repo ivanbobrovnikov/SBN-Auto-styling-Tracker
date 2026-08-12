@@ -359,7 +359,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     total: saleTotal(s), upsellTotal: saleUpsellTotal(s),
-    status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid,
+    status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
   })));
 });
 
@@ -369,7 +369,14 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   if (!sale) return res.status(404).json({ error: "Job not found." });
   if (req.body.status !== undefined) sale.status = req.body.status;
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
-  if (req.body.paid !== undefined) sale.paid = !!req.body.paid;
+  if (req.body.paid !== undefined) {
+    sale.paid = !!req.body.paid;
+    if (!sale.paid) sale.paymentMethod = null;
+  }
+  if (req.body.paymentMethod !== undefined) {
+    sale.paymentMethod = req.body.paymentMethod; // "cash" | "card" | null
+    sale.paid = !!req.body.paymentMethod;
+  }
   if (req.body.employeeIds !== undefined) {
     sale.employeeIds = req.body.employeeIds;
     const names = req.body.employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean);
@@ -414,6 +421,19 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
 });
 
 // ---------- employee's own data only — server enforces this, ignores any client-supplied id ----------
+// The full day's schedule — every job, not just ones assigned to this person. Lets a tech
+// see what's booked (car, time, service) even before a manager has assigned anyone to it.
+// Deliberately does NOT include price or customer contact info — that stays owner/manager-only.
+app.get("/api/my/schedule", requireEmployee, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const jobs = db.sales.filter((s) => inRange(s.date, start, end));
+  res.json(jobs.map((s) => ({
+    id: s.id, date: s.date, car: s.car, baseService: s.baseService,
+    employeeNames: s.employeeNames || "Unassigned", status: s.status || "pending",
+  })));
+});
+
 app.get("/api/my/jobs", requireEmployee, (req, res) => {
   const db = loadDB();
   const employeeId = req.auth.role === "owner" && req.query.employeeId ? req.query.employeeId : req.auth.id;
@@ -519,7 +539,7 @@ app.get("/api/manager/search", requireManager, (req, res) => {
       id: s.id, date: s.date, car: s.car, customerName: s.customerName,
       customerPhone: s.customerPhone, customerEmail: s.customerEmail,
       employeeNames: s.employeeNames, baseService: s.baseService,
-      total: saleTotal(s), status: s.status, completed: !!s.completed, paid: !!s.paid,
+      total: saleTotal(s), status: s.status, completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
     }))
   );
 });
