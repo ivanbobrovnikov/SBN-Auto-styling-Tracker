@@ -85,6 +85,9 @@ function saleUpsellTotal(sale) {
 function saleTotal(sale) {
   return (parseFloat(sale.basePrice) || 0) + saleUpsellTotal(sale);
 }
+function money2(n) {
+  return (Math.round((n || 0) * 100) / 100).toFixed(2);
+}
 
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, baseService, basePrice, ghlOpportunityId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
@@ -593,6 +596,44 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
   });
 
   res.json({ shopTotalUpsellRevenue, employees, managers });
+});
+
+// Full raw backup — everyone's data, as a downloadable file the owner can save anywhere
+// (their own computer, Google Drive, wherever) independent of Railway entirely.
+app.get("/api/owner/backup", requireOwner, (req, res) => {
+  const db = loadDB();
+  const filename = `sbn-tracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Type", "application/json");
+  res.send(JSON.stringify(db, null, 2));
+});
+
+function csvEscape(val) {
+  const s = String(val === undefined || val === null ? "" : val);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+// Spreadsheet export of every job in a period, ready to open in Excel/Sheets.
+app.get("/api/owner/export/csv", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const sales = db.sales.filter((s) => inRange(s.date, start, end));
+  const headers = ["Date", "Car", "Customer", "Phone", "Email", "Base Service", "Worked By", "Base Price", "Upsell Total", "Total", "Status", "Completed", "Paid", "Payment Method", "Upsells (detail)"];
+  const rows = sales.map((s) => {
+    const upsells = resolveUpsellNames(s.upsells, db);
+    const upsellDetail = upsells.map((u) => `${u.name}: ${money2(u.price)} (${u.attributedToName})`).join("; ");
+    return [
+      s.date || "", s.car || "", s.customerName || "", s.customerPhone || "", s.customerEmail || "",
+      s.baseService || "", s.employeeNames || "Unassigned", money2(s.basePrice), money2(saleUpsellTotal(s)), money2(saleTotal(s)),
+      s.status || "pending", s.completed ? "Yes" : "No", s.paid ? "Yes" : "No", s.paymentMethod || "", upsellDetail,
+    ];
+  });
+  const csv = [headers, ...rows].map((r) => r.map(csvEscape).join(",")).join("\n");
+  const filename = `sbn-tracker-export-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Type", "text/csv");
+  res.send(csv);
 });
 
 app.get("/api/owner/summary", requireOwner, (req, res) => {
