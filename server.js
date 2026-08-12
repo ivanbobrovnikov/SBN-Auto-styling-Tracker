@@ -115,6 +115,16 @@ function saleEmployeeIds(sale) {
   if (sale.employeeIds) return sale.employeeIds;
   return sale.employeeId ? [sale.employeeId] : [];
 }
+// Every upsell knows who personally sold it (employeeId OR managerId) — this resolves that
+// into an actual display name so anyone looking at a job can see who upsold what.
+function resolveUpsellNames(upsells, db) {
+  return (upsells || []).map((u) => {
+    let name = "Unassigned";
+    if (u.employeeId) name = (db.employees.find((e) => e.id === u.employeeId) || {}).name || "Removed employee";
+    else if (u.managerId) name = (db.managers.find((m) => m.id === u.managerId) || {}).name || "Removed manager";
+    return { ...u, attributedToName: name };
+  });
+}
 
 // ---------- app setup ----------
 const app = express();
@@ -358,7 +368,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
-    total: saleTotal(s), upsellTotal: saleUpsellTotal(s),
+    total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
   })));
 });
@@ -391,13 +401,11 @@ app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
-  if (req.auth.role === "employee" && !saleEmployeeIds(sale).includes(req.auth.id)) {
-    return res.status(403).json({ error: "You're not one of the techs assigned to this job." });
-  }
+  // Deliberately NOT restricted to techs assigned to the car — assignment tracks who did the
+  // labor, upselling is separate. Anyone logged in can upsell any car on the schedule.
   const { name, price } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: "Upsell name is required." });
   sale.upsells = sale.upsells || [];
-  // Whoever is actually logged in and adding this — tech or manager — gets personal credit for it.
   const upsell = { id: newId(), name: name.trim(), price: parseFloat(price) || 0, employeeId: null, managerId: null };
   if (req.auth.role === "employee") upsell.employeeId = req.auth.id;
   else if (req.auth.role === "manager") upsell.managerId = req.auth.id;
@@ -412,8 +420,11 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.saleId);
   if (!sale) return res.status(404).json({ error: "Job not found." });
-  if (req.auth.role === "employee" && !saleEmployeeIds(sale).includes(req.auth.id)) {
-    return res.status(403).json({ error: "You're not one of the techs assigned to this job." });
+  const target = (sale.upsells || []).find((u) => u.id === req.params.upsellId);
+  if (!target) return res.status(404).json({ error: "Upsell not found." });
+  // Employees can only undo their own entries; managers and the owner can remove any.
+  if (req.auth.role === "employee" && target.employeeId !== req.auth.id) {
+    return res.status(403).json({ error: "You can only remove upsells you personally logged." });
   }
   sale.upsells = (sale.upsells || []).filter((u) => u.id !== req.params.upsellId);
   saveDB(db);
@@ -421,41 +432,24 @@ app.delete("/api/sales/:saleId/upsells/:upsellId", requireEmployee, (req, res) =
 });
 
 // ---------- employee's own data only — server enforces this, ignores any client-supplied id ----------
-// The full day's schedule — every job, not just ones assigned to this person. Lets a tech
-// see what's booked (car, time, service) even before a manager has assigned anyone to it.
-// Deliberately does NOT include price or customer contact info — that stays owner/manager-only.
-app.get("/api/my/schedule", requireEmployee, (req, res) => {
-  const db = loadDB();
-  const { start, end } = dateRangeFor(req.query);
-  const jobs = db.sales.filter((s) => inRange(s.date, start, end));
-  res.json(jobs.map((s) => ({
-    id: s.id, date: s.date, car: s.car, baseService: s.baseService,
-    employeeNames: s.employeeNames || "Unassigned", status: s.status || "pending",
-  })));
-});
-
+// The full schedule — every job, not just ones a tech is assigned to. Assignment (who worked
+// the car) is now purely a manager-entered record for pay purposes; it doesn't gate who can
+// log an upsell. Every upsell already knows who personally sold it (resolveUpsellNames).
 app.get("/api/my/jobs", requireEmployee, (req, res) => {
   const db = loadDB();
-  const employeeId = req.auth.role === "owner" && req.query.employeeId ? req.query.employeeId : req.auth.id;
+  const { start, end } = dateRangeFor(req.query);
   const jobs = db.sales
-    .filter((s) => saleEmployeeIds(s).includes(employeeId))
-    .map((s) => {
-      const teammates = saleEmployeeIds(s)
-        .filter((id) => id !== employeeId)
-        .map((id) => (db.employees.find((e) => e.id === id) || {}).name)
-        .filter(Boolean);
-      const mine = (s.upsells || []).filter((u) => u.employeeId === employeeId);
-      return {
-        id: s.id,
-        date: s.date,
-        car: s.car,
-        baseService: s.baseService,
-        teammates,
-        upsells: mine,
-        upsellTotal: mine.reduce((a, u) => a + (parseFloat(u.price) || 0), 0),
-        // basePrice and total sale $ intentionally NOT sent to employees
-      };
-    });
+    .filter((s) => inRange(s.date, start, end))
+    .map((s) => ({
+      id: s.id,
+      date: s.date,
+      car: s.car,
+      baseService: s.baseService,
+      employeeNames: s.employeeNames || "Unassigned",
+      status: s.status || "pending",
+      upsells: resolveUpsellNames(s.upsells, db),
+      // basePrice and total sale $ intentionally NOT sent to employees
+    }));
   res.json(jobs);
 });
 
@@ -540,6 +534,7 @@ app.get("/api/manager/search", requireManager, (req, res) => {
       customerPhone: s.customerPhone, customerEmail: s.customerEmail,
       employeeNames: s.employeeNames, baseService: s.baseService,
       total: saleTotal(s), status: s.status, completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
+      upsells: resolveUpsellNames(s.upsells, db),
     }))
   );
 });
@@ -549,7 +544,7 @@ app.get("/api/owner/sales", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const sales = db.sales.filter((s) => inRange(s.date, start, end));
-  res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s) })));
+  res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db) })));
 });
 
 app.get("/api/owner/summary", requireOwner, (req, res) => {
