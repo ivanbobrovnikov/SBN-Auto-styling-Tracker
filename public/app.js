@@ -126,6 +126,7 @@ function render() {
   app.appendChild(content);
   if (session.role === "owner") renderOwnerTabContent(content);
   else if (session.role === "manager") renderManagerTabContent(content);
+  else if (session.role === "sales") renderSalesTabContent(content);
   else renderEmployeeTabContent(content);
 }
 
@@ -159,9 +160,11 @@ function renderLogin() {
 function renderTabs() {
   let tabs;
   if (session.role === "owner") {
-    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-test", "Test tool"]];
+    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
   } else if (session.role === "manager") {
     tabs = [["manager-jobs", "Job status"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
+  } else if (session.role === "sales") {
+    tabs = [["sales-schedule", "My Bookings"], ["sales-performance", "My Performance"]];
   } else {
     tabs = [["schedule", "Schedule"], ["performance", "My performance"]];
   }
@@ -274,11 +277,17 @@ async function renderManagerTabContent(content) {
   return renderManagerJobs(content);
 }
 
+async function renderSalesTabContent(content) {
+  if (currentTab === "sales-performance") return renderSalesPerformance(content);
+  return renderSalesSchedule(content);
+}
+
 async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
+  if (currentTab === "owner-salesreps") return renderOwnerSalesReps(content);
   if (currentTab === "manager-jobs") return renderManagerJobs(content);
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-test") return renderTestTool(content);
@@ -323,7 +332,7 @@ async function renderOwnerPayroll(content) {
 
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Combined upsell revenue — everyone" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(d.shopTotalUpsellRevenue) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission owed" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.employees.reduce((a, e) => a + e.commission, 0) + d.managers.reduce((a, m) => a + m.commission, 0)) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission owed" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.employees.reduce((a, e) => a + e.commission, 0) + d.managers.reduce((a, m) => a + m.commission, 0) + (d.salesReps || []).reduce((a, r) => a + r.commission, 0)) })]),
     ]));
 
     body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "EMPLOYEES — EACH PERSON'S OWN UPSELLS" }));
@@ -333,6 +342,25 @@ async function renderOwnerPayroll(content) {
     if (d.managers.length > 0) {
       body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "MANAGERS — EACH PERSON'S OWN UPSELLS" }));
       d.managers.forEach((m) => body.appendChild(personCard(m, `${m.upsellCount} upsell${m.upsellCount !== 1 ? "s" : ""} sold`)));
+    }
+
+    if (d.salesReps && d.salesReps.length > 0) {
+      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "SALES REPS — COMMISSION ON SHOWED SALES" }));
+      d.salesReps.forEach((r) => {
+        body.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "row", style: "margin-bottom:2px" }, [
+            el("div", { class: "oswald", style: "font-size:15px", text: r.name }),
+            el("div", { class: "mono", style: "color:var(--amber);font-size:16px", text: money(r.showedValue) }),
+          ]),
+          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: `${r.totalBooked} booked · ${r.showedCount} showed (no-shows earn nothing)` }),
+          r.commissionRate > 0
+            ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
+                el("span", { class: "muted", style: "font-size:12.5px", text: `Commission owed (${r.commissionRate}% of showed value)` }),
+                el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(r.commission) }),
+              ])
+            : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No commission rate set for this person." }),
+        ]));
+      });
     }
   }
   content.appendChild(picker.el);
@@ -424,6 +452,21 @@ async function renderOwnerSummary(content) {
       ]));
     }
 
+    if (s.perSalesRep && s.perSalesRep.length > 0) {
+      const repTable = el("table", {}, [
+        el("tr", {}, [el("th", { text: "Sales rep" }), el("th", { text: "Booked" }), el("th", { text: "Showed" }), el("th", { text: "Showed value" }), el("th", { text: "Commission" })]),
+        ...s.perSalesRep.map((r) => el("tr", {}, [
+          el("td", { text: r.name }), el("td", { class: "mono", text: r.totalBooked }), el("td", { class: "mono", style: "color:var(--green)", text: r.showedCount }),
+          el("td", { class: "mono", style: "color:var(--amber)", text: money(r.showedValue) }), el("td", { class: "mono", style: "color:var(--green)", text: money(r.commission) }),
+        ])),
+      ]);
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:10px", text: "SALES REP PERFORMANCE" }),
+        el("div", { class: "muted", style: "margin-bottom:10px;font-size:11.5px", text: "Commission is on the base sale, only counted once a manager marks it arrived — no-shows earn nothing." }),
+        repTable,
+      ]));
+    }
+
     const lbTable = el("table", {}, [
       el("tr", {}, [el("th", { text: "Upsell" }), el("th", { text: "Employee" }), el("th", { text: "Times sold" }), el("th", { text: "Revenue" })]),
       ...s.leaderboard.map((r) => el("tr", {}, [el("td", { text: r.upsell }), el("td", { class: "muted", text: r.employee }), el("td", { class: "mono", text: r.count }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(r.revenue) })])),
@@ -495,6 +538,111 @@ async function renderOwnerTeam(content) {
       el("button", { class: "primary", onclick: async () => {
         try {
           await api("/api/employees", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value }) });
+          nameInput.value = ""; pinInput.value = ""; rateInput.value = "";
+          notice.className = "notice ok"; notice.textContent = "Added.";
+          loadList();
+        } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
+      }, text: "Add" }),
+    ]),
+    notice,
+  ]));
+  content.appendChild(list);
+  await loadList();
+}
+
+// ---------------- Sales rep: read-only bookings, no way to touch status ----------------
+async function renderSalesSchedule(content) {
+  const body = el("div");
+  const nav = renderDayNav((params) => load(params));
+  async function load(params) {
+    const p = params || nav.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const jobs = await api(`/api/my/sales-schedule?${qs}`);
+    body.innerHTML = "";
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No bookings on this day." })); return; }
+    jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
+      const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : "Upcoming";
+      const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : "var(--sub)";
+      body.appendChild(el("div", { class: "card row" }, [
+        el("div", {}, [
+          el("div", { style: "font-weight:500", text: job.car }),
+          el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.customerName || ""} · ${job.baseService || ""}` }),
+        ]),
+        el("div", { style: "text-align:right" }, [
+          el("div", { class: "mono", style: "color:var(--amber)", text: money(job.basePrice) }),
+          el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Status here is set by your manager — this is a read-only view of what you booked and whether it showed." }));
+  content.appendChild(nav.el);
+  content.appendChild(body);
+  await load();
+}
+
+async function renderSalesPerformance(content) {
+  const body = el("div");
+  const picker = renderPeriodPicker((params) => load(params), "payperiod");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const stats = await api(`/api/my/sales-performance?${qs}`);
+    body.innerHTML = "";
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total booked" }), el("div", { class: "metric-value mono", text: stats.totalBooked })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Booked value" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(stats.totalBookedValue) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Showed" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: stats.showedCount })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "No-shows" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: stats.noShowCount })]),
+    ]));
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "row", style: "margin-bottom:4px" }, [
+        el("span", { class: "muted", text: "Value that showed (this is what your commission is based on)" }),
+        el("span", { class: "mono", style: "color:var(--cyan)", text: money(stats.showedValue) }),
+      ]),
+      stats.commissionRate > 0
+        ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:8px" }, [
+            el("span", { class: "muted", text: `Your commission (${stats.commissionRate}% of showed value)` }),
+            el("span", { class: "mono", style: "color:var(--green);font-weight:600;font-size:18px", text: money(stats.commission) }),
+          ])
+        : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:8px", text: "No commission rate set for you yet — ask the owner." }),
+    ]));
+  }
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
+}
+
+// ---------------- Owner: manage sales reps ----------------
+async function renderOwnerSalesReps(content) {
+  const nameInput = el("input", { placeholder: "Name" });
+  const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
+  const rateInput = el("input", { type: "number", placeholder: "Commission %", style: "max-width:130px" });
+  const notice = el("div", { class: "notice" });
+  const list = el("div");
+
+  async function loadList() {
+    const reps = await api("/api/salesreps");
+    list.innerHTML = "";
+    if (reps.length === 0) list.appendChild(el("div", { class: "muted", text: "No sales reps added yet." }));
+    reps.forEach((r) => {
+      const rate = el("input", { type: "number", value: r.commissionRate || 0, style: "max-width:80px" });
+      rate.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
+      list.appendChild(el("div", { class: "card row" }, [
+        el("div", { style: "flex:1;font-weight:500", text: r.name }),
+        rate,
+        el("span", { class: "muted", text: "% commission on showed sales" }),
+        el("button", { class: "icon-danger", onclick: async () => { await api(`/api/salesreps/${r.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+      ]));
+    });
+  }
+
+  content.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD SALES REP — this is the person who closed the deal, not the tech who worked it. Their commission is on the base sale, only counted once a manager marks the appointment as arrived." }),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput,
+      el("button", { class: "primary", onclick: async () => {
+        try {
+          await api("/api/salesreps", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value }) });
           nameInput.value = ""; pinInput.value = ""; rateInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
@@ -734,6 +882,7 @@ async function renderTestTool(content) {
   const phone = el("input", { placeholder: "Customer phone", value: "555-123-4567" });
   const email = el("input", { placeholder: "Customer email", value: "test@example.com" });
   const employeeName = el("input", { placeholder: "Employee name(s) — separate multiple with a comma", value: "" });
+  const salesRepName = el("input", { placeholder: "Sales rep name (who closed it)", value: "" });
   const baseService = el("select", {}, [
     el("option", { value: "Window Tint", text: "Window Tint" }),
     el("option", { value: "PPF", text: "PPF" }),
@@ -749,13 +898,14 @@ async function renderTestTool(content) {
     el("div", { class: "field" }, [el("label", { text: "Phone" }), phone]),
     el("div", { class: "field" }, [el("label", { text: "Email" }), email]),
     el("div", { class: "field" }, [el("label", { text: "Employee name(s)" }), employeeName]),
+    el("div", { class: "field" }, [el("label", { text: "Sales rep name" }), salesRepName]),
     el("div", { class: "field" }, [el("label", { text: "Base service" }), baseService]),
     el("div", { class: "field" }, [el("label", { text: "Base price" }), basePrice]),
     el("button", { class: "primary", onclick: async () => {
       try {
         await api("/api/owner/simulate-webhook", { method: "POST", body: JSON.stringify({
           date: new Date().toISOString(), customerName: customer.value, customerPhone: phone.value, customerEmail: email.value, car: car.value,
-          employeeName: employeeName.value, baseService: baseService.value, basePrice: basePrice.value,
+          employeeName: employeeName.value, salesRepName: salesRepName.value, baseService: baseService.value, basePrice: basePrice.value,
         }) });
         notice.className = "notice ok";
         notice.textContent = "Test job created — check \"All jobs\", \"Job status\", or \"Search\" to see it.";
