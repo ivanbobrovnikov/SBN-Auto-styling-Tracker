@@ -35,6 +35,23 @@ function newId() {
 function monthKey(dateStr) {
   return (dateStr || "").slice(0, 7);
 }
+// Business hours: Mon–Sat, 9am–6pm, Eastern time — regardless of what timezone the server
+// itself runs in. This decides which of a sales rep's two commission rates applies, based
+// on the moment the deal actually closed (opportunity hit Booked w/ Deposit), not the
+// scheduled appointment time.
+function isDuringBusinessHours(isoString) {
+  const d = new Date(isoString);
+  if (isNaN(d.getTime())) return true; // safest default if something's malformed — don't silently overpay
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour: "numeric", hour12: false, weekday: "short",
+  }).formatToParts(d);
+  const weekday = (parts.find((p) => p.type === "weekday") || {}).value;
+  let hour = parseInt((parts.find((p) => p.type === "hour") || {}).value, 10);
+  if (hour === 24) hour = 0; // some ICU builds report midnight as "24" instead of "00"
+  const openDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]; // closed Sunday
+  return openDays.includes(weekday) && hour >= 9 && hour < 18;
+}
+
 function dateRangeFor(query) {
   const period = query.period || "month";
   const ref = query.date ? new Date(query.date) : new Date();
@@ -90,7 +107,7 @@ function money2(n) {
   return (Math.round((n || 0) * 100) / 100).toFixed(2);
 }
 
-function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId }) {
+function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
   const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
@@ -105,11 +122,17 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // Only ever one person here (unlike techs), so a simple name match is enough.
   const rep = salesRepName ? db.salesReps.find((r) => r.name.toLowerCase() === String(salesRepName).trim().toLowerCase()) : null;
 
+  const isNew = !db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   if (!sale) {
     sale = { id: newId(), ghlOpportunityId, upsells: [], status: "pending", completed: false, paid: false };
     db.sales.push(sale);
   }
+  // closedAt is stamped ONCE, at the exact moment the deal was actually closed (this webhook
+  // firing for the first time = the opportunity hitting Booked w/ Deposit). Later syncs
+  // (like a price update) never touch it — that would let someone accidentally shift a
+  // rep's commission rate after the fact just by editing the price later.
+  if (isNew) sale.closedAt = closedAt || new Date().toISOString();
   sale.date = date || sale.date || new Date().toISOString();
   sale.customerName = customerName || sale.customerName || "";
   sale.customerPhone = customerPhone || sale.customerPhone || "";
@@ -335,17 +358,17 @@ app.delete("/api/managers/:id", requireOwner, (req, res) => {
 // depends on that arrived mark, so they get no ability to touch job status themselves. ----------
 app.get("/api/salesreps", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name, commissionRate: r.commissionRate || 0 })));
+  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name, commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0 })));
 });
 
 app.post("/api/salesreps", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, pin, commissionRate } = req.body;
+  const { name, pin, commissionRate, afterHoursCommissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
-  const rep = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0 };
+  const rep = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, afterHoursCommissionRate: parseFloat(afterHoursCommissionRate) || 0 };
   db.salesReps.push(rep);
   saveDB(db);
-  res.json({ id: rep.id, name: rep.name, commissionRate: rep.commissionRate });
+  res.json({ id: rep.id, name: rep.name, commissionRate: rep.commissionRate, afterHoursCommissionRate: rep.afterHoursCommissionRate });
 });
 
 app.patch("/api/salesreps/:id", requireOwner, (req, res) => {
@@ -353,6 +376,7 @@ app.patch("/api/salesreps/:id", requireOwner, (req, res) => {
   const rep = db.salesReps.find((r) => r.id === req.params.id);
   if (!rep) return res.status(404).json({ error: "Not found." });
   if (req.body.commissionRate !== undefined) rep.commissionRate = parseFloat(req.body.commissionRate) || 0;
+  if (req.body.afterHoursCommissionRate !== undefined) rep.afterHoursCommissionRate = parseFloat(req.body.afterHoursCommissionRate) || 0;
   if (req.body.pin) rep.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
@@ -599,6 +623,16 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
 // ---------- sales rep — read-only view of their own bookings. Commission depends on the
 // manager's arrived/no-show mark, so a sales rep can never touch status themselves; this
 // role only has GET routes, no PATCH access to anything. ----------
+// One place that decides which of a rep's two rates applies to a given sale, based on
+// exactly when it closed — used everywhere commission gets calculated, so the rule can
+// never drift out of sync between the rep's own dashboard, the owner dashboard, and payroll.
+function salesRepCommissionForSale(rep, sale) {
+  if (!rep || sale.status !== "arrived") return { amount: 0, duringHours: null };
+  const duringHours = isDuringBusinessHours(sale.closedAt || sale.date);
+  const rate = duringHours ? (rep.commissionRate || 0) : (rep.afterHoursCommissionRate || 0);
+  return { amount: (parseFloat(sale.basePrice) || 0) * (rate / 100), duringHours };
+}
+
 app.get("/api/my/sales-schedule", requireSales, (req, res) => {
   const db = loadDB();
   const repId = req.auth.role === "owner" && req.query.salesRepId ? req.query.salesRepId : req.auth.id;
@@ -626,12 +660,21 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
   const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
   const noShowCount = mine.filter((s) => s.status === "no_show").length;
   const pendingCount = mine.filter((s) => !s.status || s.status === "pending").length;
-  const commissionRate = rep ? rep.commissionRate || 0 : 0;
-  const commission = commissionRate ? showedValue * (commissionRate / 100) : 0;
+
+  let commission = 0, duringHoursValue = 0, afterHoursValue = 0, duringHoursCount = 0, afterHoursCount = 0;
+  showed.forEach((s) => {
+    const c = salesRepCommissionForSale(rep, s);
+    commission += c.amount;
+    if (c.duringHours) { duringHoursValue += parseFloat(s.basePrice) || 0; duringHoursCount += 1; }
+    else { afterHoursValue += parseFloat(s.basePrice) || 0; afterHoursCount += 1; }
+  });
 
   res.json({
     totalBooked, totalBookedValue, showedCount: showed.length, showedValue,
-    noShowCount, pendingCount, commissionRate, commission,
+    noShowCount, pendingCount, commission,
+    commissionRate: rep ? rep.commissionRate || 0 : 0,
+    afterHoursCommissionRate: rep ? rep.afterHoursCommissionRate || 0 : 0,
+    duringHoursCount, duringHoursValue, afterHoursCount, afterHoursValue,
   });
 });
 
@@ -707,8 +750,13 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const mine = sales.filter((s) => s.salesRepId === rep.id);
     const showed = mine.filter((s) => s.status === "arrived");
     const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
-    const commission = rep.commissionRate ? showedValue * (rep.commissionRate / 100) : 0;
-    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, commission };
+    let commission = 0, duringHoursCount = 0, afterHoursCount = 0;
+    showed.forEach((s) => {
+      const c = salesRepCommissionForSale(rep, s);
+      commission += c.amount;
+      if (c.duringHours) duringHoursCount += 1; else afterHoursCount += 1;
+    });
+    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission };
   });
 
   res.json({ shopTotalUpsellRevenue, employees, managers, salesReps });
@@ -780,7 +828,7 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
     const mine = sales.filter((s) => s.salesRepId === rep.id);
     const showed = mine.filter((s) => s.status === "arrived");
     const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
-    const commission = rep.commissionRate ? showedValue * (rep.commissionRate / 100) : 0;
+    const commission = showed.reduce((a, s) => a + salesRepCommissionForSale(rep, s).amount, 0);
     return { id: rep.id, name: rep.name, totalBooked: mine.length, showedCount: showed.length, showedValue, commissionRate: rep.commissionRate || 0, commission };
   });
 
