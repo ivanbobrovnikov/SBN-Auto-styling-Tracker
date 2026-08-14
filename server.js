@@ -14,12 +14,13 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-too";
 // ---------- tiny JSON "database" ----------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const fresh = { employees: [], managers: [], sales: [], ownerPinHash: null };
+    const fresh = { employees: [], managers: [], salesReps: [], sales: [], ownerPinHash: null };
     fs.writeFileSync(DB_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
   const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
   if (!db.managers) db.managers = [];
+  if (!db.salesReps) db.salesReps = [];
   return db;
 }
 function saveDB(db) {
@@ -89,7 +90,7 @@ function money2(n) {
   return (Math.round((n || 0) * 100) / 100).toFixed(2);
 }
 
-function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, baseService, basePrice, ghlOpportunityId }) {
+function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
   const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
@@ -100,6 +101,9 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     if (emp) matched.push(emp);
     else if (n) unmatched.push(n);
   });
+  // Sales rep is the person who closed the lead — usually GHL's "Assigned To" on the opportunity.
+  // Only ever one person here (unlike techs), so a simple name match is enough.
+  const rep = salesRepName ? db.salesReps.find((r) => r.name.toLowerCase() === String(salesRepName).trim().toLowerCase()) : null;
 
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   if (!sale) {
@@ -113,6 +117,9 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.car = car || sale.car || "";
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
+  if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
+  else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
+  else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
   sale.baseService = baseService || sale.baseService || "";
   sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
   sale.syncedFromGHL = true;
@@ -191,6 +198,10 @@ function requireEmployee(req, res, next) {
   if (req.auth.role === "employee" || req.auth.role === "manager" || req.auth.role === "owner") return next();
   return res.status(401).json({ error: "Login required." });
 }
+function requireSales(req, res, next) {
+  if (req.auth.role === "sales" || req.auth.role === "owner") return next();
+  return res.status(401).json({ error: "Sales login required." });
+}
 
 // ---------- session / login ----------
 app.get("/api/session", (req, res) => {
@@ -203,6 +214,10 @@ app.get("/api/session", (req, res) => {
   if (req.auth.role === "employee") {
     const emp = db.employees.find((e) => e.id === req.auth.id);
     if (emp) return res.json({ role: "employee", employeeId: emp.id, name: emp.name });
+  }
+  if (req.auth.role === "sales") {
+    const rep = db.salesReps.find((r) => r.id === req.auth.id);
+    if (rep) return res.json({ role: "sales", salesRepId: rep.id, name: rep.name });
   }
   return res.json({ role: null, ownerPinSet: !!db.ownerPinHash });
 });
@@ -234,6 +249,11 @@ app.post("/api/login", (req, res) => {
   if (emp) {
     setAuthCookie(res, { role: "employee", id: emp.id });
     return res.json({ role: "employee", employeeId: emp.id, name: emp.name });
+  }
+  const rep = db.salesReps.find((r) => r.pinHash === hash(pin));
+  if (rep) {
+    setAuthCookie(res, { role: "sales", id: rep.id });
+    return res.json({ role: "sales", salesRepId: rep.id, name: rep.name });
   }
   return res.status(401).json({ error: "Incorrect PIN." });
 });
@@ -310,6 +330,48 @@ app.delete("/api/managers/:id", requireOwner, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- sales reps (owner only to manage) — the person who CLOSED the deal, distinct from
+// the techs who worked it and the managers who mark it arrived/no-show. Their commission
+// depends on that arrived mark, so they get no ability to touch job status themselves. ----------
+app.get("/api/salesreps", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name, commissionRate: r.commissionRate || 0 })));
+});
+
+app.post("/api/salesreps", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { name, pin, commissionRate } = req.body;
+  if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
+  const rep = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0 };
+  db.salesReps.push(rep);
+  saveDB(db);
+  res.json({ id: rep.id, name: rep.name, commissionRate: rep.commissionRate });
+});
+
+app.patch("/api/salesreps/:id", requireOwner, (req, res) => {
+  const db = loadDB();
+  const rep = db.salesReps.find((r) => r.id === req.params.id);
+  if (!rep) return res.status(404).json({ error: "Not found." });
+  if (req.body.commissionRate !== undefined) rep.commissionRate = parseFloat(req.body.commissionRate) || 0;
+  if (req.body.pin) rep.pinHash = hash(req.body.pin);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+app.delete("/api/salesreps/:id", requireOwner, (req, res) => {
+  const db = loadDB();
+  db.salesReps = db.salesReps.filter((r) => r.id !== req.params.id);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Manager-safe name list, same idea as manager/employees — lets a manager assign/fix which
+// sales rep gets credit for a booking, without seeing commission rates.
+app.get("/api/manager/salesreps", requireManager, (req, res) => {
+  const db = loadDB();
+  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name })));
+});
+
 // ---------- GHL webhook (public endpoint, protected by shared secret) ----------
 // Point your GoHighLevel workflow's Webhook action at:
 //   POST https://your-domain.com/api/webhook/ghl?secret=YOUR_WEBHOOK_SECRET
@@ -380,6 +442,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
+    salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned",
     total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
   })));
@@ -403,6 +466,11 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     sale.employeeIds = req.body.employeeIds;
     const names = req.body.employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean);
     sale.employeeNames = names.join(", ") || "Unassigned";
+  }
+  if (req.body.salesRepId !== undefined) {
+    sale.salesRepId = req.body.salesRepId;
+    const rep = db.salesReps.find((r) => r.id === req.body.salesRepId);
+    sale.salesRepName = rep ? rep.name : "Unassigned";
   }
   saveDB(db);
   res.json({ ok: true });
@@ -528,6 +596,45 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   });
 });
 
+// ---------- sales rep — read-only view of their own bookings. Commission depends on the
+// manager's arrived/no-show mark, so a sales rep can never touch status themselves; this
+// role only has GET routes, no PATCH access to anything. ----------
+app.get("/api/my/sales-schedule", requireSales, (req, res) => {
+  const db = loadDB();
+  const repId = req.auth.role === "owner" && req.query.salesRepId ? req.query.salesRepId : req.auth.id;
+  const { start, end } = dateRangeFor(req.query);
+  const jobs = db.sales
+    .filter((s) => s.salesRepId === repId && inRange(s.date, start, end))
+    .map((s) => ({
+      id: s.id, date: s.date, car: s.car, customerName: s.customerName, baseService: s.baseService,
+      basePrice: s.basePrice, status: s.status || "pending",
+      // No price/status editing here — this is a read-only view of what THEY sold and whether it showed.
+    }));
+  res.json(jobs);
+});
+
+app.get("/api/my/sales-performance", requireSales, (req, res) => {
+  const db = loadDB();
+  const repId = req.auth.role === "owner" && req.query.salesRepId ? req.query.salesRepId : req.auth.id;
+  const { start, end } = dateRangeFor(req.query);
+  const rep = db.salesReps.find((r) => r.id === repId);
+  const mine = db.sales.filter((s) => s.salesRepId === repId && inRange(s.date, start, end));
+
+  const totalBooked = mine.length;
+  const totalBookedValue = mine.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
+  const showed = mine.filter((s) => s.status === "arrived");
+  const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
+  const noShowCount = mine.filter((s) => s.status === "no_show").length;
+  const pendingCount = mine.filter((s) => !s.status || s.status === "pending").length;
+  const commissionRate = rep ? rep.commissionRate || 0 : 0;
+  const commission = commissionRate ? showedValue * (commissionRate / 100) : 0;
+
+  res.json({
+    totalBooked, totalBookedValue, showedCount: showed.length, showedValue,
+    noShowCount, pendingCount, commissionRate, commission,
+  });
+});
+
 // ---------- contact/vehicle search — find a job by customer name, phone, email, or car ----------
 app.get("/api/manager/search", requireManager, (req, res) => {
   const db = loadDB();
@@ -594,8 +701,17 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const commission = mgr.commissionRate ? b.revenue * (mgr.commissionRate / 100) : 0;
     return { id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items };
   });
+  // Sales reps are a different pay structure entirely — commission on the base sale, only
+  // when the manager marked it arrived. Not tied to upsells at all.
+  const salesReps = db.salesReps.map((rep) => {
+    const mine = sales.filter((s) => s.salesRepId === rep.id);
+    const showed = mine.filter((s) => s.status === "arrived");
+    const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
+    const commission = rep.commissionRate ? showedValue * (rep.commissionRate / 100) : 0;
+    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, commission };
+  });
 
-  res.json({ shopTotalUpsellRevenue, employees, managers });
+  res.json({ shopTotalUpsellRevenue, employees, managers, salesReps });
 });
 
 // Full raw backup — everyone's data, as a downloadable file the owner can save anywhere
@@ -658,6 +774,15 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
     const myUpsellRevenue = sales.reduce((a, s) => a + (s.upsells || []).filter((u) => u.managerId === mgr.id).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
     return { id: mgr.id, name: mgr.name, upsellRevenue: myUpsellRevenue };
   });
+  // Sales reps get commission on the BASE sale, only when it showed (manager-marked) —
+  // completely separate from upsell commission the techs/managers earn.
+  const perSalesRep = db.salesReps.map((rep) => {
+    const mine = sales.filter((s) => s.salesRepId === rep.id);
+    const showed = mine.filter((s) => s.status === "arrived");
+    const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
+    const commission = rep.commissionRate ? showedValue * (rep.commissionRate / 100) : 0;
+    return { id: rep.id, name: rep.name, totalBooked: mine.length, showedCount: showed.length, showedValue, commissionRate: rep.commissionRate || 0, commission };
+  });
 
   const leaderboard = [];
   const grouped = {};
@@ -672,7 +797,7 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   res.json({
     totalRevenue, totalUpsellRevenue: totalUpsell,
     upsellPercentOfRevenue: totalRevenue ? (totalUpsell / totalRevenue) * 100 : 0,
-    carCount, attachRate, perEmployee, perManager, leaderboard,
+    carCount, attachRate, perEmployee, perManager, perSalesRep, leaderboard,
   });
 });
 
