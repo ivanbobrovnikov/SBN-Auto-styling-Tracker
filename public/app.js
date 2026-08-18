@@ -973,6 +973,29 @@ async function renderTestTool(content) {
     }, text: "Delete this job" }),
     deleteNotice,
   ]));
+
+  const debugBody = el("div");
+  async function loadDebugLog() {
+    const log = await api("/api/owner/debug-log");
+    debugBody.innerHTML = "";
+    if (log.length === 0) { debugBody.appendChild(el("div", { class: "muted", text: "Nothing logged yet." })); return; }
+    log.forEach((entry) => {
+      debugBody.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: entry.receivedAt }),
+        el("pre", { style: "font-family:monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--text);margin:0", text: JSON.stringify(entry.body, null, 2) }),
+      ]));
+    });
+  }
+  content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "WEBHOOK DEBUG LOG — point any GHL webhook action at the URL below to see exactly what GHL actually sends, raw. Useful for checking whether an event (like a deleted appointment) secretly fires something we haven't mapped yet." }),
+    el("div", { class: "mono", style: "font-size:11.5px;color:var(--cyan);margin-bottom:12px;word-break:break-all", text: `${window.location.origin}/api/webhook/ghl/debug?secret=YOUR_WEBHOOK_SECRET` }),
+    el("div", { style: "display:flex;gap:8px;margin-bottom:12px" }, [
+      el("button", { class: "ghost", onclick: loadDebugLog, text: "Refresh log" }),
+      el("button", { class: "ghost", onclick: async () => { await api("/api/owner/debug-log/clear", { method: "POST" }); loadDebugLog(); }, text: "Clear log" }),
+    ]),
+  ]));
+  content.appendChild(debugBody);
+  await loadDebugLog();
 }
 
 boot();
