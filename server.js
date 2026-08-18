@@ -177,6 +177,7 @@ function resolveUpsellNames(upsells, db) {
 // ---------- app setup ----------
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // some webhook senders (possibly GHL) post form-encoded, not JSON
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -409,7 +410,13 @@ app.get("/api/manager/salesreps", requireManager, (req, res) => {
 app.post("/api/webhook/ghl", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  if (!req.body.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
+  if (!req.body.ghlOpportunityId) {
+    if (!db.debugLog) db.debugLog = [];
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), contentType: req.headers["content-type"] || "(none)", failedReason: "missing ghlOpportunityId", body: req.body });
+    db.debugLog = db.debugLog.slice(0, 30);
+    saveDB(db);
+    return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
+  }
   const sale = upsertSaleFromGHL(db, req.body);
   saveDB(db);
   res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
@@ -445,6 +452,31 @@ app.post("/api/webhook/ghl/delete", (req, res) => {
   const found = db.sales.length < before;
   saveDB(db);
   res.json({ ok: true, found });
+});
+
+// Diagnostic endpoint — logs whatever GHL actually sends, no matter the shape, so we can
+// see real payloads for events we haven't mapped yet (like checking whether a deleted
+// appointment secretly fires a status-change event under a status we haven't tried).
+app.post("/api/webhook/ghl/debug", (req, res) => {
+  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  if (!db.debugLog) db.debugLog = [];
+  db.debugLog.unshift({ receivedAt: new Date().toISOString(), contentType: req.headers["content-type"] || "(none)", body: req.body });
+  db.debugLog = db.debugLog.slice(0, 30); // keep only the most recent 30
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+app.get("/api/owner/debug-log", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json(db.debugLog || []);
+});
+
+app.post("/api/owner/debug-log/clear", requireOwner, (req, res) => {
+  const db = loadDB();
+  db.debugLog = [];
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 // Lets the owner test the automatic job-creation flow right from the dashboard,
