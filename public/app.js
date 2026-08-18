@@ -489,16 +489,18 @@ async function renderOwnerSales(content) {
     body.innerHTML = "";
     if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
     sales.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((s) => {
-      body.appendChild(el("div", { class: "card" }, [
+      const cancelled = s.status === "cancelled";
+      body.appendChild(el("div", { class: "card", style: cancelled ? "opacity:0.55" : "" }, [
         el("div", { class: "row" }, [
           el("div", {}, [
-            el("div", { style: "font-weight:500", text: `${s.car} ${s.syncedFromGHL ? "🔗" : ""}` }),
+            el("div", { style: "font-weight:500", text: `${s.car} ${s.syncedFromGHL ? "🔗" : ""} ${cancelled ? "— CANCELLED" : ""}` }),
             el("div", { class: "muted", text: `${formatDateTime(s.date)} · ${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
+            el("div", { class: "muted", style: "font-size:10.5px;margin-top:2px", text: `ID: ${s.id}` }),
             (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }))) : null,
           ]),
           el("div", { style: "text-align:right" }, [
-            el("div", { class: "mono", style: "color:var(--amber);font-size:17px", text: money(s.total) }),
-            s.paid ? el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: "Unpaid" }),
+            el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:17px`, text: cancelled ? "—" : money(s.total) }),
+            s.paid ? el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: cancelled ? "Cancelled" : "Unpaid" }),
             el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${s.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
           ]),
         ]),
@@ -730,6 +732,23 @@ async function renderManagerPerformance(content) {
         el("div", { class: "row" }, [el("span", { text: stats.growthArea.name }), el("span", { class: "mono muted", text: `${stats.growthArea.count}x · ${money(stats.growthArea.revenue)}` })]),
       ]));
     }
+    body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "CARS YOU UPSOLD THIS PERIOD" }));
+    if (!stats.jobs || stats.jobs.length === 0) {
+      body.appendChild(el("div", { class: "muted", text: "No upsells logged by you in this period." }));
+    } else {
+      stats.jobs.forEach((j) => {
+        body.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "row" }, [
+            el("div", {}, [
+              el("div", { style: "font-weight:500", text: j.car }),
+              el("div", { class: "muted", text: `${formatDateTime(j.date)}${j.customerName ? " · " + j.customerName : ""}` }),
+            ]),
+            el("div", { class: "mono", style: "color:var(--cyan)", text: money(j.upsells.reduce((a, u) => a + (parseFloat(u.price) || 0), 0)) }),
+          ]),
+          el("div", { style: "margin-top:6px" }, j.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)}` }))),
+        ]));
+      });
+    }
   }
   content.appendChild(picker.el);
   content.appendChild(body);
@@ -923,6 +942,36 @@ async function renderTestTool(content) {
       } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
     }, text: "Create test job" }),
     notice,
+  ]));
+
+  const cancelJobId = el("input", { placeholder: "Job ID to cancel (copy from All jobs)" });
+  const cancelNotice = el("div", { class: "notice" });
+  content.appendChild(el("div", { class: "card", style: "max-width:480px" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "SIMULATE A CANCELLATION — test what happens when GHL tells the tracker an appointment got cancelled. This removes the job from all revenue/commission totals but keeps it visible (marked Cancelled) in All Jobs and Search." }),
+    el("div", { class: "field" }, [el("label", { text: "Job ID" }), cancelJobId]),
+    el("button", { class: "primary", onclick: async () => {
+      try {
+        await api("/api/owner/simulate-cancel", { method: "POST", body: JSON.stringify({ saleId: cancelJobId.value.trim() }) });
+        cancelNotice.className = "notice ok";
+        cancelNotice.textContent = "Marked cancelled — check \"All jobs\" to see it, and \"Dashboard\" to confirm the revenue dropped.";
+      } catch (e) { cancelNotice.className = "notice err"; cancelNotice.textContent = e.message; }
+    }, text: "Cancel this job" }),
+    cancelNotice,
+  ]));
+
+  const deleteJobId = el("input", { placeholder: "Job ID to delete (copy from All jobs)" });
+  const deleteNotice = el("div", { class: "notice" });
+  content.appendChild(el("div", { class: "card", style: "max-width:480px" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "SIMULATE A DELETION — test what happens when an appointment gets deleted in GHL, not just marked cancelled. This actually removes the job from the tracker entirely, rather than leaving it visible as Cancelled." }),
+    el("div", { class: "field" }, [el("label", { text: "Job ID" }), deleteJobId]),
+    el("button", { class: "primary", style: "background:var(--red);color:#fff", onclick: async () => {
+      try {
+        await api("/api/owner/simulate-delete", { method: "POST", body: JSON.stringify({ saleId: deleteJobId.value.trim() }) });
+        deleteNotice.className = "notice ok";
+        deleteNotice.textContent = "Deleted — check \"All jobs\": it should be completely gone, not showing as Cancelled.";
+      } catch (e) { deleteNotice.className = "notice err"; deleteNotice.textContent = e.message; }
+    }, text: "Delete this job" }),
+    deleteNotice,
   ]));
 }
 
