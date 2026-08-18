@@ -106,6 +106,12 @@ function saleTotal(sale) {
 function money2(n) {
   return (Math.round((n || 0) * 100) / 100).toFixed(2);
 }
+// A cancelled job should never count toward revenue, commission, or "cars serviced" —
+// but it should still be VISIBLE everywhere (All jobs, Job status, Search) so nobody
+// wonders where it went. This is the one shared filter that keeps that rule consistent.
+function excludingCancelled(sales) {
+  return sales.filter((s) => s.status !== "cancelled");
+}
 
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
@@ -409,6 +415,38 @@ app.post("/api/webhook/ghl", (req, res) => {
   res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
 });
 
+// Cancellation — deliberately separate from the main webhook above. This one ONLY updates
+// a job that already exists (matched by ghlOpportunityId); it never creates a new one.
+// If the appointment was cancelled before it ever hit "Confirmed," there's nothing in the
+// tracker to cancel, and this quietly does nothing rather than creating a phantom job.
+app.post("/api/webhook/ghl/cancel", (req, res) => {
+  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const { ghlOpportunityId } = req.body;
+  if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  const sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  if (!sale) return res.json({ ok: true, found: false });
+  sale.status = "cancelled";
+  saveDB(db);
+  res.json({ ok: true, found: true, saleId: sale.id });
+});
+
+// Deletion — a genuinely different outcome from cancellation. If the appointment itself
+// gets deleted in GHL (not just marked cancelled), the job disappears from the tracker
+// entirely rather than sticking around labeled "Cancelled." Matched by ghlOpportunityId,
+// same as cancel — if nothing matches, this quietly does nothing.
+app.post("/api/webhook/ghl/delete", (req, res) => {
+  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const { ghlOpportunityId } = req.body;
+  if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  const before = db.sales.length;
+  db.sales = db.sales.filter((s) => s.ghlOpportunityId !== ghlOpportunityId);
+  const found = db.sales.length < before;
+  saveDB(db);
+  res.json({ ok: true, found });
+});
+
 // Lets the owner test the automatic job-creation flow right from the dashboard,
 // without needing GoHighLevel wired up yet or any external tool.
 app.post("/api/owner/simulate-webhook", requireOwner, (req, res) => {
@@ -450,6 +488,26 @@ app.delete("/api/sales/:id", requireOwner, (req, res) => {
   db.sales = db.sales.filter((s) => s.id !== req.params.id);
   saveDB(db);
   res.json({ ok: true });
+});
+
+// Lets the owner test the cancellation flow from the dashboard, same idea as simulate-webhook.
+app.post("/api/owner/simulate-cancel", requireOwner, (req, res) => {
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.body.saleId);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  sale.status = "cancelled";
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Lets the owner test the deletion flow — the job should actually vanish, not just get marked.
+app.post("/api/owner/simulate-delete", requireOwner, (req, res) => {
+  const db = loadDB();
+  const before = db.sales.length;
+  db.sales = db.sales.filter((s) => s.id !== req.body.saleId);
+  const found = db.sales.length < before;
+  saveDB(db);
+  res.json({ ok: true, found });
 });
 
 // ---------- manager job-status updates (arrived / completed / paid) ----------
@@ -564,7 +622,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   const employeeId = req.auth.role === "owner" && req.query.employeeId ? req.query.employeeId : req.auth.id;
   const { start, end } = dateRangeFor(req.query);
   const emp = db.employees.find((e) => e.id === employeeId);
-  const mine = db.sales.filter((s) => saleEmployeeIds(s).includes(employeeId) && inRange(s.date, start, end));
+  const mine = db.sales.filter((s) => saleEmployeeIds(s).includes(employeeId) && inRange(s.date, start, end) && s.status !== "cancelled");
 
   // Only upsells this specific person personally logged count toward their own numbers —
   // even on a shared job, a teammate's upsell isn't credited to them.
@@ -599,7 +657,7 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const mgr = db.managers.find((m) => m.id === managerId);
 
   const myUpsells = (s) => (s.upsells || []).filter((u) => u.managerId === managerId);
-  const relevant = db.sales.filter((s) => inRange(s.date, start, end) && myUpsells(s).length > 0);
+  const relevant = db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && myUpsells(s).length > 0);
   const upsellRev = relevant.reduce((a, s) => a + myUpsells(s).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
   const cars = relevant.length;
 
@@ -617,6 +675,10 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
     cars, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: mgr ? mgr.commissionRate : 0, commission,
+    jobs: relevant.map((s) => ({
+      id: s.id, date: s.date, car: s.car, customerName: s.customerName,
+      upsells: myUpsells(s).map((u) => ({ name: u.name, price: u.price })),
+    })).sort((a, b) => (a.date < b.date ? 1 : -1)),
   });
 });
 
@@ -652,7 +714,7 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
   const repId = req.auth.role === "owner" && req.query.salesRepId ? req.query.salesRepId : req.auth.id;
   const { start, end } = dateRangeFor(req.query);
   const rep = db.salesReps.find((r) => r.id === repId);
-  const mine = db.sales.filter((s) => s.salesRepId === repId && inRange(s.date, start, end));
+  const mine = db.sales.filter((s) => s.salesRepId === repId && inRange(s.date, start, end) && s.status !== "cancelled");
 
   const totalBooked = mine.length;
   const totalBookedValue = mine.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
@@ -716,7 +778,7 @@ app.get("/api/owner/sales", requireOwner, (req, res) => {
 app.get("/api/owner/payroll", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const sales = db.sales.filter((s) => inRange(s.date, start, end));
+  const sales = excludingCancelled(db.sales.filter((s) => inRange(s.date, start, end)));
   const shopTotalUpsellRevenue = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
 
   function personBreakdown(idField, id) {
@@ -803,7 +865,7 @@ app.get("/api/owner/export/csv", requireOwner, (req, res) => {
 app.get("/api/owner/summary", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const sales = db.sales.filter((s) => inRange(s.date, start, end));
+  const sales = excludingCancelled(db.sales.filter((s) => inRange(s.date, start, end)));
   const totalRevenue = sales.reduce((a, s) => a + saleTotal(s), 0);
   const totalUpsell = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
   const carCount = sales.length;
