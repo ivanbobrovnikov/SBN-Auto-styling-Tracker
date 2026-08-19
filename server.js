@@ -113,7 +113,7 @@ function excludingCancelled(sales) {
   return sales.filter((s) => s.status !== "cancelled");
 }
 
-function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt }) {
+function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
   const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
@@ -143,6 +143,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.customerName = customerName || sale.customerName || "";
   sale.customerPhone = customerPhone || sale.customerPhone || "";
   sale.customerEmail = customerEmail || sale.customerEmail || "";
+  sale.contactId = contactId || sale.contactId || null;
   sale.car = car || sale.car || "";
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
@@ -420,6 +421,49 @@ app.post("/api/webhook/ghl", (req, res) => {
   const sale = upsertSaleFromGHL(db, req.body);
   saveDB(db);
   res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
+});
+
+// Price/Rep sync — a DIFFERENT matching strategy than everything else above. GHL's
+// "Opportunity Changed" trigger (needed to catch a price change after booking) doesn't
+// reliably carry the Appointment ID the booking workflow used — that's a real platform
+// limitation, confirmed by testing, not a setup mistake. Contact ID is the one thing
+// genuinely available on both sides, so this endpoint matches by contact instead.
+// Risk, stated plainly: if the same contact has TWO unresolved (pending) bookings at once,
+// this can't tell them apart and will update whichever is most recent. For a shop where a
+// customer books one job at a time, this is a safe, practical tradeoff — not a perfect one.
+app.post("/api/webhook/ghl/sync", (req, res) => {
+  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  if (!db.debugLog) db.debugLog = [];
+  const { contactId, basePrice, salesRepName } = req.body;
+  if (!contactId) {
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "sync", failedReason: "missing contactId", body: req.body });
+    db.debugLog = db.debugLog.slice(0, 30);
+    saveDB(db);
+    return res.status(400).json({ error: "contactId is required." });
+  }
+  const matches = db.sales.filter((s) => s.contactId === contactId);
+  if (matches.length === 0) {
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "sync", failedReason: "no sale found with this contactId", body: req.body, knownContactIds: db.sales.map((s) => s.contactId) });
+    db.debugLog = db.debugLog.slice(0, 30);
+    saveDB(db);
+    return res.json({ ok: true, found: false });
+  }
+  // Prefer the most recent still-pending booking for this contact — that's almost always
+  // the one a phone call just closed. Falls back to the most recent overall if none are pending.
+  const pending = matches.filter((s) => !s.status || s.status === "pending");
+  const pool = pending.length ? pending : matches;
+  const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
+  if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
+  if (salesRepName) {
+    const rep = db.salesReps.find((r) => r.name.toLowerCase() === String(salesRepName).trim().toLowerCase());
+    if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
+  }
+  db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "sync", matchedSaleId: sale.id, before, after: { basePrice: sale.basePrice, salesRepName: sale.salesRepName }, body: req.body });
+  db.debugLog = db.debugLog.slice(0, 30);
+  saveDB(db);
+  res.json({ ok: true, found: true, saleId: sale.id });
 });
 
 // Cancellation — deliberately separate from the main webhook above. This one ONLY updates
