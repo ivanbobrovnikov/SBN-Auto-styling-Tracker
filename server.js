@@ -177,9 +177,17 @@ function resolveUpsellNames(upsells, db) {
 
 // ---------- app setup ----------
 const app = express();
+app.disable("etag"); // this is what was actually causing 304 "not modified" responses on API calls
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // some webhook senders (possibly GHL) post form-encoded, not JSON
 app.use(cookieParser());
+// Every /api response is dynamic data — never let the browser cache it. Without this,
+// a browser can silently serve a stale cached response (HTTP 304) for things like the
+// debug log, dashboard numbers, or job status, making "refresh" appear to do nothing.
+app.use("/api", (req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  next();
+});
 app.use(express.static(path.join(__dirname, "public")));
 
 const AUTH_COOKIE = "sbn_auth";
