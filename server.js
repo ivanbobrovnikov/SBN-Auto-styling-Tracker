@@ -113,6 +113,27 @@ function excludingCancelled(sales) {
   return sales.filter((s) => s.status !== "cancelled");
 }
 
+// GHL can send the appointment date as a human-readable string like "Thursday, August 20,
+// 2026 12:00 AM" instead of ISO format, depending on which merge tag/formatting is used.
+// Every date-range filter in this app compares dates as ISO strings, so this normalizes
+// whatever comes in — otherwise a job can silently vanish from every report and dashboard
+// without any error, just because the date string doesn't sort/compare correctly.
+function normalizeDate(input) {
+  if (!input) return null;
+  const d = new Date(input);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+// GHL doesn't send our custom fields at the top level of the webhook body — it nests them
+// inside a "customData" object alongside a large amount of its own native payload data
+// (contact info, workflow info, calendar info, etc). This unwraps that, with a fallback
+// to the raw body for our own internal test-tool calls, which send flat JSON directly.
+function ghlPayload(body) {
+  if (body && body.customData && typeof body.customData === "object") return body.customData;
+  return body || {};
+}
+
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
@@ -139,7 +160,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // (like a price update) never touch it — that would let someone accidentally shift a
   // rep's commission rate after the fact just by editing the price later.
   if (isNew) sale.closedAt = closedAt || new Date().toISOString();
-  sale.date = date || sale.date || new Date().toISOString();
+  sale.date = normalizeDate(date) || sale.date || new Date().toISOString();
   sale.customerName = customerName || sale.customerName || "";
   sale.customerPhone = customerPhone || sale.customerPhone || "";
   sale.customerEmail = customerEmail || sale.customerEmail || "";
@@ -419,14 +440,15 @@ app.get("/api/manager/salesreps", requireManager, (req, res) => {
 app.post("/api/webhook/ghl", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  if (!req.body.ghlOpportunityId) {
+  const data = ghlPayload(req.body);
+  if (!data.ghlOpportunityId) {
     if (!db.debugLog) db.debugLog = [];
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), contentType: req.headers["content-type"] || "(none)", failedReason: "missing ghlOpportunityId", body: req.body });
     db.debugLog = db.debugLog.slice(0, 30);
     saveDB(db);
     return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
   }
-  const sale = upsertSaleFromGHL(db, req.body);
+  const sale = upsertSaleFromGHL(db, data);
   saveDB(db);
   res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
 });
@@ -443,7 +465,7 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
   if (!db.debugLog) db.debugLog = [];
-  const { contactId, basePrice, salesRepName } = req.body;
+  const { contactId, basePrice, salesRepName } = ghlPayload(req.body);
   if (!contactId) {
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "sync", failedReason: "missing contactId", body: req.body });
     db.debugLog = db.debugLog.slice(0, 30);
@@ -481,7 +503,7 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
 app.post("/api/webhook/ghl/cancel", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  const { ghlOpportunityId } = req.body;
+  const { ghlOpportunityId } = ghlPayload(req.body);
   if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
   const sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   if (!sale) return res.json({ ok: true, found: false });
@@ -497,7 +519,7 @@ app.post("/api/webhook/ghl/cancel", (req, res) => {
 app.post("/api/webhook/ghl/delete", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  const { ghlOpportunityId } = req.body;
+  const { ghlOpportunityId } = ghlPayload(req.body);
   if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
   const before = db.sales.length;
   db.sales = db.sales.filter((s) => s.ghlOpportunityId !== ghlOpportunityId);
