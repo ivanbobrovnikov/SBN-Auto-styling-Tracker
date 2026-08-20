@@ -199,7 +199,7 @@ async function renderSchedule(content) {
     const jobs = await api(`/api/my/jobs?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
-    jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
+    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) =>
         el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })
       ));
@@ -562,7 +562,7 @@ async function renderSalesSchedule(content) {
     const jobs = await api(`/api/my/sales-schedule?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No bookings on this day." })); return; }
-    jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
+    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : "Upcoming";
       const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : "var(--sub)";
       body.appendChild(el("div", { class: "card row" }, [
@@ -786,7 +786,7 @@ async function renderManagerJobs(content) {
     const jobs = await api(`/api/manager/jobs?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs on this day." })); return; }
-    jobs.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => {
+    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const statusBtn = (value, label) => {
         const active = job.status === value;
         return el("button", {
