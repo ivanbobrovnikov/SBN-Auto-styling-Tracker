@@ -113,13 +113,51 @@ function excludingCancelled(sales) {
   return sales.filter((s) => s.status !== "cancelled");
 }
 
+// Converts a wall-clock date/time that's known to represent Eastern time into the correct
+// real UTC instant — accounting for daylight saving automatically, without any external
+// timezone library.
+function easternWallClockToUTC(y, mo, d, h, mi, s) {
+  const guessUTC = Date.UTC(y, mo, d, h, mi, s);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(new Date(guessUTC));
+  const map = {};
+  parts.forEach((p) => { map[p.type] = p.value; });
+  let hh = parseInt(map.hour, 10);
+  if (hh === 24) hh = 0;
+  const asIfEasternWereUTC = Date.UTC(+map.year, +map.month - 1, +map.day, hh, +map.minute, +map.second);
+  const offset = asIfEasternWereUTC - guessUTC;
+  return new Date(guessUTC - offset);
+}
+
 // GHL can send the appointment date as a human-readable string like "Thursday, August 20,
-// 2026 12:00 AM" instead of ISO format, depending on which merge tag/formatting is used.
-// Every date-range filter in this app compares dates as ISO strings, so this normalizes
-// whatever comes in — otherwise a job can silently vanish from every report and dashboard
-// without any error, just because the date string doesn't sort/compare correctly.
+// 2026 12:00 AM" with NO timezone marker at all. That string is Eastern wall-clock time —
+// but naively parsing it assumes the SERVER's own clock (UTC on Railway), which silently
+// produces a time several hours off. This detects that case and converts it correctly.
+// If the incoming string already has an explicit "Z" or "+HH:MM" offset, it's unambiguous
+// and gets trusted as-is.
 function normalizeDate(input) {
   if (!input) return null;
+  const hasExplicitOffset = /Z$|[+-]\d{2}:?\d{2}$/.test(String(input).trim());
+  const humanFormat = String(input).match(/(\w+),?\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+  if (!hasExplicitOffset && humanFormat) {
+    const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+    const mo = months.indexOf(humanFormat[2].toLowerCase());
+    if (mo !== -1) {
+      const day = parseInt(humanFormat[3], 10);
+      const year = parseInt(humanFormat[4], 10);
+      let hour = parseInt(humanFormat[5], 10);
+      const minute = parseInt(humanFormat[6], 10);
+      const ampm = humanFormat[7];
+      if (ampm) {
+        if (ampm.toUpperCase() === "PM" && hour !== 12) hour += 12;
+        if (ampm.toUpperCase() === "AM" && hour === 12) hour = 0;
+      }
+      const d = easternWallClockToUTC(year, mo, day, hour, minute, 0);
+      if (!isNaN(d.getTime())) return d.toISOString();
+    }
+  }
   const d = new Date(input);
   if (isNaN(d.getTime())) return null;
   return d.toISOString();
