@@ -160,9 +160,9 @@ function renderLogin() {
 function renderTabs() {
   let tabs;
   if (session.role === "owner") {
-    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
   } else if (session.role === "manager") {
-    tabs = [["manager-jobs", "Job status"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
+    tabs = [["manager-jobs", "Job status"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
   } else if (session.role === "sales") {
     tabs = [["sales-schedule", "My Bookings"], ["sales-performance", "My Performance"]];
   } else {
@@ -273,6 +273,7 @@ async function renderPerformance(content) {
 // ---------------- Owner views ----------------
 async function renderManagerTabContent(content) {
   if (currentTab === "owner-search") return renderSearch(content);
+  if (currentTab === "owner-attendance") return renderAttendance(content);
   if (currentTab === "manager-performance") return renderManagerPerformance(content);
   return renderManagerJobs(content);
 }
@@ -288,6 +289,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
   if (currentTab === "owner-salesreps") return renderOwnerSalesReps(content);
+  if (currentTab === "owner-attendance") return renderAttendance(content);
   if (currentTab === "manager-jobs") return renderManagerJobs(content);
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-test") return renderTestTool(content);
@@ -668,6 +670,72 @@ async function renderOwnerSalesReps(content) {
   await loadList();
 }
 
+// ---------------- Attendance — who showed up, who didn't, who worked a half day ----------------
+async function renderAttendance(content) {
+  const dayBody = el("div");
+  const nav = renderDayNav((params) => loadDay(params));
+  async function loadDay(params) {
+    const date = (params || nav.getParams()).date;
+    const people = await api(`/api/manager/attendance?date=${date}`);
+    dayBody.innerHTML = "";
+    if (people.length === 0) { dayBody.appendChild(el("div", { class: "muted", text: "No employees or managers added yet." })); return; }
+    people.forEach((p) => {
+      const statusBtn = (value, label, color) => {
+        const active = p.status === value;
+        return el("button", {
+          class: "tab-btn" + (active ? " active" : ""),
+          style: "border-color:" + (active ? color : "var(--border)") + ";color:" + (active ? color : "var(--sub)"),
+          onclick: async () => {
+            await api("/api/manager/attendance", { method: "POST", body: JSON.stringify({ personType: p.type, personId: p.id, date, status: active ? null : value }) });
+            loadDay();
+          },
+          text: (active ? "✓ " : "") + label,
+        });
+      };
+      dayBody.appendChild(el("div", { class: "card row" }, [
+        el("div", {}, [
+          el("div", { style: "font-weight:500", text: p.name }),
+          el("div", { class: "muted", style: "font-size:11.5px", text: p.type === "manager" ? "Manager" : "Employee" }),
+        ]),
+        el("div", { style: "display:flex;gap:8px" }, [
+          statusBtn("present", "Present", "var(--green)"),
+          statusBtn("half_day", "Half day", "var(--amber)"),
+          statusBtn("absent", "Absent", "var(--red)"),
+        ]),
+      ]));
+    });
+  }
+
+  const summaryBody = el("div");
+  const summaryPicker = renderPeriodPicker((params) => loadSummary(params), "month");
+  async function loadSummary(params) {
+    const p = params || summaryPicker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const rows = await api(`/api/owner/attendance-summary?${qs}`);
+    summaryBody.innerHTML = "";
+    if (rows.length === 0) { summaryBody.appendChild(el("div", { class: "muted", text: "No one added yet." })); return; }
+    const table = el("table", {}, [
+      el("tr", {}, [el("th", { text: "Name" }), el("th", { text: "Present" }), el("th", { text: "Half day" }), el("th", { text: "Absent" })]),
+      ...rows.map((r) => el("tr", {}, [
+        el("td", { text: r.name }),
+        el("td", { class: "mono", style: "color:var(--green)", text: r.present }),
+        el("td", { class: "mono", style: "color:var(--amber)", text: r.halfDay }),
+        el("td", { class: "mono", style: "color:var(--red)", text: r.absent }),
+      ])),
+    ]);
+    summaryBody.appendChild(table);
+  }
+
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:8px;font-size:11.5px;letter-spacing:0.04em", text: "MARK TODAY (OR ANY DAY)" }));
+  content.appendChild(nav.el);
+  content.appendChild(dayBody);
+  content.appendChild(el("div", { class: "muted", style: "margin:20px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "SUMMARY" }));
+  content.appendChild(summaryPicker.el);
+  content.appendChild(summaryBody);
+  await loadDay();
+  await loadSummary();
+}
+
 function clear(node) { node.innerHTML = ""; return node; }
 
 // ---------------- Search — find a job by customer name, phone, email, or car ----------------
@@ -779,6 +847,7 @@ function renderDayNav(onChange) {
 async function renderManagerJobs(content) {
   const body = el("div");
   const employees = await api("/api/manager/employees");
+  const managersList = await api("/api/manager/managers-list");
   const nav = renderDayNav((params) => load(params));
   async function load(params) {
     const p = params || nav.getParams();
@@ -830,6 +899,21 @@ async function renderManagerJobs(content) {
         assignWrap.appendChild(chip);
       });
 
+      const managerAssignWrap = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap" });
+      let selectedMgrs = new Set(job.managerHelperIds || []);
+      managersList.forEach((mgr) => {
+        const chip = el("button", {
+          class: "tab-btn" + (selectedMgrs.has(mgr.id) ? " active" : ""),
+          onclick: async () => {
+            if (selectedMgrs.has(mgr.id)) selectedMgrs.delete(mgr.id); else selectedMgrs.add(mgr.id);
+            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ managerHelperIds: Array.from(selectedMgrs) }) });
+            load();
+          },
+          text: mgr.name,
+        });
+        managerAssignWrap.appendChild(chip);
+      });
+
       const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })));
       const upsellForm = renderUpsellForm(job.id, () => load());
 
@@ -849,8 +933,10 @@ async function renderManagerJobs(content) {
           paymentBtn("cash", "Paid — Cash"),
           paymentBtn("card", "Paid — Card"),
         ]),
-        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `TECHS WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
         assignWrap,
+        el("div", { class: "muted", style: "font-size:11.5px;margin:8px 0 2px", text: `MANAGERS WHO ALSO HELPED (currently: ${job.managerHelperNames || "none"})` }),
+        managerAssignWrap,
         el("div", { style: "margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px" }, [
           upsellList,
           upsellForm,
