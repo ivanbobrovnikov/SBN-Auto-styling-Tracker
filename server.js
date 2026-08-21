@@ -14,13 +14,14 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-too";
 // ---------- tiny JSON "database" ----------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const fresh = { employees: [], managers: [], salesReps: [], sales: [], ownerPinHash: null };
+    const fresh = { employees: [], managers: [], salesReps: [], sales: [], attendance: [], ownerPinHash: null };
     fs.writeFileSync(DB_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
   const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
   if (!db.managers) db.managers = [];
   if (!db.salesReps) db.salesReps = [];
+  if (!db.attendance) db.attendance = [];
   return db;
 }
 function saveDB(db) {
@@ -661,6 +662,65 @@ app.get("/api/manager/employees", requireManager, (req, res) => {
   res.json(db.employees.map((e) => ({ id: e.id, name: e.name })));
 });
 
+// So a manager can mark THEMSELVES (or another manager) as having also physically
+// worked a car, separate from the tech assignment.
+app.get("/api/manager/managers-list", requireManager, (req, res) => {
+  const db = loadDB();
+  res.json(db.managers.map((m) => ({ id: m.id, name: m.name })));
+});
+
+// ---------- attendance — who showed up, who didn't, who worked a half day ----------
+app.get("/api/manager/attendance", requireManager, (req, res) => {
+  const db = loadDB();
+  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const people = [
+    ...db.employees.map((e) => ({ id: e.id, name: e.name, type: "employee" })),
+    ...db.managers.map((m) => ({ id: m.id, name: m.name, type: "manager" })),
+  ];
+  const records = db.attendance.filter((a) => a.date === date);
+  res.json(people.map((p) => {
+    const rec = records.find((r) => r.personType === p.type && r.personId === p.id);
+    return { ...p, status: rec ? rec.status : null };
+  }));
+});
+
+app.post("/api/manager/attendance", requireManager, (req, res) => {
+  const db = loadDB();
+  const { personType, personId, date, status } = req.body;
+  if (!personType || !personId || !date) return res.status(400).json({ error: "personType, personId, and date are required." });
+  const existing = db.attendance.find((a) => a.personType === personType && a.personId === personId && a.date === date);
+  if (!status) {
+    db.attendance = db.attendance.filter((a) => a !== existing);
+  } else if (existing) {
+    existing.status = status;
+  } else {
+    db.attendance.push({ id: newId(), personType, personId, date, status });
+  }
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Owner-side rollup — total days present/absent/half-day per person over a period, for payroll.
+app.get("/api/owner/attendance-summary", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const startDay = start.slice(0, 10), endDay = end.slice(0, 10);
+  const records = db.attendance.filter((a) => a.date >= startDay && a.date <= endDay);
+  const people = [
+    ...db.employees.map((e) => ({ id: e.id, name: e.name, type: "employee" })),
+    ...db.managers.map((m) => ({ id: m.id, name: m.name, type: "manager" })),
+  ];
+  res.json(people.map((p) => {
+    const mine = records.filter((r) => r.personType === p.type && r.personId === p.id);
+    return {
+      ...p,
+      present: mine.filter((r) => r.status === "present").length,
+      absent: mine.filter((r) => r.status === "absent").length,
+      halfDay: mine.filter((r) => r.status === "half_day").length,
+    };
+  }));
+});
+
 app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
@@ -668,6 +728,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
+    managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned",
     total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
@@ -692,6 +753,12 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     sale.employeeIds = req.body.employeeIds;
     const names = req.body.employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean);
     sale.employeeNames = names.join(", ") || "Unassigned";
+  }
+  // Managers sometimes physically help with the work too — tracked separately from techs.
+  if (req.body.managerHelperIds !== undefined) {
+    sale.managerHelperIds = req.body.managerHelperIds;
+    const names = req.body.managerHelperIds.map((id) => (db.managers.find((m) => m.id === id) || {}).name).filter(Boolean);
+    sale.managerHelperNames = names.join(", ");
   }
   if (req.body.salesRepId !== undefined) {
     sale.salesRepId = req.body.salesRepId;
@@ -754,6 +821,7 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       car: s.car,
       baseService: s.baseService,
       employeeNames: s.employeeNames || "Unassigned",
+      managerHelperNames: s.managerHelperNames || "",
       status: s.status || "pending",
       upsells: resolveUpsellNames((s.upsells || []).filter((u) => u.employeeId === myId), db),
       // basePrice and total sale $ intentionally NOT sent to employees
@@ -902,7 +970,7 @@ app.get("/api/manager/search", requireManager, (req, res) => {
     .map((s) => ({
       id: s.id, date: s.date, car: s.car, customerName: s.customerName,
       customerPhone: s.customerPhone, customerEmail: s.customerEmail,
-      employeeNames: s.employeeNames, baseService: s.baseService,
+      employeeNames: s.employeeNames, managerHelperNames: s.managerHelperNames || "", baseService: s.baseService,
       total: saleTotal(s), status: s.status, completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
       upsells: resolveUpsellNames(s.upsells, db),
     }))
