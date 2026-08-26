@@ -1046,6 +1046,78 @@ app.get("/api/owner/backup", requireOwner, (req, res) => {
   res.send(JSON.stringify(db, null, 2));
 });
 
+// ---------- automated cloud backup — runs on its own, no manual click required ----------
+// Pushes a copy of the entire database to a private GitHub repo on a schedule. This is
+// genuinely off-Railway, genuinely automatic, and genuinely durable — the actual answer
+// to "if the site breaks, I don't want to lose anything." Requires GITHUB_BACKUP_TOKEN
+// and GITHUB_BACKUP_REPO to be set as environment variables; if they're not set, this
+// quietly does nothing rather than crashing the app.
+const GITHUB_BACKUP_TOKEN = process.env.GITHUB_BACKUP_TOKEN || "";
+const GITHUB_BACKUP_REPO = process.env.GITHUB_BACKUP_REPO || ""; // format: "yourusername/your-repo"
+let lastCloudBackup = null;
+
+async function runCloudBackup() {
+  if (!GITHUB_BACKUP_TOKEN || !GITHUB_BACKUP_REPO) {
+    lastCloudBackup = { time: new Date().toISOString(), ok: false, error: "Not configured — set GITHUB_BACKUP_TOKEN and GITHUB_BACKUP_REPO." };
+    return lastCloudBackup;
+  }
+  try {
+    const db = loadDB();
+    const content = Buffer.from(JSON.stringify(db, null, 2)).toString("base64");
+    const apiBase = `https://api.github.com/repos/${GITHUB_BACKUP_REPO}/contents`;
+    const headers = {
+      Authorization: `Bearer ${GITHUB_BACKUP_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+    };
+
+    // Always-current backup — one file, overwritten every time, for a fast restore.
+    let sha;
+    try {
+      const getRes = await fetch(`${apiBase}/backups/latest.json`, { headers });
+      if (getRes.ok) { const j = await getRes.json(); sha = j.sha; }
+    } catch (e) {}
+    const putRes = await fetch(`${apiBase}/backups/latest.json`, {
+      method: "PUT", headers,
+      body: JSON.stringify({ message: `Backup ${new Date().toISOString()}`, content, sha }),
+    });
+    if (!putRes.ok) {
+      const errBody = await putRes.text();
+      lastCloudBackup = { time: new Date().toISOString(), ok: false, error: `GitHub returned ${putRes.status}: ${errBody.slice(0, 200)}` };
+      return lastCloudBackup;
+    }
+
+    // Also keep one dated snapshot per day, so there's real history to fall back to.
+    const today = new Date().toISOString().slice(0, 10);
+    const snapshotPath = `backups/snapshots/${today}.json`;
+    let snapshotExists = false;
+    try {
+      const checkRes = await fetch(`${apiBase}/${snapshotPath}`, { headers });
+      snapshotExists = checkRes.ok;
+    } catch (e) {}
+    if (!snapshotExists) {
+      await fetch(`${apiBase}/${snapshotPath}`, {
+        method: "PUT", headers,
+        body: JSON.stringify({ message: `Daily snapshot ${today}`, content }),
+      });
+    }
+
+    lastCloudBackup = { time: new Date().toISOString(), ok: true };
+  } catch (e) {
+    lastCloudBackup = { time: new Date().toISOString(), ok: false, error: e.message };
+  }
+  return lastCloudBackup;
+}
+
+app.get("/api/owner/backup-status", requireOwner, (req, res) => {
+  res.json({ configured: !!(GITHUB_BACKUP_TOKEN && GITHUB_BACKUP_REPO), last: lastCloudBackup });
+});
+
+app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
+  const result = await runCloudBackup();
+  res.json(result);
+});
+
 function csvEscape(val) {
   const s = String(val === undefined || val === null ? "" : val);
   if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
@@ -1123,4 +1195,10 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   });
 });
 
-app.listen(PORT, () => console.log(`SBN Autostyling Tracker running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`SBN Autostyling Tracker running on port ${PORT}`);
+  // First backup shortly after boot (so you don't wait an hour to confirm it's working),
+  // then every hour after that — no manual clicking required.
+  setTimeout(runCloudBackup, 15 * 1000);
+  setInterval(runCloudBackup, 60 * 60 * 1000);
+});
