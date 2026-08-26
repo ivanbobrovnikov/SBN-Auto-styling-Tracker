@@ -410,7 +410,36 @@ function openPrintableReport(title, s, periodLabel) {
   setTimeout(() => win.print(), 300);
 }
 
-async function renderOwnerSummary(content) {
+  const cloudStatus = el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:16px" });
+  const cloudStatusText = el("span", {});
+  async function loadCloudStatus() {
+    try {
+      const s = await api("/api/owner/backup-status");
+      if (!s.configured) {
+        cloudStatusText.textContent = "☁ Automatic cloud backup: not set up yet.";
+        cloudStatusText.style.color = "var(--sub)";
+      } else if (s.last && s.last.ok) {
+        cloudStatusText.textContent = `☁ Automatic cloud backup: last succeeded ${formatDateTime(s.last.time)}`;
+        cloudStatusText.style.color = "var(--green)";
+      } else if (s.last) {
+        cloudStatusText.textContent = `☁ Automatic cloud backup: last attempt failed — ${s.last.error}`;
+        cloudStatusText.style.color = "var(--red)";
+      } else {
+        cloudStatusText.textContent = "☁ Automatic cloud backup: configured, waiting for first run.";
+        cloudStatusText.style.color = "var(--sub)";
+      }
+    } catch (e) {}
+  }
+  const backupNowBtn = el("button", { class: "ghost", style: "margin-left:8px", text: "Test now", onclick: async () => {
+    backupNowBtn.textContent = "Testing...";
+    await api("/api/owner/backup-now", { method: "POST" });
+    await loadCloudStatus();
+    backupNowBtn.textContent = "Test now";
+  } });
+  cloudStatus.appendChild(cloudStatusText);
+  cloudStatus.appendChild(backupNowBtn);
+
+  async function renderOwnerSummary(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "month");
   let lastSummary = null, lastQs = "";
@@ -477,8 +506,10 @@ async function renderOwnerSummary(content) {
   }
   content.appendChild(picker.el);
   content.appendChild(actions);
+  content.appendChild(cloudStatus);
   content.appendChild(body);
   await load();
+  await loadCloudStatus();
 }
 
 async function renderOwnerSales(content) {
