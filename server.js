@@ -921,6 +921,20 @@ app.get("/api/my/sales-schedule", requireSales, (req, res) => {
   res.json(jobs);
 });
 
+// The full shop schedule — every job, not just their own bookings. No price shown, same
+// privacy rule as employees. Read-only: sales reps can see arrival/completion status,
+// never set it.
+app.get("/api/sales/full-schedule", requireSales, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const jobs = db.sales.filter((s) => inRange(s.date, start, end)).map((s) => ({
+    id: s.id, date: s.date, car: s.car, baseService: s.baseService,
+    employeeNames: s.employeeNames || "Unassigned",
+    status: s.status || "pending", completed: !!s.completed,
+  }));
+  res.json(jobs);
+});
+
 app.get("/api/my/sales-performance", requireSales, (req, res) => {
   const db = loadDB();
   const repId = req.auth.role === "owner" && req.query.salesRepId ? req.query.salesRepId : req.auth.id;
@@ -1152,8 +1166,11 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   const sales = excludingCancelled(db.sales.filter((s) => inRange(s.date, start, end)));
   const totalRevenue = sales.reduce((a, s) => a + saleTotal(s), 0);
   const totalUpsell = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
-  const carCount = sales.length;
-  const attachRate = carCount ? (sales.filter((s) => (s.upsells || []).length > 0).length / carCount) * 100 : 0;
+  // "Cars serviced" means the job is actually done — a manager marked it Service Complete.
+  // Everything still on the schedule (booked, arrived-but-not-done, etc.) doesn't count yet.
+  const completedSales = sales.filter((s) => s.completed);
+  const carCount = completedSales.length;
+  const attachRate = carCount ? (completedSales.filter((s) => (s.upsells || []).length > 0).length / carCount) * 100 : 0;
 
   // Base price isn't split per tech since jobs are tag-teamed — "cars worked" and each
   // person's own logged upsell revenue are the numbers that stay unambiguous here.
