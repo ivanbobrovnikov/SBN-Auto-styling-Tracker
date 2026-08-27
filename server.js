@@ -525,11 +525,19 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
   if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
+  let salesRepMatchFailed = false;
   if (salesRepName) {
     const rep = db.salesReps.find((r) => r.name.toLowerCase() === String(salesRepName).trim().toLowerCase());
     if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
+    else salesRepMatchFailed = true;
   }
-  db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "sync", matchedSaleId: sale.id, before, after: { basePrice: sale.basePrice, salesRepName: sale.salesRepName }, body: req.body });
+  db.debugLog.unshift({
+    receivedAt: new Date().toISOString(), endpoint: "sync", matchedSaleId: sale.id, before,
+    after: { basePrice: sale.basePrice, salesRepName: sale.salesRepName },
+    salesRepMatchFailed, salesRepNameReceived: salesRepName || null,
+    knownSalesRepNames: salesRepMatchFailed ? db.salesReps.map((r) => r.name) : undefined,
+    body: req.body,
+  });
   db.debugLog = db.debugLog.slice(0, 30);
   saveDB(db);
   res.json({ ok: true, found: true, saleId: sale.id });
@@ -819,6 +827,8 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       id: s.id,
       date: s.date,
       car: s.car,
+      customerName: s.customerName || "",
+      customerPhone: s.customerPhone || "",
       baseService: s.baseService,
       employeeNames: s.employeeNames || "Unassigned",
       managerHelperNames: s.managerHelperNames || "",
