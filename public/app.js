@@ -209,6 +209,7 @@ async function renderSchedule(content) {
           el("div", {}, [
             el("div", { style: "font-weight:500", text: job.car }),
             el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || "no service set"}` }),
+            (job.customerName || job.customerPhone) ? el("div", { class: "muted", text: `${job.customerName || ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }) : null,
             el("div", { class: "muted", text: `Worked by: ${job.employeeNames}` }),
           ]),
           el("div", { class: "muted", text: job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : "Upcoming" }),
@@ -935,7 +936,7 @@ async function renderAttendance(content) {
   }
 
   const summaryBody = el("div");
-  const summaryPicker = renderPeriodPicker((params) => loadSummary(params), "month");
+  const summaryPicker = renderPeriodPicker((params) => loadSummary(params), "payperiod");
   async function loadSummary(params) {
     const p = params || summaryPicker.getParams();
     const qs = new URLSearchParams(p).toString();
@@ -954,12 +955,12 @@ async function renderAttendance(content) {
     summaryBody.appendChild(table);
   }
 
-  content.appendChild(el("div", { class: "muted", style: "margin-bottom:8px;font-size:11.5px;letter-spacing:0.04em", text: "MARK TODAY (OR ANY DAY)" }));
-  content.appendChild(nav.el);
-  content.appendChild(dayBody);
-  content.appendChild(el("div", { class: "muted", style: "margin:20px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "SUMMARY" }));
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:8px;font-size:11.5px;letter-spacing:0.04em", text: "ATTENDANCE SUMMARY — DAYS PRESENT, HALF-DAY, AND MISSED" }));
   content.appendChild(summaryPicker.el);
   content.appendChild(summaryBody);
+  content.appendChild(el("div", { class: "muted", style: "margin:20px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "MARK TODAY (OR ANY DAY)" }));
+  content.appendChild(nav.el);
+  content.appendChild(dayBody);
   await loadDay();
   await loadSummary();
 }
@@ -1305,7 +1306,8 @@ async function renderTestTool(content) {
     if (log.length === 0) { debugBody.appendChild(el("div", { class: "muted", text: "Nothing logged yet." })); return; }
     log.forEach((entry) => {
       const isFailure = !!entry.failedReason;
-      const isSuccess = !!entry.matchedSaleId;
+      const isWarning = !!entry.salesRepMatchFailed;
+      const isSuccess = !!entry.matchedSaleId && !isWarning;
       const summary = [];
       if (entry.endpoint) summary.push(`Endpoint: ${entry.endpoint}`);
       if (isSuccess) summary.push(`✓ Matched and updated job ${entry.matchedSaleId}`);
@@ -1313,10 +1315,14 @@ async function renderTestTool(content) {
       if (entry.after) summary.push(`After: ${JSON.stringify(entry.after)}`);
       if (isFailure) summary.push(`✗ FAILED: ${entry.failedReason}`);
       if (entry.knownContactIds) summary.push(`Contact IDs currently on file: ${JSON.stringify(entry.knownContactIds)}`);
+      if (entry.salesRepMatchFailed) {
+        summary.push(`⚠ Sales rep "${entry.salesRepNameReceived}" didn't match anyone registered`);
+        summary.push(`Registered sales rep names: ${JSON.stringify(entry.knownSalesRepNames)}`);
+      }
       if (entry.contentType) summary.push(`Content-Type: ${entry.contentType}`);
       debugBody.appendChild(el("div", { class: "card" }, [
         el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: entry.receivedAt }),
-        summary.length ? el("div", { style: `font-size:12px;margin-bottom:8px;font-weight:500;color:${isFailure ? "var(--red)" : isSuccess ? "var(--green)" : "var(--sub)"}` },
+        summary.length ? el("div", { style: `font-size:12px;margin-bottom:8px;font-weight:500;color:${isFailure ? "var(--red)" : isWarning ? "var(--amber)" : isSuccess ? "var(--green)" : "var(--sub)"}` },
           summary.map((line) => el("div", { text: line }))) : null,
         el("div", { class: "muted", style: "font-size:10.5px;margin-bottom:4px", text: "Raw payload received:" }),
         el("pre", { style: "font-family:monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--text);margin:0", text: JSON.stringify(entry.body, null, 2) }),
