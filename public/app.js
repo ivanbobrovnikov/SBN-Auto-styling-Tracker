@@ -1304,8 +1304,21 @@ async function renderTestTool(content) {
     debugBody.innerHTML = "";
     if (log.length === 0) { debugBody.appendChild(el("div", { class: "muted", text: "Nothing logged yet." })); return; }
     log.forEach((entry) => {
+      const isFailure = !!entry.failedReason;
+      const isSuccess = !!entry.matchedSaleId;
+      const summary = [];
+      if (entry.endpoint) summary.push(`Endpoint: ${entry.endpoint}`);
+      if (isSuccess) summary.push(`✓ Matched and updated job ${entry.matchedSaleId}`);
+      if (entry.before) summary.push(`Before: ${JSON.stringify(entry.before)}`);
+      if (entry.after) summary.push(`After: ${JSON.stringify(entry.after)}`);
+      if (isFailure) summary.push(`✗ FAILED: ${entry.failedReason}`);
+      if (entry.knownContactIds) summary.push(`Contact IDs currently on file: ${JSON.stringify(entry.knownContactIds)}`);
+      if (entry.contentType) summary.push(`Content-Type: ${entry.contentType}`);
       debugBody.appendChild(el("div", { class: "card" }, [
         el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: entry.receivedAt }),
+        summary.length ? el("div", { style: `font-size:12px;margin-bottom:8px;font-weight:500;color:${isFailure ? "var(--red)" : isSuccess ? "var(--green)" : "var(--sub)"}` },
+          summary.map((line) => el("div", { text: line }))) : null,
+        el("div", { class: "muted", style: "font-size:10.5px;margin-bottom:4px", text: "Raw payload received:" }),
         el("pre", { style: "font-family:monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--text);margin:0", text: JSON.stringify(entry.body, null, 2) }),
       ]));
     });
