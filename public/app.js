@@ -513,6 +513,134 @@ function openPrintableReport(title, s, periodLabel) {
   await loadCloudStatus();
 }
 
+function sameLocalDay(d1, d2) {
+  return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
+}
+function jobStatusColors(s) {
+  if (s.status === "cancelled") return { bg: "var(--borderSoft)", border: "var(--muted)", text: "var(--muted)" };
+  if (s.status === "arrived") return { bg: "#173404", border: "var(--green)", text: "var(--green)" };
+  if (s.status === "no_show") return { bg: "#501313", border: "var(--red)", text: "var(--red)" };
+  return { bg: "var(--cyanDim)", border: "var(--cyan)", text: "var(--cyan)" };
+}
+
+// Week view — a real time-of-day grid, same visual language across all three calendar levels.
+function renderWeekGrid(sales) {
+  const startHour = 7, endHour = 19;
+  const first = sales.length ? new Date(sales[0].date) : new Date();
+  const day = first.getDay();
+  const monday = new Date(first); monday.setDate(first.getDate() - ((day + 6) % 7)); monday.setHours(0, 0, 0, 0);
+  const days = Array.from({ length: 7 }, (_, i) => { const d = new Date(monday); d.setDate(monday.getDate() + i); return d; });
+  const today = new Date();
+  const gridHeight = (endHour - startHour) * 44;
+
+  const header = el("div", { style: "display:grid;grid-template-columns:44px repeat(7,1fr);gap:0;font-size:11px;margin-bottom:2px" }, [
+    el("div", {}),
+    ...days.map((d) => el("div", {
+      style: `text-align:center;padding:6px 2px;${sameLocalDay(d, today) ? "background:var(--cardAlt);border-radius:6px 6px 0 0;color:var(--amber);font-weight:500" : "color:var(--sub)"}`,
+      text: d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }),
+    })),
+  ]);
+
+  const axis = el("div", { style: `display:grid;grid-template-rows:repeat(${(endHour - startHour) / 2},88px)` });
+  for (let h = startHour; h < endHour; h += 2) {
+    axis.appendChild(el("div", { class: "muted", style: "font-size:10px;padding-top:2px", text: h === 12 ? "12pm" : h > 12 ? `${h - 12}pm` : `${h}am` }));
+  }
+
+  const grid = el("div", { style: `display:grid;grid-template-columns:44px repeat(7,minmax(90px,1fr));gap:0;border-top:0.5px solid var(--border)` }, [axis]);
+  days.forEach((d) => {
+    const col = el("div", { style: `position:relative;height:${gridHeight}px;border-left:0.5px solid var(--borderSoft)` });
+    sales.filter((s) => sameLocalDay(new Date(s.date), d)).forEach((s) => {
+      const jd = new Date(s.date);
+      const hourFrac = Math.max(startHour, Math.min(endHour, jd.getHours() + jd.getMinutes() / 60));
+      const top = ((hourFrac - startHour) / (endHour - startHour)) * gridHeight;
+      const c = jobStatusColors(s);
+      const timeLabel = jd.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+      col.appendChild(el("div", {
+        style: `position:absolute;top:${top}px;left:2px;right:2px;background:${c.bg};border-left:3px solid ${c.border};border-radius:4px;padding:3px 5px;font-size:10px;cursor:default`,
+        text: s.car,
+      }, [el("div", { style: `color:${c.text};font-size:9.5px`, text: timeLabel })]));
+    });
+    grid.appendChild(col);
+  });
+
+  return el("div", { style: "background:var(--panel);border-radius:12px;padding:14px;overflow-x:auto" }, [header, grid]);
+}
+
+// Month view — a day-grid (30 tiny time-grids would be unreadable), using the same colored
+// chip language as the week view for visual consistency.
+function renderMonthGrid(sales, monthStr) {
+  const [y, m] = monthStr.split("-").map(Number);
+  const firstOfMonth = new Date(y, m - 1, 1);
+  const startOffset = firstOfMonth.getDay();
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startOffset; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(y, m - 1, d));
+  const today = new Date();
+
+  const header = el("div", { style: "display:grid;grid-template-columns:repeat(7,1fr);gap:1px;font-size:11px;margin-bottom:4px" },
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => el("div", { class: "muted", style: "text-align:center;padding:4px", text: d })));
+
+  const grid = el("div", { style: "display:grid;grid-template-columns:repeat(7,1fr);grid-auto-rows:76px;gap:1px;background:var(--borderSoft)" });
+  cells.forEach((d) => {
+    if (!d) { grid.appendChild(el("div", { style: "background:var(--panel)" })); return; }
+    const dayJobs = sales.filter((s) => sameLocalDay(new Date(s.date), d));
+    const isToday = sameLocalDay(d, today);
+    const cell = el("div", { style: `background:${isToday ? "var(--cardAlt)" : "var(--panel)"};padding:4px;${isToday ? "border:1px solid var(--amber)" : ""}` }, [
+      el("div", { style: `font-size:10px;${isToday ? "color:var(--amber);font-weight:500" : "color:var(--sub)"}`, text: d.getDate() }),
+    ]);
+    dayJobs.slice(0, 2).forEach((s) => {
+      const c = jobStatusColors(s);
+      const jd = new Date(s.date);
+      const timeLabel = jd.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+      cell.appendChild(el("div", { style: `background:${c.bg};border-radius:3px;padding:1px 4px;font-size:9.5px;color:${c.text};margin-top:2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis`, text: `${s.car} ${timeLabel}` }));
+    });
+    if (dayJobs.length > 2) cell.appendChild(el("div", { class: "muted", style: "font-size:9px;margin-top:1px", text: `+${dayJobs.length - 2} more` }));
+    grid.appendChild(cell);
+  });
+
+  return el("div", { style: "background:var(--panel);border-radius:12px;padding:14px;overflow-x:auto" }, [header, grid]);
+}
+
+// Year view — a density heatmap, the only readable way to show 365 days at once. Same
+// amber-intensity language as the mockup: darker means more jobs that day.
+function renderYearGrid(sales, yearStr) {
+  const year = parseInt(yearStr, 10);
+  const countsByDay = {};
+  sales.forEach((s) => {
+    const d = new Date(s.date);
+    if (d.getFullYear() !== year) return;
+    const key = `${d.getMonth()}-${d.getDate()}`;
+    countsByDay[key] = (countsByDay[key] || 0) + 1;
+  });
+  const maxCount = Math.max(1, ...Object.values(countsByDay));
+  const shades = ["var(--borderSoft)", "#4A3A22", "#854F0B", "#412402"];
+  function shadeFor(count) {
+    if (!count) return shades[0];
+    const ratio = count / maxCount;
+    if (ratio > 0.66) return shades[3];
+    if (ratio > 0.33) return shades[2];
+    return shades[1];
+  }
+  const months = el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px" });
+  for (let m = 0; m < 12; m++) {
+    const daysInMonth = new Date(year, m + 1, 0).getDate();
+    const monthLabel = new Date(year, m, 1).toLocaleDateString(undefined, { month: "short" });
+    const dayGrid = el("div", { style: "display:grid;grid-template-columns:repeat(7,1fr);gap:2px" });
+    for (let d = 1; d <= daysInMonth; d++) {
+      const count = countsByDay[`${m}-${d}`] || 0;
+      dayGrid.appendChild(el("div", { style: `aspect-ratio:1;background:${shadeFor(count)};border-radius:2px` }));
+    }
+    months.appendChild(el("div", {}, [el("div", { style: "font-size:11.5px;color:var(--amber);margin-bottom:4px", text: monthLabel }), dayGrid]));
+  }
+  const legend = el("div", { style: "display:flex;align-items:center;gap:6px;font-size:10px;margin-top:14px", class: "muted" }, [
+    el("span", { text: "Fewer jobs" }),
+    ...shades.map((s) => el("div", { style: `width:12px;height:12px;background:${s};border-radius:2px` })),
+    el("span", { text: "More jobs" }),
+  ]);
+  return el("div", { style: "background:var(--panel);border-radius:12px;padding:14px" }, [months, legend]);
+}
+
 async function renderOwnerSales(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "day");
@@ -522,6 +650,11 @@ async function renderOwnerSales(content) {
     const sales = await api(`/api/owner/sales?${qs}`);
     body.innerHTML = "";
     if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
+
+    if (p.period === "week") { body.appendChild(renderWeekGrid(sales)); return; }
+    if (p.period === "month") { body.appendChild(renderMonthGrid(sales, p.month)); return; }
+    if (p.period === "year") { body.appendChild(renderYearGrid(sales, p.date.slice(0, 4))); return; }
+
     sales.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((s) => {
       const cancelled = s.status === "cancelled";
       const statusLabel = cancelled ? "Cancelled" : s.status === "arrived" ? "Arrived" : s.status === "no_show" ? "No-show" : "Upcoming";
