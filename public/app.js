@@ -164,7 +164,7 @@ function renderTabs() {
   } else if (session.role === "manager") {
     tabs = [["manager-jobs", "Job status"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
   } else if (session.role === "sales") {
-    tabs = [["sales-schedule", "My Bookings"], ["sales-performance", "My Performance"]];
+    tabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
   } else {
     tabs = [["schedule", "Schedule"], ["performance", "My performance"]];
   }
@@ -280,6 +280,7 @@ async function renderManagerTabContent(content) {
 
 async function renderSalesTabContent(content) {
   if (currentTab === "sales-performance") return renderSalesPerformance(content);
+  if (currentTab === "sales-fullschedule") return renderSalesFullSchedule(content);
   return renderSalesSchedule(content);
 }
 
@@ -514,26 +515,37 @@ function openPrintableReport(title, s, periodLabel) {
 
 async function renderOwnerSales(content) {
   const body = el("div");
-  const picker = renderPeriodPicker((params) => load(params), "month");
+  const picker = renderPeriodPicker((params) => load(params), "day");
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const sales = await api(`/api/owner/sales?${qs}`);
     body.innerHTML = "";
     if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
-    sales.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((s) => {
+    sales.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((s) => {
       const cancelled = s.status === "cancelled";
-      body.appendChild(el("div", { class: "card", style: cancelled ? "opacity:0.55" : "" }, [
-        el("div", { class: "row" }, [
-          el("div", {}, [
-            el("div", { style: "font-weight:500", text: `${s.car} ${s.syncedFromGHL ? "🔗" : ""} ${cancelled ? "— CANCELLED" : ""}` }),
-            el("div", { class: "muted", text: `${formatDateTime(s.date)} · ${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
-            el("div", { class: "muted", style: "font-size:10.5px;margin-top:2px", text: `ID: ${s.id}` }),
-            (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }))) : null,
-          ]),
-          el("div", { style: "text-align:right" }, [
-            el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:17px`, text: cancelled ? "—" : money(s.total) }),
-            s.paid ? el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11.5px;text-align:right", text: cancelled ? "Cancelled" : "Unpaid" }),
+      const statusLabel = cancelled ? "Cancelled" : s.status === "arrived" ? "Arrived" : s.status === "no_show" ? "No-show" : "Upcoming";
+      const statusColor = cancelled ? "var(--red)" : s.status === "arrived" ? "var(--green)" : s.status === "no_show" ? "var(--red)" : "var(--sub)";
+      const d = new Date(s.date);
+      const timeOnly = isNaN(d.getTime()) ? "—" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+      const dateOnly = isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+      body.appendChild(el("div", { class: "card", style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
+        el("div", { style: "min-width:64px;text-align:center;background:var(--cardAlt);border-radius:7px;padding:8px 4px;flex-shrink:0" }, [
+          el("div", { class: "mono", style: "font-size:14px;font-weight:600", text: timeOnly }),
+          el("div", { class: "muted", style: "font-size:10px", text: dateOnly }),
+        ]),
+        el("div", { style: "flex:1;min-width:0" }, [
+          el("div", { style: "font-weight:500", text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
+          el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
+          (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }))) : null,
+        ]),
+        el("div", { style: "text-align:right;flex-shrink:0" }, [
+          el("div", { style: `color:${statusColor};font-size:12px;font-weight:600;margin-bottom:2px`, text: statusLabel }),
+          el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px`, text: cancelled ? "—" : money(s.total) }),
+          s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : "Unpaid" }),
+          el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end" }, [
+            el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => navigator.clipboard.writeText(s.id), text: "Copy ID" }),
             el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${s.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
           ]),
         ]),
@@ -558,10 +570,20 @@ async function renderOwnerTeam(content) {
     employees.forEach((e) => {
       const rate = el("input", { type: "number", value: e.commissionRate, style: "max-width:80px" });
       rate.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
+      const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
+      const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: e.name }),
         rate,
         el("span", { class: "muted", text: "% commission" }),
+        newPinInput,
+        el("button", { class: "ghost", onclick: async () => {
+          if (!newPinInput.value.trim()) return;
+          await api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ pin: newPinInput.value.trim() }) });
+          newPinInput.value = ""; resetNotice.textContent = "PIN reset ✓"; resetNotice.style.color = "var(--green)";
+          setTimeout(() => { resetNotice.textContent = ""; }, 2500);
+        }, text: "Reset PIN" }),
+        resetNotice,
         el("button", { class: "icon-danger", onclick: async () => { await api(`/api/employees/${e.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
       ]));
     });
@@ -611,6 +633,38 @@ async function renderSalesSchedule(content) {
     });
   }
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Status here is set by your manager — this is a read-only view of what you booked and whether it showed." }));
+  content.appendChild(nav.el);
+  content.appendChild(body);
+  await load();
+}
+
+// Full shop schedule for sales reps — every job, not just their own bookings. No price
+// shown (same privacy rule as employees), but arrival/completion status is visible.
+async function renderSalesFullSchedule(content) {
+  const body = el("div");
+  const nav = renderDayNav((params) => load(params));
+  async function load(params) {
+    const p = params || nav.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const jobs = await api(`/api/sales/full-schedule?${qs}`);
+    body.innerHTML = "";
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
+    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
+      const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : "Upcoming";
+      const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : "var(--sub)";
+      body.appendChild(el("div", { class: "card row" }, [
+        el("div", {}, [
+          el("div", { style: "font-weight:500", text: job.car }),
+          el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || ""} · ${job.employeeNames}` }),
+        ]),
+        el("div", { style: "text-align:right" }, [
+          el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
+          job.completed ? el("div", { class: "muted", style: "font-size:11px", text: "Service complete" }) : null,
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Every car on the schedule, not just yours. Status is set by your manager." }));
   content.appendChild(nav.el);
   content.appendChild(body);
   await load();
@@ -674,10 +728,20 @@ async function renderOwnerSalesReps(content) {
       const afterRate = el("input", { type: "number", value: r.afterHoursCommissionRate || 0, style: "max-width:70px" });
       rate.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
       afterRate.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ afterHoursCommissionRate: afterRate.value }) }));
+      const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:90px" });
+      const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: r.name }),
         el("span", { class: "muted", style: "font-size:11.5px", text: "In hours:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         el("span", { class: "muted", style: "font-size:11.5px;margin-left:8px", text: "After hours:" }), afterRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
+        newPinInput,
+        el("button", { class: "ghost", onclick: async () => {
+          if (!newPinInput.value.trim()) return;
+          await api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ pin: newPinInput.value.trim() }) });
+          newPinInput.value = ""; resetNotice.textContent = "PIN reset ✓"; resetNotice.style.color = "var(--green)";
+          setTimeout(() => { resetNotice.textContent = ""; }, 2500);
+        }, text: "Reset PIN" }),
+        resetNotice,
         el("button", { class: "icon-danger", onclick: async () => { await api(`/api/salesreps/${r.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
       ]));
     });
@@ -995,10 +1059,20 @@ async function renderOwnerManagers(content) {
     managers.forEach((m) => {
       const rate = el("input", { type: "number", value: m.commissionRate || 0, style: "max-width:80px" });
       rate.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
+      const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
+      const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: m.name }),
         rate,
         el("span", { class: "muted", text: "% commission" }),
+        newPinInput,
+        el("button", { class: "ghost", onclick: async () => {
+          if (!newPinInput.value.trim()) return;
+          await api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ pin: newPinInput.value.trim() }) });
+          newPinInput.value = ""; resetNotice.textContent = "PIN reset ✓"; resetNotice.style.color = "var(--green)";
+          setTimeout(() => { resetNotice.textContent = ""; }, 2500);
+        }, text: "Reset PIN" }),
+        resetNotice,
         el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
       ]));
     });
