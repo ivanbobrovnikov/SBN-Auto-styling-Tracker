@@ -365,17 +365,17 @@ app.post("/api/logout", (req, res) => {
 // ---------- employees (owner only to manage; employee can read own record) ----------
 app.get("/api/employees", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json(db.employees.map((e) => ({ id: e.id, name: e.name, commissionRate: e.commissionRate })));
+  res.json(db.employees.map((e) => ({ id: e.id, name: e.name, commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0 })));
 });
 
 app.post("/api/employees", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, commissionRate, pin } = req.body;
+  const { name, commissionRate, walkInCommissionRate, pin } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
-  const emp = { id: newId(), name: name.trim(), commissionRate: parseFloat(commissionRate) || 0, pinHash: hash(pin) };
+  const emp = { id: newId(), name: name.trim(), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0, pinHash: hash(pin) };
   db.employees.push(emp);
   saveDB(db);
-  res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate });
+  res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate });
 });
 
 app.patch("/api/employees/:id", requireOwner, (req, res) => {
@@ -384,6 +384,7 @@ app.patch("/api/employees/:id", requireOwner, (req, res) => {
   if (!emp) return res.status(404).json({ error: "Not found." });
   if (req.body.name) emp.name = req.body.name.trim();
   if (req.body.commissionRate !== undefined) emp.commissionRate = parseFloat(req.body.commissionRate) || 0;
+  if (req.body.walkInCommissionRate !== undefined) emp.walkInCommissionRate = parseFloat(req.body.walkInCommissionRate) || 0;
   if (req.body.pin) emp.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
@@ -399,17 +400,17 @@ app.delete("/api/employees/:id", requireOwner, (req, res) => {
 // ---------- managers (owner only to manage) ----------
 app.get("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json(db.managers.map((m) => ({ id: m.id, name: m.name, commissionRate: m.commissionRate || 0 })));
+  res.json(db.managers.map((m) => ({ id: m.id, name: m.name, commissionRate: m.commissionRate || 0, walkInCommissionRate: m.walkInCommissionRate || 0 })));
 });
 
 app.post("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, pin, commissionRate } = req.body;
+  const { name, pin, commissionRate, walkInCommissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
-  const mgr = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0 };
+  const mgr = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0 };
   db.managers.push(mgr);
   saveDB(db);
-  res.json({ id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate });
+  res.json({ id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate, walkInCommissionRate: mgr.walkInCommissionRate });
 });
 
 app.patch("/api/managers/:id", requireOwner, (req, res) => {
@@ -417,6 +418,7 @@ app.patch("/api/managers/:id", requireOwner, (req, res) => {
   const mgr = db.managers.find((m) => m.id === req.params.id);
   if (!mgr) return res.status(404).json({ error: "Not found." });
   if (req.body.commissionRate !== undefined) mgr.commissionRate = parseFloat(req.body.commissionRate) || 0;
+  if (req.body.walkInCommissionRate !== undefined) mgr.walkInCommissionRate = parseFloat(req.body.walkInCommissionRate) || 0;
   if (req.body.pin) mgr.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
@@ -756,7 +758,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
-    total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
+    basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
   })));
 });
@@ -765,6 +767,10 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
+  // Manual price correction — the price GHL/sync captured isn't always final; a customer
+  // can negotiate down after the fact. This flows through to every downstream number
+  // automatically (total, commission math), since everything reads from this one field.
+  if (req.body.basePrice !== undefined) sale.basePrice = parseFloat(req.body.basePrice) || 0;
   if (req.body.status !== undefined) sale.status = req.body.status;
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
   if (req.body.paid !== undefined) {
@@ -900,10 +906,18 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   const sorted = Object.values(breakdown).sort((a, b) => b.revenue - a.revenue);
   const commission = emp && emp.commissionRate ? upsellRev * (emp.commissionRate / 100) : 0;
 
+  // Walk-in closer commission is separate from the tech-assignment filter above — closing
+  // a walk-in isn't the same thing as being assigned to physically work the car.
+  const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "employee" && s.walkInClosedById === employeeId && inRange(s.date, start, end) && s.status !== "cancelled");
+  const walkInClosedCount = myWalkIns.length;
+  const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+  const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
+
   res.json({
     cars, attachRate, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: emp ? emp.commissionRate : 0, commission,
+    walkInCommissionRate: emp ? emp.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
   });
 });
 
@@ -929,10 +943,16 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const sorted = Object.values(breakdown).sort((a, b) => b.revenue - a.revenue);
   const commission = mgr && mgr.commissionRate ? upsellRev * (mgr.commissionRate / 100) : 0;
 
+  const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "manager" && s.walkInClosedById === managerId && inRange(s.date, start, end) && s.status !== "cancelled");
+  const walkInClosedCount = myWalkIns.length;
+  const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+  const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
+
   res.json({
     cars, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: mgr ? mgr.commissionRate : 0, commission,
+    walkInCommissionRate: mgr ? mgr.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
     jobs: relevant.map((s) => ({
       id: s.id, date: s.date, car: s.car, customerName: s.customerName,
       upsells: myUpsells(s).map((u) => ({ name: u.name, price: u.price })),
@@ -951,6 +971,15 @@ function salesRepCommissionForSale(rep, sale) {
   const duringHours = isDuringBusinessHours(sale.closedAt || sale.date);
   const rate = duringHours ? (rep.commissionRate || 0) : (rep.afterHoursCommissionRate || 0);
   return { amount: (parseFloat(sale.basePrice) || 0) * (rate / 100), duringHours };
+}
+
+// Walk-in closer commission — a DIFFERENT rule than sales reps. This requires the job to
+// be both arrived AND marked paid, not just arrived. It's on the base price, only for
+// whoever is recorded as having personally closed that specific walk-in.
+function walkInCommissionForSale(person, sale) {
+  if (!person || !sale.isWalkIn || sale.status !== "arrived" || !sale.paid) return 0;
+  const rate = person.walkInCommissionRate || 0;
+  return (parseFloat(sale.basePrice) || 0) * (rate / 100);
 }
 
 app.get("/api/my/sales-schedule", requireSales, (req, res) => {
