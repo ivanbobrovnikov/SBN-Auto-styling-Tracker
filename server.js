@@ -527,9 +527,26 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
   let salesRepMatchFailed = false;
   if (salesRepName) {
-    const rep = db.salesReps.find((r) => r.name.toLowerCase() === String(salesRepName).trim().toLowerCase());
-    if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
-    else salesRepMatchFailed = true;
+    const nameLower = String(salesRepName).trim().toLowerCase();
+    const rep = db.salesReps.find((r) => r.name.toLowerCase() === nameLower);
+    if (rep) {
+      sale.salesRepId = rep.id; sale.salesRepName = rep.name; sale.isWalkIn = false;
+    } else {
+      // If the "owner" on the contact is actually a manager or tech (not a sales rep),
+      // this was a walk-in or staff-booked appointment — not a real sales rep close.
+      // No commission should ever go to anyone for this, and it's not a data error,
+      // so it shouldn't show up as a mismatch warning either.
+      const staffManager = db.managers.find((m) => m.name.toLowerCase() === nameLower);
+      const staffEmployee = !staffManager && db.employees.find((e) => e.name.toLowerCase() === nameLower);
+      if (staffManager || staffEmployee) {
+        sale.salesRepId = null; sale.salesRepName = "Walk-in (booked by staff)"; sale.isWalkIn = true;
+        sale.walkInClosedByType = staffManager ? "manager" : "employee";
+        sale.walkInClosedById = staffManager ? staffManager.id : staffEmployee.id;
+        sale.walkInClosedByName = staffManager ? staffManager.name : staffEmployee.name;
+      } else {
+        salesRepMatchFailed = true;
+      }
+    }
   }
   db.debugLog.unshift({
     receivedAt: new Date().toISOString(), endpoint: "sync", matchedSaleId: sale.id, before,
@@ -737,7 +754,8 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
-    salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned",
+    salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
+    walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
   })));
@@ -772,6 +790,24 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     sale.salesRepId = req.body.salesRepId;
     const rep = db.salesReps.find((r) => r.id === req.body.salesRepId);
     sale.salesRepName = rep ? rep.name : "Unassigned";
+    sale.isWalkIn = false;
+  }
+  // Manual override — mark any job as a walk-in/staff-booked appointment, no sales rep
+  // commission applies regardless of what GHL says.
+  if (req.body.isWalkIn !== undefined) {
+    sale.isWalkIn = !!req.body.isWalkIn;
+    if (sale.isWalkIn) { sale.salesRepId = null; sale.salesRepName = "Walk-in (booked by staff)"; }
+    else { sale.walkInClosedByType = null; sale.walkInClosedById = null; sale.walkInClosedByName = null; }
+  }
+  // Assign or change who actually closed a walk-in — attribution/tracking only, not tied
+  // to any commission calculation.
+  if (req.body.walkInClosedByType !== undefined && req.body.walkInClosedById !== undefined) {
+    const person = req.body.walkInClosedByType === "manager"
+      ? db.managers.find((m) => m.id === req.body.walkInClosedById)
+      : db.employees.find((e) => e.id === req.body.walkInClosedById);
+    sale.walkInClosedByType = req.body.walkInClosedByType;
+    sale.walkInClosedById = req.body.walkInClosedById;
+    sale.walkInClosedByName = person ? person.name : "Unknown";
   }
   saveDB(db);
   res.json({ ok: true });
