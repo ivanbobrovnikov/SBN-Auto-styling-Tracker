@@ -111,16 +111,16 @@ async function boot() {
 function render() {
   const app = document.getElementById("app");
   app.innerHTML = "";
+
+  if (!session.role) {
+    app.appendChild(renderLoginScreen());
+    return;
+  }
+
   app.appendChild(el("div", { class: "header" }, [
     el("div", { class: "title oswald", text: "SBN Autostyling Tracker" }),
     el("div", { class: "subtitle", text: "Window tint · PPF · Ceramic coating — West Berlin, NJ" }),
   ]));
-
-  if (!session.role) {
-    app.appendChild(session.ownerPinSet ? renderLogin() : renderOwnerSetup());
-    return;
-  }
-
   app.appendChild(renderTabs());
   const content = el("div", { id: "content" });
   app.appendChild(content);
@@ -130,29 +130,42 @@ function render() {
   else renderEmployeeTabContent(content);
 }
 
+function renderLoginScreen() {
+  const inner = session.ownerPinSet ? renderLogin() : renderOwnerSetup();
+  return el("div", { style: "min-height:78vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px" }, [
+    el("div", { style: "text-align:center;margin-bottom:28px" }, [
+      el("div", { class: "oswald", style: "font-size:26px;font-weight:700;color:var(--amber);letter-spacing:0.04em", text: "SBN AUTOSTYLING" }),
+      el("div", { class: "muted", style: "font-size:11px;margin-top:4px;letter-spacing:0.12em;text-transform:uppercase", text: "Shop Management Tracker" }),
+    ]),
+    inner,
+  ]);
+}
+
 function renderOwnerSetup() {
   const pinInput = el("input", { type: "password", placeholder: "Choose a PIN (4+ digits)" });
   const notice = el("div", { class: "notice" });
-  const card = el("div", { class: "card" }, [
-    el("div", { class: "field" }, [el("label", { text: "First-time setup: create the owner PIN" }), pinInput]),
-    el("button", { class: "primary", onclick: async () => {
+  return el("div", { class: "card", style: "max-width:360px;width:100%;border-top:2px solid var(--amber)" }, [
+    el("div", { style: "font-size:11.5px;color:var(--sub);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:14px;text-align:center", text: "First-time setup" }),
+    el("div", { class: "field" }, [el("label", { text: "Create the owner PIN" }), pinInput]),
+    el("button", { class: "primary", style: "width:100%;margin-top:6px", onclick: async () => {
       try { await api("/api/setup/owner-pin", { method: "POST", body: JSON.stringify({ pin: pinInput.value }) }); await boot(); }
       catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
     }, text: "Set PIN & continue" }),
     notice,
   ]);
-  return card;
 }
 
 function renderLogin() {
-  const pinInput = el("input", { type: "password", placeholder: "Enter your PIN" });
+  const pinInput = el("input", { type: "password", placeholder: "PIN" });
   const notice = el("div", { class: "notice" });
-  return el("div", { class: "card", style: "max-width:340px" }, [
-    el("div", { class: "field" }, [el("label", { text: "Enter your PIN to continue" }), pinInput]),
-    el("button", { class: "primary", onclick: async () => {
-      try { session = await api("/api/login", { method: "POST", body: JSON.stringify({ pin: pinInput.value }) }); render(); }
-      catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
-    }, text: "Log in" }),
+  const submit = async () => {
+    try { session = await api("/api/login", { method: "POST", body: JSON.stringify({ pin: pinInput.value }) }); render(); }
+    catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
+  };
+  pinInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  return el("div", { class: "card", style: "max-width:340px;width:100%;border-top:2px solid var(--amber)" }, [
+    el("div", { class: "field" }, [el("label", { text: "Enter your PIN" }), pinInput]),
+    el("button", { class: "primary", style: "width:100%;margin-top:6px", onclick: submit, text: "Log in" }),
     notice,
   ]);
 }
@@ -176,7 +189,15 @@ function renderTabs() {
       text: label,
     }));
   });
-  wrap.appendChild(el("button", { class: "tab-btn", style: "margin-left:auto", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); }, text: "Log out" }));
+  const roleLabel = session.role === "owner" ? "Owner" : session.role === "manager" ? "Manager" : session.role === "sales" ? "Sales" : "Employee";
+  const whoAmI = el("div", { style: "margin-left:auto;display:flex;align-items:center;gap:10px" }, [
+    el("div", { style: "text-align:right" }, [
+      el("div", { style: "font-size:12.5px;font-weight:500", text: session.name || "Owner" }),
+      el("div", { class: "muted", style: "font-size:10.5px;text-transform:uppercase;letter-spacing:0.04em", text: roleLabel }),
+    ]),
+    el("button", { class: "tab-btn", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); }, text: "Log out" }),
+  ]);
+  wrap.appendChild(whoAmI);
   return wrap;
 }
 
@@ -1155,13 +1176,36 @@ async function renderManagerJobs(content) {
           ]),
           el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
         ]),
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: `Sales rep: ${job.salesRepName}` }),
         el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
           statusBtn("arrived", "Arrived"),
           statusBtn("no_show", "No-show"),
           boolBtn("completed", "Service complete"),
           paymentBtn("cash", "Paid — Cash"),
           paymentBtn("card", "Paid — Card"),
+          el("button", {
+            class: "tab-btn" + (job.isWalkIn ? " active" : ""),
+            style: "border-color:" + (job.isWalkIn ? "var(--amber)" : "var(--border)") + ";color:" + (job.isWalkIn ? "var(--amber)" : "var(--sub)"),
+            onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ isWalkIn: !job.isWalkIn }) }); load(); },
+            text: (job.isWalkIn ? "✓ " : "") + "Walk-in (no rep commission)",
+          }),
         ]),
+        job.isWalkIn ? el("div", { style: "margin-bottom:10px" }, [
+          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `WHO ACTUALLY CLOSED THIS WALK-IN? (currently: ${job.walkInClosedByName || "not set"})` }),
+          el("select", {
+            style: "max-width:220px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
+            onchange: async (e) => {
+              const [type, id] = e.target.value.split("::");
+              if (!type || !id) return;
+              await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ walkInClosedByType: type, walkInClosedById: id }) });
+              load();
+            },
+          }, [
+            el("option", { value: "", text: "Select who closed it..." }),
+            ...employees.map((e) => el("option", { value: `employee::${e.id}`, text: `${e.name} (tech)`, ...(job.walkInClosedById === e.id ? { selected: "true" } : {}) })),
+            ...managersList.map((m) => el("option", { value: `manager::${m.id}`, text: `${m.name} (manager)`, ...(job.walkInClosedById === m.id ? { selected: "true" } : {}) })),
+          ]),
+        ]) : null,
         el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `TECHS WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
         assignWrap,
         el("div", { class: "muted", style: "font-size:11.5px;margin:8px 0 2px", text: `MANAGERS WHO ALSO HELPED (currently: ${job.managerHelperNames || "none"})` }),
