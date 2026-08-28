@@ -286,6 +286,19 @@ async function renderPerformance(content) {
         el("div", { class: "row" }, [el("span", { text: stats.growthArea.name }), el("span", { class: "mono muted", text: `${stats.growthArea.count}x · ${money(stats.growthArea.revenue)}` })]),
       ]));
     }
+    if (stats.walkInCommissionRate > 0 || stats.walkInClosedCount > 0) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "WALK-INS YOU CLOSED" }),
+        el("div", { class: "row", style: "margin-bottom:4px" }, [el("span", { class: "muted", text: "Closed this period" }), el("span", { class: "mono", text: stats.walkInClosedCount })]),
+        el("div", { class: "row", style: "margin-bottom:4px" }, [el("span", { class: "muted", text: "Arrived and paid" }), el("span", { class: "mono", style: "color:var(--green)", text: stats.walkInArrivedPaidCount })]),
+        stats.walkInCommissionRate > 0
+          ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px" }, [
+              el("span", { class: "muted", text: `Commission (${stats.walkInCommissionRate}%, only on arrived + paid)` }),
+              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.walkInCommission) }),
+            ])
+          : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px", text: "No walk-in commission rate set for you yet." }),
+      ]));
+    }
   }
   content.appendChild(picker.el);
   content.appendChild(body);
@@ -715,7 +728,8 @@ async function renderOwnerSales(content) {
 async function renderOwnerTeam(content) {
   const nameInput = el("input", { placeholder: "Name" });
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
-  const rateInput = el("input", { type: "number", placeholder: "Commission %", style: "max-width:130px" });
+  const rateInput = el("input", { type: "number", placeholder: "Upsell commission %", style: "max-width:150px" });
+  const walkInRateInput = el("input", { type: "number", placeholder: "Walk-in close %", style: "max-width:140px" });
   const notice = el("div", { class: "notice" });
   const list = el("div");
 
@@ -723,14 +737,16 @@ async function renderOwnerTeam(content) {
     const employees = await api("/api/employees");
     list.innerHTML = "";
     employees.forEach((e) => {
-      const rate = el("input", { type: "number", value: e.commissionRate, style: "max-width:80px" });
+      const rate = el("input", { type: "number", value: e.commissionRate, style: "max-width:70px" });
       rate.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
+      const walkInRate = el("input", { type: "number", value: e.walkInCommissionRate || 0, style: "max-width:70px" });
+      walkInRate.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ walkInCommissionRate: walkInRate.value }) }));
       const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: e.name }),
-        rate,
-        el("span", { class: "muted", text: "% commission" }),
+        el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
+        el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         newPinInput,
         el("button", { class: "ghost", onclick: async () => {
           if (!newPinInput.value.trim()) return;
@@ -745,12 +761,12 @@ async function renderOwnerTeam(content) {
   }
 
   content.appendChild(el("div", { class: "card" }, [
-    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD EMPLOYEE — give them the PIN so they can log in" }),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput,
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD EMPLOYEE — give them the PIN so they can log in. Walk-in close % only pays out once a job is marked both Arrived AND Paid." }),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput, walkInRateInput,
       el("button", { class: "primary", onclick: async () => {
         try {
-          await api("/api/employees", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value }) });
-          nameInput.value = ""; pinInput.value = ""; rateInput.value = "";
+          await api("/api/employees", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value, walkInCommissionRate: walkInRateInput.value }) });
+          nameInput.value = ""; pinInput.value = ""; rateInput.value = ""; walkInRateInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
         } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
@@ -1050,6 +1066,19 @@ async function renderManagerPerformance(content) {
         el("div", { class: "row" }, [el("span", { text: stats.growthArea.name }), el("span", { class: "mono muted", text: `${stats.growthArea.count}x · ${money(stats.growthArea.revenue)}` })]),
       ]));
     }
+    if (stats.walkInCommissionRate > 0 || stats.walkInClosedCount > 0) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "WALK-INS YOU CLOSED" }),
+        el("div", { class: "row", style: "margin-bottom:4px" }, [el("span", { class: "muted", text: "Closed this period" }), el("span", { class: "mono", text: stats.walkInClosedCount })]),
+        el("div", { class: "row", style: "margin-bottom:4px" }, [el("span", { class: "muted", text: "Arrived and paid" }), el("span", { class: "mono", style: "color:var(--green)", text: stats.walkInArrivedPaidCount })]),
+        stats.walkInCommissionRate > 0
+          ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px" }, [
+              el("span", { class: "muted", text: `Commission (${stats.walkInCommissionRate}%, only on arrived + paid)` }),
+              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.walkInCommission) }),
+            ])
+          : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px", text: "No walk-in commission rate set for you yet." }),
+      ]));
+    }
     body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "CARS YOU UPSOLD THIS PERIOD" }));
     if (!stats.jobs || stats.jobs.length === 0) {
       body.appendChild(el("div", { class: "muted", text: "No upsells logged by you in this period." }));
@@ -1167,6 +1196,18 @@ async function renderManagerJobs(content) {
       const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })));
       const upsellForm = renderUpsellForm(job.id, () => load());
 
+      const priceInput = el("input", { type: "number", value: job.basePrice, style: "max-width:90px;text-align:right;font-family:monospace" });
+      const priceNotice = el("span", { class: "muted", style: "font-size:10px" });
+      const priceEditor = el("div", { style: "display:flex;align-items:center;gap:6px;justify-content:flex-end" }, [
+        el("span", { class: "muted", style: "font-size:11px", text: "Base price:" }),
+        priceInput,
+        el("button", { class: "ghost", style: "font-size:11px;padding:3px 8px", onclick: async () => {
+          await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ basePrice: priceInput.value }) });
+          priceNotice.textContent = "Saved ✓"; priceNotice.style.color = "var(--green)";
+          load();
+        }, text: "Save" }),
+      ]);
+
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:10px" }, [
           el("div", {}, [
@@ -1174,8 +1215,12 @@ async function renderManagerJobs(content) {
             el("div", { class: "muted", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }),
             el("div", { class: "muted", text: job.baseService || "no service set" }),
           ]),
-          el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
+          el("div", { style: "text-align:right" }, [
+            el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
+            job.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:10.5px", text: `incl. ${money(job.upsellTotal)} upsells` }) : null,
+          ]),
         ]),
+        el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
         el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: `Sales rep: ${job.salesRepName}` }),
         el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
           statusBtn("arrived", "Arrived"),
@@ -1226,7 +1271,8 @@ async function renderManagerJobs(content) {
 async function renderOwnerManagers(content) {
   const nameInput = el("input", { placeholder: "Name" });
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
-  const rateInput = el("input", { type: "number", placeholder: "Commission %", style: "max-width:130px" });
+  const rateInput = el("input", { type: "number", placeholder: "Upsell commission %", style: "max-width:150px" });
+  const walkInRateInput = el("input", { type: "number", placeholder: "Walk-in close %", style: "max-width:140px" });
   const notice = el("div", { class: "notice" });
   const list = el("div");
 
@@ -1235,14 +1281,16 @@ async function renderOwnerManagers(content) {
     list.innerHTML = "";
     if (managers.length === 0) list.appendChild(el("div", { class: "muted", text: "No managers added yet." }));
     managers.forEach((m) => {
-      const rate = el("input", { type: "number", value: m.commissionRate || 0, style: "max-width:80px" });
+      const rate = el("input", { type: "number", value: m.commissionRate || 0, style: "max-width:70px" });
       rate.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
+      const walkInRate = el("input", { type: "number", value: m.walkInCommissionRate || 0, style: "max-width:70px" });
+      walkInRate.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ walkInCommissionRate: walkInRate.value }) }));
       const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: m.name }),
-        rate,
-        el("span", { class: "muted", text: "% commission" }),
+        el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
+        el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         newPinInput,
         el("button", { class: "ghost", onclick: async () => {
           if (!newPinInput.value.trim()) return;
@@ -1257,12 +1305,12 @@ async function renderOwnerManagers(content) {
   }
 
   content.appendChild(el("div", { class: "card" }, [
-    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD MANAGER — they get their own PIN, a Job Status dashboard, search, and their own upsell performance (no shop-wide revenue or other people's commissions)" }),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput,
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD MANAGER — they get their own PIN, a Job Status dashboard, search, and their own upsell performance (no shop-wide revenue or other people's commissions). Walk-in close % only pays out once a job is marked both Arrived AND Paid." }),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput, walkInRateInput,
       el("button", { class: "primary", onclick: async () => {
         try {
-          await api("/api/managers", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value }) });
-          nameInput.value = ""; pinInput.value = ""; rateInput.value = "";
+          await api("/api/managers", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value, walkInCommissionRate: walkInRateInput.value }) });
+          nameInput.value = ""; pinInput.value = ""; rateInput.value = ""; walkInRateInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
         } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
