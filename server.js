@@ -173,6 +173,28 @@ function ghlPayload(body) {
   return body || {};
 }
 
+// One shared rule for figuring out what a "Booked By" / sales rep name actually means,
+// used identically whether it arrives via the initial booking webhook or the later sync.
+// A real registered sales rep name = normal commission attribution. Anything else — a
+// manager, a tech, the owner personally, or just an unrecognized name — is a walk-in.
+// It's never treated as an error; if it happens to match a specific manager or tech,
+// they're pre-filled as the closer, otherwise it's left for a human to assign.
+function resolveSalesRepAttribution(db, salesRepName) {
+  if (!salesRepName) return null;
+  const nameLower = String(salesRepName).trim().toLowerCase();
+  const rep = db.salesReps.find((r) => r.name.toLowerCase() === nameLower);
+  if (rep) return { salesRepId: rep.id, salesRepName: rep.name, isWalkIn: false };
+  const staffManager = db.managers.find((m) => m.name.toLowerCase() === nameLower);
+  const staffEmployee = !staffManager && db.employees.find((e) => e.name.toLowerCase() === nameLower);
+  const result = { salesRepId: null, salesRepName: "Walk-in (needs closer assigned)", isWalkIn: true };
+  if (staffManager || staffEmployee) {
+    result.walkInClosedByType = staffManager ? "manager" : "employee";
+    result.walkInClosedById = staffManager ? staffManager.id : staffEmployee.id;
+    result.walkInClosedByName = staffManager ? staffManager.name : staffEmployee.name;
+  }
+  return result;
+}
+
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
@@ -184,9 +206,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     if (emp) matched.push(emp);
     else if (n) unmatched.push(n);
   });
-  // Sales rep is the person who closed the lead — usually GHL's "Assigned To" on the opportunity.
-  // Only ever one person here (unlike techs), so a simple name match is enough.
-  const rep = salesRepName ? db.salesReps.find((r) => r.name.toLowerCase() === String(salesRepName).trim().toLowerCase()) : null;
+  const attribution = resolveSalesRepAttribution(db, salesRepName);
 
   const isNew = !db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
@@ -207,7 +227,14 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.car = car || sale.car || "";
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
-  if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
+  if (attribution) {
+    sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
+    if (attribution.walkInClosedByType) {
+      sale.walkInClosedByType = attribution.walkInClosedByType;
+      sale.walkInClosedById = attribution.walkInClosedById;
+      sale.walkInClosedByName = attribution.walkInClosedByName;
+    }
+  }
   else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
   else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
   sale.baseService = baseService || sale.baseService || "";
@@ -527,34 +554,18 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
   if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
-  let salesRepMatchFailed = false;
-  if (salesRepName) {
-    const nameLower = String(salesRepName).trim().toLowerCase();
-    const rep = db.salesReps.find((r) => r.name.toLowerCase() === nameLower);
-    if (rep) {
-      sale.salesRepId = rep.id; sale.salesRepName = rep.name; sale.isWalkIn = false;
-    } else {
-      // If the "owner" on the contact is actually a manager or tech (not a sales rep),
-      // this was a walk-in or staff-booked appointment — not a real sales rep close.
-      // No commission should ever go to anyone for this, and it's not a data error,
-      // so it shouldn't show up as a mismatch warning either.
-      const staffManager = db.managers.find((m) => m.name.toLowerCase() === nameLower);
-      const staffEmployee = !staffManager && db.employees.find((e) => e.name.toLowerCase() === nameLower);
-      if (staffManager || staffEmployee) {
-        sale.salesRepId = null; sale.salesRepName = "Walk-in (booked by staff)"; sale.isWalkIn = true;
-        sale.walkInClosedByType = staffManager ? "manager" : "employee";
-        sale.walkInClosedById = staffManager ? staffManager.id : staffEmployee.id;
-        sale.walkInClosedByName = staffManager ? staffManager.name : staffEmployee.name;
-      } else {
-        salesRepMatchFailed = true;
-      }
+  const attribution = resolveSalesRepAttribution(db, salesRepName);
+  if (attribution) {
+    sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
+    if (attribution.walkInClosedByType) {
+      sale.walkInClosedByType = attribution.walkInClosedByType;
+      sale.walkInClosedById = attribution.walkInClosedById;
+      sale.walkInClosedByName = attribution.walkInClosedByName;
     }
   }
   db.debugLog.unshift({
     receivedAt: new Date().toISOString(), endpoint: "sync", matchedSaleId: sale.id, before,
     after: { basePrice: sale.basePrice, salesRepName: sale.salesRepName },
-    salesRepMatchFailed, salesRepNameReceived: salesRepName || null,
-    knownSalesRepNames: salesRepMatchFailed ? db.salesReps.map((r) => r.name) : undefined,
     body: req.body,
   });
   db.debugLog = db.debugLog.slice(0, 30);
