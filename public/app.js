@@ -710,7 +710,9 @@ async function renderOwnerSales(content) {
         ]),
         el("div", { style: "text-align:right;flex-shrink:0" }, [
           el("div", { style: `color:${statusColor};font-size:12px;font-weight:600;margin-bottom:2px`, text: statusLabel }),
-          el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px`, text: cancelled ? "—" : money(s.total) }),
+          el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : `Base: ${money(s.basePrice)}` }),
+          !cancelled && s.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:11px", text: `Upsells: ${money(s.upsellTotal)}` }) : null,
+          el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px;font-weight:600;margin-top:2px`, text: cancelled ? "—" : `Total: ${money(s.total)}` }),
           s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : "Unpaid" }),
           el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end" }, [
             el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => navigator.clipboard.writeText(s.id), text: "Copy ID" }),
@@ -1216,8 +1218,9 @@ async function renderManagerJobs(content) {
             el("div", { class: "muted", text: job.baseService || "no service set" }),
           ]),
           el("div", { style: "text-align:right" }, [
-            el("div", { class: "mono", style: "color:var(--amber)", text: money(job.total) }),
-            job.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:10.5px", text: `incl. ${money(job.upsellTotal)} upsells` }) : null,
+            el("div", { class: "muted", style: "font-size:11px", text: `Base: ${money(job.basePrice)}` }),
+            job.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:11px", text: `Upsells: ${money(job.upsellTotal)}` }) : null,
+            el("div", { class: "mono", style: "color:var(--amber);font-size:17px;font-weight:600;margin-top:2px", text: `Total: ${money(job.total)}` }),
           ]),
         ]),
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
