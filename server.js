@@ -113,6 +113,17 @@ function money2(n) {
 function excludingCancelled(sales) {
   return sales.filter((s) => s.status !== "cancelled");
 }
+// A job dated before the owner's chosen revenue-tracking start date is excluded from
+// every revenue/commission total, everywhere — but its real price is never touched, and
+// it still shows up completely normally in All Jobs, Search, and the schedule.
+function afterRevenueStart(sale, db) {
+  if (!db.revenueStartDate) return true;
+  return (sale.date || "") >= db.revenueStartDate;
+}
+// The one combined filter used everywhere a dollar total gets calculated.
+function revenueEligible(sales, db) {
+  return excludingCancelled(sales).filter((s) => afterRevenueStart(s, db));
+}
 
 // Converts a wall-clock date/time that's known to represent Eastern time into the correct
 // real UTC instant — accounting for daylight saving automatically, without any external
@@ -933,7 +944,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   const employeeId = req.auth.role === "owner" && req.query.employeeId ? req.query.employeeId : req.auth.id;
   const { start, end } = dateRangeFor(req.query);
   const emp = db.employees.find((e) => e.id === employeeId);
-  const mine = db.sales.filter((s) => saleEmployeeIds(s).includes(employeeId) && inRange(s.date, start, end) && s.status !== "cancelled");
+  const mine = db.sales.filter((s) => saleEmployeeIds(s).includes(employeeId) && inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
 
   // Only upsells this specific person personally logged count toward their own numbers —
   // even on a shared job, a teammate's upsell isn't credited to them.
@@ -955,7 +966,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
 
   // Walk-in closer commission is separate from the tech-assignment filter above — closing
   // a walk-in isn't the same thing as being assigned to physically work the car.
-  const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "employee" && s.walkInClosedById === employeeId && inRange(s.date, start, end) && s.status !== "cancelled");
+  const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "employee" && s.walkInClosedById === employeeId && inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
   const walkInClosedCount = myWalkIns.length;
   const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
@@ -976,7 +987,7 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const mgr = db.managers.find((m) => m.id === managerId);
 
   const myUpsells = (s) => (s.upsells || []).filter((u) => u.managerId === managerId);
-  const relevant = db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && myUpsells(s).length > 0);
+  const relevant = db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db) && myUpsells(s).length > 0);
   const upsellRev = relevant.reduce((a, s) => a + myUpsells(s).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
   const cars = relevant.length;
 
@@ -990,7 +1001,7 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const sorted = Object.values(breakdown).sort((a, b) => b.revenue - a.revenue);
   const commission = mgr && mgr.commissionRate ? upsellRev * (mgr.commissionRate / 100) : 0;
 
-  const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "manager" && s.walkInClosedById === managerId && inRange(s.date, start, end) && s.status !== "cancelled");
+  const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "manager" && s.walkInClosedById === managerId && inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
   const walkInClosedCount = myWalkIns.length;
   const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
@@ -1062,7 +1073,7 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
   const repId = req.auth.role === "owner" && req.query.salesRepId ? req.query.salesRepId : req.auth.id;
   const { start, end } = dateRangeFor(req.query);
   const rep = db.salesReps.find((r) => r.id === repId);
-  const mine = db.sales.filter((s) => s.salesRepId === repId && inRange(s.date, start, end) && s.status !== "cancelled");
+  const mine = db.sales.filter((s) => s.salesRepId === repId && inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
 
   const totalBooked = mine.length;
   const totalBookedValue = mine.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
@@ -1126,7 +1137,7 @@ app.get("/api/owner/sales", requireOwner, (req, res) => {
 app.get("/api/owner/payroll", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const sales = excludingCancelled(db.sales.filter((s) => inRange(s.date, start, end)));
+  const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db);
   const shopTotalUpsellRevenue = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
 
   function personBreakdown(idField, id) {
@@ -1182,23 +1193,19 @@ app.get("/api/owner/backup", requireOwner, (req, res) => {
   res.send(JSON.stringify(db, null, 2));
 });
 
-// Zeroes out every dollar figure so revenue totals start fresh — but keeps every job
-// itself: the car, customer, date, status, who worked it, who upsold what (name stays,
-// just the price resets to $0). Nothing about your schedule or history disappears,
-// only the money numbers that were feeding into revenue totals.
-app.post("/api/owner/clear-all-sales", requireOwner, (req, res) => {
+// Revenue tracking start date — the real fix. Nothing about any job's actual price ever
+// changes. Instead, every job dated before this cutoff simply gets skipped when totaling
+// revenue or commission anywhere in the app, while still showing up completely normally
+// in All Jobs, Search, and the schedule with its real original price intact.
+app.get("/api/owner/revenue-start-date", requireOwner, (req, res) => {
   const db = loadDB();
-  let jobsTouched = 0, upsellsTouched = 0;
-  db.sales.forEach((s) => {
-    if (s.basePrice) jobsTouched += 1;
-    s.basePrice = 0;
-    (s.upsells || []).forEach((u) => {
-      if (u.price) upsellsTouched += 1;
-      u.price = 0;
-    });
-  });
+  res.json({ revenueStartDate: db.revenueStartDate || null });
+});
+app.post("/api/owner/revenue-start-date", requireOwner, (req, res) => {
+  const db = loadDB();
+  db.revenueStartDate = req.body.date || null;
   saveDB(db);
-  res.json({ ok: true, jobsTouched, upsellsTouched });
+  res.json({ ok: true, revenueStartDate: db.revenueStartDate });
 });
 
 // ---------- automated cloud backup — runs on its own, no manual click required ----------
@@ -1304,7 +1311,7 @@ app.get("/api/owner/export/csv", requireOwner, (req, res) => {
 app.get("/api/owner/summary", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const sales = excludingCancelled(db.sales.filter((s) => inRange(s.date, start, end)));
+  const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db);
   const totalRevenue = sales.reduce((a, s) => a + saleTotal(s), 0);
   const totalUpsell = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
   // "Cars serviced" means the job is actually done — a manager marked it Service Complete.
