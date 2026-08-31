@@ -1617,6 +1617,71 @@ async function renderTestTool(content) {
       ]);
     })(),
   ]));
+
+  const importStageId = el("input", { placeholder: "Booked stage ID (from Test 2)", style: "max-width:280px" });
+  const importCutoff = el("input", { type: "date" });
+  const importResults = el("div", { style: "margin-top:10px" });
+  const importStatus = el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px" });
+
+  async function loadImportStatus() {
+    const s = await api("/api/owner/ghl-bulk-import-status");
+    importStatus.textContent = s.cursorSet
+      ? `In progress — ${s.totalImportedSoFar} imported so far. Click "Import this batch" to continue.`
+      : s.totalImportedSoFar > 0
+        ? `Done — ${s.totalImportedSoFar} total imported. Nothing left to import.`
+        : "Not started yet.";
+  }
+
+  function renderImportResult(r) {
+    importResults.innerHTML = "";
+    const lines = [
+      `Processed: ${r.processed}`,
+      `${r.dryRun ? "Would import" : "Imported"}: ${r.dryRun ? r.preview.length : r.imported}`,
+      `Skipped (before cutoff date): ${r.skippedOld}`,
+      `Skipped (no appointment found): ${r.skippedNoAppointment}`,
+      r.errors.length ? `Errors: ${r.errors.length}` : null,
+      r.totalAvailable !== null ? `Total in this stage: ${r.totalAvailable}` : null,
+      r.hasMore ? "More batches remain — click again to continue." : "This was the last batch.",
+    ].filter(Boolean);
+    importResults.appendChild(el("div", { class: "card" }, lines.map((l) => el("div", { style: "font-size:12.5px", text: l }))));
+    if (r.dryRun && r.preview.length) {
+      r.preview.forEach((p) => {
+        importResults.appendChild(el("div", { class: "card", style: "font-size:11.5px" }, [
+          el("div", { style: "font-weight:500", text: p.car || "(no title)" }),
+          el("div", { class: "muted", text: `${p.customerName} · ${p.date} · $${p.basePrice} · ${p.baseService || "service unknown"}` }),
+        ]));
+      });
+    }
+  }
+
+  content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "PHASE 2: REAL IMPORT — imports real jobs from GHL's Booked stage using everything confirmed above. Preview first (nothing saved), then import in small batches. Safe to re-run — matches by opportunity ID, never creates duplicates." }),
+    el("div", { class: "field" }, [el("label", { text: "Booked w/ Deposit stage ID" }), importStageId]),
+    el("div", { class: "field" }, [el("label", { text: "Only import appointments on/after this date" }), importCutoff]),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" }, [
+      el("button", { class: "ghost", onclick: async () => {
+        try {
+          const r = await api("/api/owner/ghl-bulk-import", { method: "POST", body: JSON.stringify({ stageId: importStageId.value.trim(), cutoffDate: importCutoff.value, dryRun: true, batchSize: 15 }) });
+          renderImportResult(r);
+        } catch (e) { alert(e.message); }
+      }, text: "Preview this batch (no changes saved)" }),
+      el("button", { class: "primary", onclick: async () => {
+        try {
+          const r = await api("/api/owner/ghl-bulk-import", { method: "POST", body: JSON.stringify({ stageId: importStageId.value.trim(), cutoffDate: importCutoff.value, dryRun: false, batchSize: 15 }) });
+          renderImportResult(r);
+          await loadImportStatus();
+        } catch (e) { alert(e.message); }
+      }, text: "Import this batch for real" }),
+      el("button", { class: "icon-danger", onclick: async () => {
+        if (!confirm("Reset the import progress cursor? You'll start over from the beginning of the Booked stage next time.")) return;
+        await api("/api/owner/ghl-bulk-import-reset", { method: "POST" });
+        await loadImportStatus();
+      }, text: "Reset progress" }),
+    ]),
+    importStatus,
+    importResults,
+  ]));
+  await loadImportStatus();
   content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "WEBHOOK DEBUG LOG — point any GHL webhook action at the URL below to see exactly what GHL actually sends, raw. Useful for checking whether an event (like a deleted appointment) secretly fires something we haven't mapped yet." }),
     el("div", { class: "mono", style: "font-size:11.5px;color:var(--cyan);margin-bottom:12px;word-break:break-all", text: `${window.location.origin}/api/webhook/ghl/debug?secret=YOUR_WEBHOOK_SECRET` }),
