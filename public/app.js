@@ -1551,15 +1551,28 @@ async function renderTestTool(content) {
         summary.push(`Registered sales rep names: ${JSON.stringify(entry.knownSalesRepNames)}`);
       }
       if (entry.contentType) summary.push(`Content-Type: ${entry.contentType}`);
+      if (entry.requestUrl) summary.push(`Called: ${entry.requestUrl}`);
+      if (entry.responseStatus !== undefined) summary.push(`Response status: ${entry.responseStatus}`);
+      if (entry.error) summary.push(`✗ ERROR: ${entry.error}`);
+      const rawContent = entry.responseBody !== undefined ? entry.responseBody : entry.body;
       debugBody.appendChild(el("div", { class: "card" }, [
         el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: entry.receivedAt }),
-        summary.length ? el("div", { style: `font-size:12px;margin-bottom:8px;font-weight:500;color:${isFailure ? "var(--red)" : isWarning ? "var(--amber)" : isSuccess ? "var(--green)" : "var(--sub)"}` },
+        summary.length ? el("div", { style: `font-size:12px;margin-bottom:8px;font-weight:500;color:${isFailure || entry.error ? "var(--red)" : isWarning ? "var(--amber)" : isSuccess ? "var(--green)" : "var(--sub)"}` },
           summary.map((line) => el("div", { text: line }))) : null,
-        el("div", { class: "muted", style: "font-size:10.5px;margin-bottom:4px", text: "Raw payload received:" }),
-        el("pre", { style: "font-family:monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--text);margin:0", text: JSON.stringify(entry.body, null, 2) }),
+        el("div", { class: "muted", style: "font-size:10.5px;margin-bottom:4px", text: "Raw content received:" }),
+        el("pre", { style: "font-family:monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--text);margin:0", text: JSON.stringify(rawContent, null, 2) }),
       ]));
     });
   }
+  content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "GHL API IMPORT — PHASE 1: TEST ONLY. This does not import anything yet. It makes one real call to GHL's API and shows the raw response below, so we can see exactly what your account returns before building the real bulk import. Requires GHL_API_TOKEN and GHL_LOCATION_ID set as environment variables in Railway first." }),
+    el("button", { class: "primary", onclick: async () => {
+      try {
+        await api("/api/owner/ghl-import-test", { method: "POST" });
+        await loadDebugLog();
+      } catch (e) { alert(e.message); }
+    }, text: "Test GHL API connection" }),
+  ]));
   content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "WEBHOOK DEBUG LOG — point any GHL webhook action at the URL below to see exactly what GHL actually sends, raw. Useful for checking whether an event (like a deleted appointment) secretly fires something we haven't mapped yet." }),
     el("div", { class: "mono", style: "font-size:11.5px;color:var(--cyan);margin-bottom:12px;word-break:break-all", text: `${window.location.origin}/api/webhook/ghl/debug?secret=YOUR_WEBHOOK_SECRET` }),
