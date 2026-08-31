@@ -1566,12 +1566,32 @@ async function renderTestTool(content) {
   }
   content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "GHL API IMPORT — PHASE 1: TEST ONLY. This does not import anything yet. It makes one real call to GHL's API and shows the raw response below, so we can see exactly what your account returns before building the real bulk import. Requires GHL_API_TOKEN and GHL_LOCATION_ID set as environment variables in Railway first." }),
-    el("button", { class: "primary", onclick: async () => {
+    el("button", { class: "primary", style: "margin-bottom:10px", onclick: async () => {
       try {
         await api("/api/owner/ghl-import-test", { method: "POST" });
         await loadDebugLog();
       } catch (e) { alert(e.message); }
-    }, text: "Test GHL API connection" }),
+    }, text: "Test 1: Sample opportunities" }),
+    el("div", { style: "margin-bottom:10px" }, [
+      el("button", { class: "primary", onclick: async () => {
+        try { await api("/api/owner/ghl-test-pipelines", { method: "POST" }); await loadDebugLog(); } catch (e) { alert(e.message); }
+      }, text: "Test 2: Pipeline stage names" }),
+    ]),
+    el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "Paste a real contact ID from Test 1's results to run these two:" }),
+    (() => {
+      const contactIdInput = el("input", { placeholder: "Contact ID", style: "max-width:220px;margin-bottom:8px" });
+      return el("div", {}, [
+        contactIdInput,
+        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+          el("button", { class: "primary", onclick: async () => {
+            try { await api("/api/owner/ghl-test-contact", { method: "POST", body: JSON.stringify({ contactId: contactIdInput.value.trim() }) }); await loadDebugLog(); } catch (e) { alert(e.message); }
+          }, text: "Test 3: Contact details (find sales rep)" }),
+          el("button", { class: "primary", onclick: async () => {
+            try { await api("/api/owner/ghl-test-appointments", { method: "POST", body: JSON.stringify({ contactId: contactIdInput.value.trim() }) }); await loadDebugLog(); } catch (e) { alert(e.message); }
+          }, text: "Test 4: Their appointments (find car/date)" }),
+        ]),
+      ]);
+    })(),
   ]));
   content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "WEBHOOK DEBUG LOG — point any GHL webhook action at the URL below to see exactly what GHL actually sends, raw. Useful for checking whether an event (like a deleted appointment) secretly fires something we haven't mapped yet." }),
