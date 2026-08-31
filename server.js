@@ -214,7 +214,13 @@ function repFromTitleInitials(db, title) {
   return null;
 }
 
-function resolveSalesRepAttribution(db, salesRepName) {
+function resolveSalesRepAttribution(db, salesRepName, appointmentTitle) {
+  // Title initials are the trusted source now — proven more reliable than GHL's own
+  // "Contact Owner" field, which reflects generic account ownership rather than who
+  // actually closed this specific deal. Checked first, regardless of what else was sent.
+  const titleRep = repFromTitleInitials(db, appointmentTitle);
+  if (titleRep) return { salesRepId: titleRep.id, salesRepName: titleRep.name, isWalkIn: false };
+
   if (!salesRepName) return null;
   const nameLower = String(salesRepName).trim().toLowerCase();
   const rep = db.salesReps.find((r) => r.name.toLowerCase() === nameLower);
@@ -241,8 +247,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     if (emp) matched.push(emp);
     else if (n) unmatched.push(n);
   });
-  const attribution = resolveSalesRepAttribution(db, salesRepName);
-
+  const attribution = resolveSalesRepAttribution(db, salesRepName, car);
   const isNew = !db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   if (!sale) {
@@ -590,7 +595,7 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
   if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
-  const attribution = resolveSalesRepAttribution(db, salesRepName);
+  const attribution = resolveSalesRepAttribution(db, salesRepName, sale.car);
   if (attribution) {
     sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
     if (attribution.walkInClosedByType) {
@@ -1398,6 +1403,111 @@ app.post("/api/owner/ghl-test-user", requireOwner, async (req, res) => {
   const r = await ghlTestCall(db, "ghl-test-user", `https://services.leadconnectorhq.com/users/${userId}`);
   if (r.error) return res.status(400).json(r);
   res.json({ ...r, note: "Check the debug log — looking for firstName/lastName or a name field." });
+});
+
+// The title text itself usually names the service — a low-risk way to fill this in using
+// data we already have, rather than guessing from an unconfirmed calendar-ID mapping.
+function guessServiceFromTitle(title) {
+  const t = (title || "").toLowerCase();
+  if (t.includes("ceramic")) return "Ceramic Coating";
+  if (t.includes("tint")) return "Window Tint";
+  if (t.includes("ppf")) return "PPF";
+  return "";
+}
+
+// ---------- GHL bulk import — Phase 2: the real thing ----------
+// Pulls opportunities from the "Booked W Deposit" stage, looks up each contact's actual
+// appointment (car, real date), and imports using the exact same upsert logic as the live
+// webhook flow — so re-running this is always safe, never creates duplicates. Runs in
+// small batches with a resumable cursor rather than all at once, both to stay well under
+// any request timeout and so a dry-run preview can be checked before anything is saved.
+app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
+  const db = loadDB();
+  if (!GHL_API_TOKEN || !GHL_LOCATION_ID) {
+    return res.status(400).json({ error: "GHL_API_TOKEN and GHL_LOCATION_ID must be set first." });
+  }
+  const stageId = req.body.stageId;
+  const cutoffDate = req.body.cutoffDate || null; // "YYYY-MM-DD" — only import appointments on/after this
+  const dryRun = !!req.body.dryRun;
+  const batchSize = Math.min(parseInt(req.body.batchSize, 10) || 15, 25); // capped for safety
+  if (!stageId) return res.status(400).json({ error: "stageId is required." });
+
+  if (db.ghlImportCursor === undefined) db.ghlImportCursor = null;
+  if (db.ghlImportImportedCount === undefined) db.ghlImportImportedCount = 0;
+
+  let url = `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_stage_id=${stageId}&limit=${batchSize}`;
+  if (db.ghlImportCursor) url += `&startAfter=${db.ghlImportCursor.startAfter}&startAfterId=${db.ghlImportCursor.startAfterId}`;
+
+  let searchRes, searchBody;
+  try {
+    searchRes = await fetch(url, { headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" } });
+    searchBody = await searchRes.json();
+  } catch (e) {
+    return res.status(500).json({ error: "Failed to reach GHL: " + e.message });
+  }
+  if (!searchRes.ok) return res.status(400).json({ error: `GHL returned ${searchRes.status}`, detail: searchBody });
+
+  const opportunities = searchBody.opportunities || [];
+  const results = { processed: 0, imported: 0, skippedOld: 0, skippedNoAppointment: 0, errors: [] };
+  const preview = [];
+
+  for (const opp of opportunities) {
+    results.processed++;
+    try {
+      const apptUrl = `https://services.leadconnectorhq.com/contacts/${opp.contactId}/appointments`;
+      const apptRes = await fetch(apptUrl, { headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" } });
+      const apptBody = await apptRes.json().catch(() => null);
+      const events = (apptBody && apptBody.events) || [];
+      if (events.length === 0) { results.skippedNoAppointment++; continue; }
+      // If a contact has multiple appointments, the most recently created one is usually
+      // the one tied to this specific deposit.
+      const appt = events.slice().sort((a, b) => (a.dateAdded < b.dateAdded ? 1 : -1))[0];
+      const normalizedDate = normalizeDate(appt.startTime);
+      if (cutoffDate && normalizedDate && normalizedDate.slice(0, 10) < cutoffDate) { results.skippedOld++; continue; }
+
+      const contact = opp.contact || {};
+      const record = {
+        ghlOpportunityId: opp.id, contactId: opp.contactId,
+        car: appt.title || "", date: appt.startTime, basePrice: opp.monetaryValue,
+        customerName: contact.name || "", customerPhone: contact.phone || "", customerEmail: contact.email || "",
+        baseService: guessServiceFromTitle(appt.title),
+      };
+      if (dryRun) preview.push(record);
+      else { upsertSaleFromGHL(db, record); results.imported++; }
+      // Small pacing delay between per-contact lookups — stays well under GHL's rate limits.
+      await new Promise((r) => setTimeout(r, 200));
+    } catch (e) {
+      results.errors.push({ opportunityId: opp.id, error: e.message });
+    }
+  }
+
+  if (!dryRun) {
+    db.ghlImportCursor = (searchBody.meta && searchBody.meta.nextPage)
+      ? { startAfter: searchBody.meta.startAfter, startAfterId: searchBody.meta.startAfterId }
+      : null;
+    db.ghlImportImportedCount = (db.ghlImportImportedCount || 0) + results.imported;
+    saveDB(db);
+  }
+
+  res.json({
+    ok: true, dryRun, ...results, preview: dryRun ? preview : undefined,
+    hasMore: !!(searchBody.meta && searchBody.meta.nextPage),
+    totalAvailable: searchBody.meta ? searchBody.meta.total : null,
+    totalImportedSoFar: db.ghlImportImportedCount || 0,
+  });
+});
+
+app.get("/api/owner/ghl-bulk-import-status", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json({ cursorSet: !!db.ghlImportCursor, totalImportedSoFar: db.ghlImportImportedCount || 0 });
+});
+
+app.post("/api/owner/ghl-bulk-import-reset", requireOwner, (req, res) => {
+  const db = loadDB();
+  db.ghlImportCursor = null;
+  db.ghlImportImportedCount = 0;
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 function csvEscape(val) {
