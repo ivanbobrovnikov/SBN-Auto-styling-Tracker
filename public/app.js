@@ -1602,6 +1602,16 @@ async function renderTestTool(content) {
         ]),
       ]);
     })(),
+    el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px;margin-top:10px", text: "Paste that user ID (from assignedUserId) to resolve it to a real name:" }),
+    (() => {
+      const userIdInput = el("input", { placeholder: "User ID", style: "max-width:220px;margin-bottom:8px" });
+      return el("div", {}, [
+        userIdInput,
+        el("button", { class: "primary", onclick: async () => {
+          try { await api("/api/owner/ghl-test-user", { method: "POST", body: JSON.stringify({ userId: userIdInput.value.trim() }) }); await loadDebugLog(); } catch (e) { alert(e.message); }
+        }, text: "Test 5: Resolve user ID to name" }),
+      ]);
+    })(),
   ]));
   content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "WEBHOOK DEBUG LOG — point any GHL webhook action at the URL below to see exactly what GHL actually sends, raw. Useful for checking whether an event (like a deleted appointment) secretly fires something we haven't mapped yet." }),
