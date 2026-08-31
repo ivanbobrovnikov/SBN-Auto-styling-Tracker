@@ -1363,6 +1363,18 @@ app.post("/api/owner/ghl-test-appointments", requireOwner, async (req, res) => {
   res.json({ ...r, note: "Check the debug log for the appointment title (car) and real date/time." });
 });
 
+// Test 5 — the appointment's assignedUserId is just a random-looking ID, not a name.
+// This resolves it into the actual person's real name, so we can match it against your
+// registered sales reps/managers/techs the same way the webhook flow already does.
+app.post("/api/owner/ghl-test-user", requireOwner, async (req, res) => {
+  const db = loadDB();
+  const userId = req.body.userId;
+  if (!userId) return res.status(400).json({ error: "userId is required." });
+  const r = await ghlTestCall(db, "ghl-test-user", `https://services.leadconnectorhq.com/users/${userId}`);
+  if (r.error) return res.status(400).json(r);
+  res.json({ ...r, note: "Check the debug log — looking for firstName/lastName or a name field." });
+});
+
 function csvEscape(val) {
   const s = String(val === undefined || val === null ? "" : val);
   if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
