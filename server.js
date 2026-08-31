@@ -1182,15 +1182,23 @@ app.get("/api/owner/backup", requireOwner, (req, res) => {
   res.send(JSON.stringify(db, null, 2));
 });
 
-// Wipes every job/sale so revenue tracking starts clean from a chosen date forward.
-// Deliberately does NOT touch employees, managers, sales reps, commission rates, or
-// attendance history — only the sales/jobs themselves.
+// Zeroes out every dollar figure so revenue totals start fresh — but keeps every job
+// itself: the car, customer, date, status, who worked it, who upsold what (name stays,
+// just the price resets to $0). Nothing about your schedule or history disappears,
+// only the money numbers that were feeding into revenue totals.
 app.post("/api/owner/clear-all-sales", requireOwner, (req, res) => {
   const db = loadDB();
-  const count = db.sales.length;
-  db.sales = [];
+  let jobsTouched = 0, upsellsTouched = 0;
+  db.sales.forEach((s) => {
+    if (s.basePrice) jobsTouched += 1;
+    s.basePrice = 0;
+    (s.upsells || []).forEach((u) => {
+      if (u.price) upsellsTouched += 1;
+      u.price = 0;
+    });
+  });
   saveDB(db);
-  res.json({ ok: true, cleared: count });
+  res.json({ ok: true, jobsTouched, upsellsTouched });
 });
 
 // ---------- automated cloud backup — runs on its own, no manual click required ----------
