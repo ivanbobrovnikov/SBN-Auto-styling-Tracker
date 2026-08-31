@@ -485,13 +485,13 @@ function openPrintableReport(title, s, periodLabel) {
     el("button", { class: "ghost", text: "Print report", onclick: () => { if (lastSummary) openPrintableReport("Dashboard report", lastSummary, lastQs); } }),
     el("a", { href: "#", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Export CSV", onclick: (e) => { e.preventDefault(); window.location.href = `/api/owner/export/csv?${lastQs}`; } }),
     el("a", { href: "/api/owner/backup", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Download full backup" }),
-    el("button", { class: "ghost", style: "color:var(--red);border-color:var(--red)", onclick: async () => {
-      if (!confirm("This permanently deletes EVERY job, upsell, and revenue number in the tracker. Employees, managers, sales reps, and their commission rates are NOT affected — only sales data. Have you downloaded a backup first? Click OK only if you're sure.")) return;
-      if (!confirm("Really sure? This cannot be undone from inside the app. Type nothing needed — just confirm one more time.")) return;
+    el("button", { class: "ghost", style: "color:var(--amber);border-color:var(--amber)", onclick: async () => {
+      if (!confirm("This zeroes out every dollar figure — base prices and upsell prices — so revenue totals start fresh from $0. Every job, appointment, customer, car, and status STAYS exactly as it is; nothing gets deleted. Have you downloaded a backup first? Click OK to proceed.")) return;
+      if (!confirm("Confirm one more time: reset every price to $0, keep everything else?")) return;
       const r = await api("/api/owner/clear-all-sales", { method: "POST" });
-      alert(`Cleared ${r.cleared} job(s). Revenue now starts fresh from here.`);
+      alert(`Reset prices on ${r.jobsTouched} job(s) and ${r.upsellsTouched} upsell(s) to $0. All jobs and appointments are still there — revenue just starts fresh from here.`);
       load();
-    }, text: "Clear all sales data" }),
+    }, text: "Zero out revenue numbers (keeps all jobs)" }),
   ]);
   async function load(params) {
     const p = params || picker.getParams();
