@@ -173,9 +173,9 @@ function renderLogin() {
 function renderTabs() {
   let tabs;
   if (session.role === "owner") {
-    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
   } else if (session.role === "manager") {
-    tabs = [["manager-jobs", "Job status"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
+    tabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
   } else if (session.role === "sales") {
     tabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
   } else {
@@ -309,6 +309,7 @@ async function renderPerformance(content) {
 async function renderManagerTabContent(content) {
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);
+  if (currentTab === "owner-cleanup") return renderCleanup(content);
   if (currentTab === "manager-performance") return renderManagerPerformance(content);
   return renderManagerJobs(content);
 }
@@ -326,6 +327,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
   if (currentTab === "owner-salesreps") return renderOwnerSalesReps(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);
+  if (currentTab === "owner-cleanup") return renderCleanup(content);
   if (currentTab === "manager-jobs") return renderManagerJobs(content);
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-test") return renderTestTool(content);
@@ -483,6 +485,13 @@ function openPrintableReport(title, s, periodLabel) {
     el("button", { class: "ghost", text: "Print report", onclick: () => { if (lastSummary) openPrintableReport("Dashboard report", lastSummary, lastQs); } }),
     el("a", { href: "#", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Export CSV", onclick: (e) => { e.preventDefault(); window.location.href = `/api/owner/export/csv?${lastQs}`; } }),
     el("a", { href: "/api/owner/backup", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Download full backup" }),
+    el("button", { class: "ghost", style: "color:var(--red);border-color:var(--red)", onclick: async () => {
+      if (!confirm("This permanently deletes EVERY job, upsell, and revenue number in the tracker. Employees, managers, sales reps, and their commission rates are NOT affected — only sales data. Have you downloaded a backup first? Click OK only if you're sure.")) return;
+      if (!confirm("Really sure? This cannot be undone from inside the app. Type nothing needed — just confirm one more time.")) return;
+      const r = await api("/api/owner/clear-all-sales", { method: "POST" });
+      alert(`Cleared ${r.cleared} job(s). Revenue now starts fresh from here.`);
+      load();
+    }, text: "Clear all sales data" }),
   ]);
   async function load(params) {
     const p = params || picker.getParams();
@@ -557,6 +566,14 @@ function jobStatusColors(s) {
   if (s.status === "no_show") return { bg: "#501313", border: "var(--red)", text: "var(--red)" };
   return { bg: "var(--cyanDim)", border: "var(--cyan)", text: "var(--cyan)" };
 }
+function serviceAbbrev(baseService) {
+  if (!baseService) return "";
+  const s = baseService.toLowerCase();
+  if (s.includes("ceramic")) return "CC";
+  if (s.includes("tint")) return "WT";
+  if (s.includes("ppf")) return "PPF";
+  return baseService.slice(0, 3).toUpperCase();
+}
 
 // Week view — a real time-of-day grid, same visual language across all three calendar levels.
 function renderWeekGrid(sales) {
@@ -592,7 +609,7 @@ function renderWeekGrid(sales) {
       const timeLabel = jd.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
       col.appendChild(el("div", {
         style: `position:absolute;top:${top}px;left:2px;right:2px;background:${c.bg};border-left:3px solid ${c.border};border-radius:4px;padding:3px 5px;font-size:10px;cursor:default`,
-        text: s.car,
+        text: `${serviceAbbrev(s.baseService)} · ${s.car}`,
       }, [el("div", { style: `color:${c.text};font-size:9.5px`, text: timeLabel })]));
     });
     grid.appendChild(col);
@@ -628,7 +645,7 @@ function renderMonthGrid(sales, monthStr) {
       const c = jobStatusColors(s);
       const jd = new Date(s.date);
       const timeLabel = jd.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-      cell.appendChild(el("div", { style: `background:${c.bg};border-radius:3px;padding:1px 4px;font-size:9.5px;color:${c.text};margin-top:2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis`, text: `${s.car} ${timeLabel}` }));
+      cell.appendChild(el("div", { style: `background:${c.bg};border-radius:3px;padding:1px 4px;font-size:9.5px;color:${c.text};margin-top:2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis`, text: `${serviceAbbrev(s.baseService)} ${s.car} ${timeLabel}` }));
     });
     if (dayJobs.length > 2) cell.appendChild(el("div", { class: "muted", style: "font-size:9px;margin-top:1px", text: `+${dayJobs.length - 2} more` }));
     grid.appendChild(cell);
@@ -698,6 +715,26 @@ async function renderOwnerSales(content) {
       const timeOnly = isNaN(d.getTime()) ? "—" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
       const dateOnly = isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
+      const priceInput = el("input", { type: "number", value: s.basePrice, style: "max-width:80px;text-align:right;font-family:monospace;font-size:12px" });
+      const priceRow = el("div", { style: "display:flex;align-items:center;gap:5px;justify-content:flex-end" }, [
+        el("span", { class: "muted", style: "font-size:11px", text: "Base:" }), priceInput,
+        el("button", { class: "ghost", style: "font-size:10px;padding:2px 6px", onclick: async () => { await api(`/api/manager/jobs/${s.id}`, { method: "PATCH", body: JSON.stringify({ basePrice: priceInput.value }) }); load(); }, text: "Save" }),
+      ]);
+
+      const upsellRows = (s.upsells || []).map((u) => {
+        const nameInput = el("input", { value: u.name, style: "max-width:130px;font-size:11.5px" });
+        const priceI = el("input", { type: "number", value: u.price, style: "max-width:70px;font-size:11.5px" });
+        return el("div", { style: "display:flex;align-items:center;gap:5px;margin-top:4px" }, [
+          nameInput, priceI,
+          el("span", { class: "muted", style: "font-size:10.5px", text: `(${u.attributedToName})` }),
+          el("button", { class: "ghost", style: "font-size:10px;padding:2px 6px", onclick: async () => {
+            await api(`/api/sales/${s.id}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ name: nameInput.value, price: priceI.value }) });
+            load();
+          }, text: "Save" }),
+          el("button", { class: "icon-danger", style: "padding:2px", onclick: async () => { await api(`/api/sales/${s.id}/upsells/${u.id}`, { method: "DELETE" }); load(); }, text: "✕" }),
+        ]);
+      });
+
       body.appendChild(el("div", { class: "card", style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
         el("div", { style: "min-width:64px;text-align:center;background:var(--cardAlt);border-radius:7px;padding:8px 4px;flex-shrink:0" }, [
           el("div", { class: "mono", style: "font-size:14px;font-weight:600", text: timeOnly }),
@@ -706,12 +743,12 @@ async function renderOwnerSales(content) {
         el("div", { style: "flex:1;min-width:0" }, [
           el("div", { style: "font-weight:500", text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
           el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
-          (s.upsells || []).length ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }))) : null,
+          upsellRows.length ? el("div", { style: "margin-top:4px" }, upsellRows) : null,
         ]),
         el("div", { style: "text-align:right;flex-shrink:0" }, [
-          el("div", { style: `color:${statusColor};font-size:12px;font-weight:600;margin-bottom:2px`, text: statusLabel }),
-          el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : `Base: ${money(s.basePrice)}` }),
-          !cancelled && s.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:11px", text: `Upsells: ${money(s.upsellTotal)}` }) : null,
+          el("div", { style: `color:${statusColor};font-size:12px;font-weight:600;margin-bottom:4px`, text: statusLabel }),
+          priceRow,
+          !cancelled && s.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:11px;margin-top:2px", text: `Upsells: ${money(s.upsellTotal)}` }) : null,
           el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px;font-weight:600;margin-top:2px`, text: cancelled ? "—" : `Total: ${money(s.total)}` }),
           s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : "Unpaid" }),
           el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end" }, [
@@ -1002,6 +1039,61 @@ async function renderAttendance(content) {
   content.appendChild(dayBody);
   await loadDay();
   await loadSummary();
+}
+
+// ---------------- Cleanup — find and fix every job missing a price or a sales rep ----------------
+async function renderCleanup(content) {
+  const body = el("div");
+  const salesReps = await api("/api/manager/salesreps-list");
+  const employees = await api("/api/manager/employees");
+  const managersList = await api("/api/manager/managers-list");
+
+  async function load() {
+    const jobs = await api("/api/manager/needs-cleanup");
+    body.innerHTML = "";
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing to clean up — every job has a price and a sales rep or walk-in assignment." })); return; }
+    jobs.forEach((job) => {
+      const priceInput = el("input", { type: "number", value: job.basePrice || "", placeholder: "Base price", style: "max-width:100px" });
+      const repSelect = el("select", { style: "max-width:200px" }, [
+        el("option", { value: "", text: "Assign a sales rep..." }),
+        ...salesReps.map((r) => el("option", { value: r.id, text: r.name, ...(job.salesRepId === r.id ? { selected: "true" } : {}) })),
+      ]);
+      const closerSelect = el("select", { style: "max-width:200px" }, [
+        el("option", { value: "", text: "...or a walk-in closer" }),
+        ...employees.map((e) => el("option", { value: `employee::${e.id}`, text: `${e.name} (tech)`, ...(job.walkInClosedById === e.id ? { selected: "true" } : {}) })),
+        ...managersList.map((m) => el("option", { value: `manager::${m.id}`, text: `${m.name} (manager)`, ...(job.walkInClosedById === m.id ? { selected: "true" } : {}) })),
+      ]);
+      const saveNotice = el("span", { class: "muted", style: "font-size:11px" });
+
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { style: "font-weight:500", text: job.car }),
+        el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:8px", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""} · ${job.baseService || ""}` }),
+        el("div", { style: "display:flex;gap:6px;margin-bottom:6px" }, [
+          job.missingPrice ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing price" }) : null,
+          job.missingRep ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing sales rep" }) : null,
+        ]),
+        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [
+          priceInput, repSelect, closerSelect,
+          el("button", { class: "primary", onclick: async () => {
+            const patch = {};
+            if (priceInput.value) patch.basePrice = priceInput.value;
+            if (repSelect.value) patch.salesRepId = repSelect.value;
+            if (closerSelect.value) {
+              const [type, id] = closerSelect.value.split("::");
+              patch.isWalkIn = true; patch.walkInClosedByType = type; patch.walkInClosedById = id;
+            }
+            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+            saveNotice.textContent = "Saved ✓"; saveNotice.style.color = "var(--green)";
+            setTimeout(load, 600);
+          }, text: "Save" }),
+          saveNotice,
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:14px", text: "Every job missing a base price or a sales rep, regardless of date. Fix what you can here — the rest can just stay as-is going forward." }));
+  content.appendChild(body);
+  await load();
 }
 
 function clear(node) { node.innerHTML = ""; return node; }
