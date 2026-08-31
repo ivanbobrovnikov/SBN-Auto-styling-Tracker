@@ -1329,6 +1329,18 @@ app.post("/api/owner/ghl-test-pipelines", requireOwner, async (req, res) => {
   res.json({ ...r, note: "Check the debug log for pipeline stage names and IDs." });
 });
 
+// Test 2b — now that we know the real "Booked W Deposit" stage ID, pull opportunities
+// filtered specifically to that stage, instead of just the most recent leads overall.
+app.post("/api/owner/ghl-test-booked-stage", requireOwner, async (req, res) => {
+  const db = loadDB();
+  const stageId = req.body.stageId;
+  if (!stageId) return res.status(400).json({ error: "stageId is required." });
+  const url = `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_stage_id=${stageId}&limit=5`;
+  const r = await ghlTestCall(db, "ghl-test-booked-stage", url);
+  if (r.error) return res.status(400).json(r);
+  res.json({ ...r, note: "Check the debug log — this should show real booked jobs, hopefully with a real assignedTo value this time." });
+});
+
 // Test 3 — look up one specific contact directly, to check whether their assigned
 // "Owner" (sales rep) shows up at the contact level, since it wasn't in the opportunity data.
 app.post("/api/owner/ghl-test-contact", requireOwner, async (req, res) => {
