@@ -1283,47 +1283,72 @@ app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
 });
 
 // ---------- GHL API bulk import — Phase 1: diagnostic only ----------
-// This does NOT import anything. It makes one real API call to GHL using a Private
-// Integration token, and dumps the raw response into the debug log — the same
-// "see the real data before writing logic" approach that solved every webhook problem,
-// applied here BEFORE building the actual import instead of after it breaks.
-// Requires GHL_API_TOKEN and GHL_LOCATION_ID as environment variables.
+// This does NOT import anything. Each of these makes one real, read-only API call to GHL
+// and dumps the raw response into the debug log — building up a real picture of your
+// account's data shape, piece by piece, before any import logic gets written.
 const GHL_API_TOKEN = process.env.GHL_API_TOKEN || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
 
-app.post("/api/owner/ghl-import-test", requireOwner, async (req, res) => {
-  const db = loadDB();
+async function ghlTestCall(db, label, url) {
   if (!db.debugLog) db.debugLog = [];
   if (!GHL_API_TOKEN || !GHL_LOCATION_ID) {
-    return res.status(400).json({ error: "GHL_API_TOKEN and GHL_LOCATION_ID must be set as environment variables first." });
+    return { error: "GHL_API_TOKEN and GHL_LOCATION_ID must be set as environment variables first." };
   }
-  // Best-known current shape of GHL's v2 API — genuinely may need correcting once we see
-  // the real response. That's expected; this is exactly why this is a separate test step.
-  const url = `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&limit=5`;
   try {
     const ghlRes = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${GHL_API_TOKEN}`,
-        Version: "2021-07-28",
-        Accept: "application/json",
-      },
+      headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" },
     });
     const bodyText = await ghlRes.text();
     let parsed;
     try { parsed = JSON.parse(bodyText); } catch (e) { parsed = bodyText; }
-    db.debugLog.unshift({
-      receivedAt: new Date().toISOString(), endpoint: "ghl-import-test",
-      requestUrl: url, responseStatus: ghlRes.status, responseBody: parsed,
-    });
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: label, requestUrl: url, responseStatus: ghlRes.status, responseBody: parsed });
     db.debugLog = db.debugLog.slice(0, 30);
     saveDB(db);
-    res.json({ ok: true, status: ghlRes.status, note: "Check the Webhook Debug Log to see the full raw response." });
+    return { ok: true, status: ghlRes.status };
   } catch (e) {
-    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "ghl-import-test", error: e.message });
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: label, error: e.message });
     db.debugLog = db.debugLog.slice(0, 30);
     saveDB(db);
-    res.status(500).json({ error: e.message });
+    return { error: e.message };
   }
+}
+
+app.post("/api/owner/ghl-import-test", requireOwner, async (req, res) => {
+  const db = loadDB();
+  const r = await ghlTestCall(db, "ghl-import-test", `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&limit=5`);
+  if (r.error) return res.status(400).json(r);
+  res.json({ ...r, note: "Check the Webhook Debug Log to see the full raw response." });
+});
+
+// Test 2 — get the real pipeline stage names, so we can identify which stage ID means
+// "Booked w/ Deposit" (the search results showed IDs, not names).
+app.post("/api/owner/ghl-test-pipelines", requireOwner, async (req, res) => {
+  const db = loadDB();
+  const r = await ghlTestCall(db, "ghl-test-pipelines", `https://services.leadconnectorhq.com/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`);
+  if (r.error) return res.status(400).json(r);
+  res.json({ ...r, note: "Check the debug log for pipeline stage names and IDs." });
+});
+
+// Test 3 — look up one specific contact directly, to check whether their assigned
+// "Owner" (sales rep) shows up at the contact level, since it wasn't in the opportunity data.
+app.post("/api/owner/ghl-test-contact", requireOwner, async (req, res) => {
+  const db = loadDB();
+  const contactId = req.body.contactId;
+  if (!contactId) return res.status(400).json({ error: "contactId is required." });
+  const r = await ghlTestCall(db, "ghl-test-contact", `https://services.leadconnectorhq.com/contacts/${contactId}`);
+  if (r.error) return res.status(400).json(r);
+  res.json({ ...r, note: "Check the debug log for the contact's real field names, especially anything like 'assignedTo' or 'owner'." });
+});
+
+// Test 4 — pull calendar/appointment data for one contact, since that's where the car
+// (appointment title) and real service date/time actually live.
+app.post("/api/owner/ghl-test-appointments", requireOwner, async (req, res) => {
+  const db = loadDB();
+  const contactId = req.body.contactId;
+  if (!contactId) return res.status(400).json({ error: "contactId is required." });
+  const r = await ghlTestCall(db, "ghl-test-appointments", `https://services.leadconnectorhq.com/contacts/${contactId}/appointments`);
+  if (r.error) return res.status(400).json(r);
+  res.json({ ...r, note: "Check the debug log for the appointment title (car) and real date/time." });
 });
 
 function csvEscape(val) {
