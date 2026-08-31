@@ -1080,7 +1080,9 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
   const showed = mine.filter((s) => s.status === "arrived");
   const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
   const noShowCount = mine.filter((s) => s.status === "no_show").length;
-  const pendingCount = mine.filter((s) => !s.status || s.status === "pending").length;
+  const pending = mine.filter((s) => !s.status || s.status === "pending");
+  const pendingCount = pending.length;
+  const pendingValue = pending.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
 
   let commission = 0, duringHoursValue = 0, afterHoursValue = 0, duringHoursCount = 0, afterHoursCount = 0;
   showed.forEach((s) => {
@@ -1092,7 +1094,7 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
 
   res.json({
     totalBooked, totalBookedValue, showedCount: showed.length, showedValue,
-    noShowCount, pendingCount, commission,
+    noShowCount, pendingCount, pendingValue, commission,
     commissionRate: rep ? rep.commissionRate || 0 : 0,
     afterHoursCommissionRate: rep ? rep.afterHoursCommissionRate || 0 : 0,
     duringHoursCount, duringHoursValue, afterHoursCount, afterHoursValue,
@@ -1312,13 +1314,27 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db);
-  const totalRevenue = sales.reduce((a, s) => a + saleTotal(s), 0);
-  const totalUpsell = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
+  // "Total revenue" means money actually earned — a job that's booked for a future date
+  // isn't revenue yet, it's a scheduled booking. Only count it once a manager has marked
+  // it BOTH Service Complete and Paid, same as how commission already works elsewhere.
+  const realizedSales = sales.filter((s) => s.completed && s.paid);
+  const totalRevenue = realizedSales.reduce((a, s) => a + saleTotal(s), 0);
+  const totalUpsell = realizedSales.reduce((a, s) => a + saleUpsellTotal(s), 0);
   // "Cars serviced" means the job is actually done — a manager marked it Service Complete.
   // Everything still on the schedule (booked, arrived-but-not-done, etc.) doesn't count yet.
   const completedSales = sales.filter((s) => s.completed);
   const carCount = completedSales.length;
   const attachRate = carCount ? (completedSales.filter((s) => (s.upsells || []).length > 0).length / carCount) * 100 : 0;
+
+  // Booking pipeline breakdown — separate from the strict "Total Revenue" above, this shows
+  // what's still upcoming (booked but hasn't happened yet) vs. what's already shown up
+  // (regardless of whether it's been fully wrapped up and paid).
+  const pendingSales = sales.filter((s) => !s.status || s.status === "pending");
+  const bookedNotShownValue = pendingSales.reduce((a, s) => a + saleTotal(s), 0);
+  const bookedNotShownCount = pendingSales.length;
+  const shownUpSales = sales.filter((s) => s.status === "arrived");
+  const shownUpValue = shownUpSales.reduce((a, s) => a + saleTotal(s), 0);
+  const shownUpCount = shownUpSales.length;
 
   // Base price isn't split per tech since jobs are tag-teamed — "cars worked" and each
   // person's own logged upsell revenue are the numbers that stay unambiguous here.
@@ -1357,6 +1373,7 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
     totalRevenue, totalUpsellRevenue: totalUpsell,
     upsellPercentOfRevenue: totalRevenue ? (totalUpsell / totalRevenue) * 100 : 0,
     carCount, attachRate, perEmployee, perManager, perSalesRep, leaderboard,
+    bookedNotShownValue, bookedNotShownCount, shownUpValue, shownUpCount,
   });
 });
 
