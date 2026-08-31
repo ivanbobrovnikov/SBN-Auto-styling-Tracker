@@ -477,6 +477,36 @@ function openPrintableReport(title, s, periodLabel) {
   cloudStatus.appendChild(cloudStatusText);
   cloudStatus.appendChild(backupNowBtn);
 
+  const revenueStartInput = el("input", { type: "date" });
+  const revenueStartNotice = el("span", { class: "muted", style: "font-size:11.5px" });
+  async function loadRevenueStart() {
+    const r = await api("/api/owner/revenue-start-date");
+    if (r.revenueStartDate) {
+      revenueStartInput.value = r.revenueStartDate;
+      revenueStartNotice.textContent = `Currently tracking revenue from ${r.revenueStartDate} onward. Everything before that is excluded from every total, but still fully visible in All Jobs.`;
+    } else {
+      revenueStartNotice.textContent = "No cutoff set — every job ever entered counts toward revenue.";
+    }
+  }
+  const revenueStartRow = el("div", { class: "card", style: "max-width:520px;margin-bottom:14px" }, [
+    el("div", { class: "muted", style: "margin-bottom:8px", text: "REVENUE TRACKING START DATE — jobs before this date are excluded from every revenue and commission total everywhere, but stay completely visible in All Jobs, Search, and the schedule with their real prices intact. Nothing ever gets deleted or altered." }),
+    el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
+      revenueStartInput,
+      el("button", { class: "primary", onclick: async () => {
+        await api("/api/owner/revenue-start-date", { method: "POST", body: JSON.stringify({ date: revenueStartInput.value }) });
+        await loadRevenueStart();
+        load();
+      }, text: "Set cutoff" }),
+      el("button", { class: "ghost", onclick: async () => {
+        await api("/api/owner/revenue-start-date", { method: "POST", body: JSON.stringify({ date: null }) });
+        revenueStartInput.value = "";
+        await loadRevenueStart();
+        load();
+      }, text: "Clear cutoff" }),
+    ]),
+    revenueStartNotice,
+  ]);
+
   async function renderOwnerSummary(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "month");
@@ -485,13 +515,6 @@ function openPrintableReport(title, s, periodLabel) {
     el("button", { class: "ghost", text: "Print report", onclick: () => { if (lastSummary) openPrintableReport("Dashboard report", lastSummary, lastQs); } }),
     el("a", { href: "#", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Export CSV", onclick: (e) => { e.preventDefault(); window.location.href = `/api/owner/export/csv?${lastQs}`; } }),
     el("a", { href: "/api/owner/backup", class: "ghost", style: "text-decoration:none;display:inline-block", text: "Download full backup" }),
-    el("button", { class: "ghost", style: "color:var(--amber);border-color:var(--amber)", onclick: async () => {
-      if (!confirm("This zeroes out every dollar figure — base prices and upsell prices — so revenue totals start fresh from $0. Every job, appointment, customer, car, and status STAYS exactly as it is; nothing gets deleted. Have you downloaded a backup first? Click OK to proceed.")) return;
-      if (!confirm("Confirm one more time: reset every price to $0, keep everything else?")) return;
-      const r = await api("/api/owner/clear-all-sales", { method: "POST" });
-      alert(`Reset prices on ${r.jobsTouched} job(s) and ${r.upsellsTouched} upsell(s) to $0. All jobs and appointments are still there — revenue just starts fresh from here.`);
-      load();
-    }, text: "Zero out revenue numbers (keeps all jobs)" }),
   ]);
   async function load(params) {
     const p = params || picker.getParams();
@@ -551,10 +574,12 @@ function openPrintableReport(title, s, periodLabel) {
   }
   content.appendChild(picker.el);
   content.appendChild(actions);
+  content.appendChild(revenueStartRow);
   content.appendChild(cloudStatus);
   content.appendChild(body);
   await load();
   await loadCloudStatus();
+  await loadRevenueStart();
 }
 
 function sameLocalDay(d1, d2) {
