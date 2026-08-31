@@ -707,6 +707,13 @@ app.get("/api/manager/managers-list", requireManager, (req, res) => {
   res.json(db.managers.map((m) => ({ id: m.id, name: m.name })));
 });
 
+// So a manager can assign or fix which real sales rep gets credit for a job — no
+// commission rates or PINs exposed, just names.
+app.get("/api/manager/salesreps-list", requireManager, (req, res) => {
+  const db = loadDB();
+  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name })));
+});
+
 // ---------- attendance — who showed up, who didn't, who worked a half day ----------
 app.get("/api/manager/attendance", requireManager, (req, res) => {
   const db = loadDB();
@@ -757,6 +764,20 @@ app.get("/api/owner/attendance-summary", requireOwner, (req, res) => {
       halfDay: mine.filter((r) => r.status === "half_day").length,
     };
   }));
+});
+
+// Finds every job missing a base price or a sales rep, regardless of when it happened —
+// this is the cleanup tool for catching up jobs that came in before a fix was live.
+app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
+  const db = loadDB();
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn)));
+  res.json(jobs.map((s) => ({
+    id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
+    employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
+    salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
+    walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
+    basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn,
+  })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
 app.get("/api/manager/jobs", requireManager, (req, res) => {
@@ -846,6 +867,21 @@ app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
   else if (req.body.employeeId) upsell.employeeId = req.body.employeeId;
   else if (req.body.managerId) upsell.managerId = req.body.managerId;
   sale.upsells.push(upsell);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Fix a mistake on an upsell already logged — wrong price, wrong name typed in, whatever.
+// Manager/owner only. Keeps the original attribution (who gets credit) intact, unlike
+// deleting and re-adding it, which would change who it's credited to.
+app.patch("/api/sales/:saleId/upsells/:upsellId", requireManager, (req, res) => {
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.params.saleId);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  const upsell = (sale.upsells || []).find((u) => u.id === req.params.upsellId);
+  if (!upsell) return res.status(404).json({ error: "Upsell not found." });
+  if (req.body.name !== undefined && req.body.name.trim()) upsell.name = req.body.name.trim();
+  if (req.body.price !== undefined) upsell.price = parseFloat(req.body.price) || 0;
   saveDB(db);
   res.json({ ok: true });
 });
@@ -1144,6 +1180,17 @@ app.get("/api/owner/backup", requireOwner, (req, res) => {
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.setHeader("Content-Type", "application/json");
   res.send(JSON.stringify(db, null, 2));
+});
+
+// Wipes every job/sale so revenue tracking starts clean from a chosen date forward.
+// Deliberately does NOT touch employees, managers, sales reps, commission rates, or
+// attendance history — only the sales/jobs themselves.
+app.post("/api/owner/clear-all-sales", requireOwner, (req, res) => {
+  const db = loadDB();
+  const count = db.sales.length;
+  db.sales = [];
+  saveDB(db);
+  res.json({ ok: true, cleared: count });
 });
 
 // ---------- automated cloud backup — runs on its own, no manual click required ----------
