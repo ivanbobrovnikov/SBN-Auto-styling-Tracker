@@ -530,6 +530,14 @@ function openPrintableReport(title, s, periodLabel) {
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Shop attach rate" }), el("div", { class: "metric-value mono", text: pct(s.attachRate) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars serviced" }), el("div", { class: "metric-value mono", text: s.carCount })]),
     ]));
+    body.appendChild(el("div", { class: "card", style: "margin-bottom:20px" }, [
+      el("div", { class: "muted", style: "margin-bottom:10px", text: "BOOKING PIPELINE — what's coming vs. what's already happened" }),
+      el("div", { class: "metric-grid" }, [
+        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: `Booked, not shown yet (${s.bookedNotShownCount})` }), el("div", { class: "metric-value mono", style: "color:var(--sub)", text: money(s.bookedNotShownValue) })]),
+        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: `Shown up (${s.shownUpCount})` }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(s.shownUpValue) })]),
+      ]),
+      el("div", { class: "muted", style: "font-size:11px;margin-top:8px", text: "\"Shown up\" counts the moment a car arrives, even before it's marked complete/paid. \"Total revenue\" above stays stricter — it only counts once a job is both complete AND paid." }),
+    ]));
     const empTable = el("table", {}, [
       el("tr", {}, [el("th", { text: "Employee" }), el("th", { text: "Cars worked" }), el("th", { text: "Their upsell revenue" })]),
       ...s.perEmployee.map((e) => el("tr", {}, [el("td", { text: e.name }), el("td", { class: "mono", text: e.cars }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(e.upsellRevenue) })])),
@@ -918,6 +926,17 @@ async function renderSalesPerformance(content) {
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Booked value" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(stats.totalBookedValue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Showed" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: stats.showedCount })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "No-shows" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: stats.noShowCount })]),
+    ]));
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:10px", text: "PIPELINE — WHAT'S COMING VS. WHAT'S ALREADY HAPPENED" }),
+      el("div", { class: "row", style: "margin-bottom:6px" }, [
+        el("span", { class: "muted", text: `Booked, not shown yet (${stats.pendingCount})` }),
+        el("span", { class: "mono", style: "color:var(--sub)", text: money(stats.pendingValue) }),
+      ]),
+      el("div", { class: "row" }, [
+        el("span", { class: "muted", text: `Shown up (${stats.showedCount})` }),
+        el("span", { class: "mono", style: "color:var(--green)", text: money(stats.showedValue) }),
+      ]),
     ]));
     body.appendChild(el("div", { class: "card" }, [
       el("div", { class: "row", style: "margin-bottom:4px" }, [
