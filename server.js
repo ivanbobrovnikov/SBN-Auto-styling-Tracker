@@ -190,6 +190,30 @@ function ghlPayload(body) {
 // manager, a tech, the owner personally, or just an unrecognized name — is a walk-in.
 // It's never treated as an error; if it happens to match a specific manager or tech,
 // they're pre-filled as the closer, otherwise it's left for a human to assign.
+// Appointment titles at this shop start with the closer's initials, e.g. "DG 2024 Toyota
+// Venza Ceramic Coating 499-95depo" — this pulls that leading token off and matches it
+// against registered sales reps. This turned out to be more reliable than GHL's own
+// "Contact Owner" field, which reflects generic account ownership, not who actually closed
+// the specific deal.
+// Appointment titles at this shop include the closer's initials somewhere — usually but
+// not always at the start (e.g. "DG 2024 Toyota Venza Ceramic Coating 499-95depo"). This
+// scans every all-caps 2-4 letter token in the title and returns the first one that
+// matches a registered sales rep. This turned out to be more reliable than GHL's own
+// "Contact Owner" field, which reflects generic account ownership, not who actually closed
+// the specific deal.
+// Known limitation, worth remembering: a car trim abbreviation (GT, RS, SS, etc.) could in
+// theory collide with a rep's initials. Not a problem with the current three reps' initials
+// (DG, FK, TG), but worth a second look if a future rep's initials match a common trim name.
+function repFromTitleInitials(db, title) {
+  if (!title) return null;
+  const tokens = String(title).toUpperCase().match(/[A-Z]{2,4}/g) || [];
+  for (const token of tokens) {
+    const rep = db.salesReps.find((r) => r.initials && r.initials.toUpperCase() === token);
+    if (rep) return rep;
+  }
+  return null;
+}
+
 function resolveSalesRepAttribution(db, salesRepName) {
   if (!salesRepName) return null;
   const nameLower = String(salesRepName).trim().toLowerCase();
@@ -474,17 +498,17 @@ app.delete("/api/managers/:id", requireOwner, (req, res) => {
 // depends on that arrived mark, so they get no ability to touch job status themselves. ----------
 app.get("/api/salesreps", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name, commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0 })));
+  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name, initials: r.initials || "", commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0 })));
 });
 
 app.post("/api/salesreps", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, pin, commissionRate, afterHoursCommissionRate } = req.body;
+  const { name, pin, commissionRate, afterHoursCommissionRate, initials } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
-  const rep = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, afterHoursCommissionRate: parseFloat(afterHoursCommissionRate) || 0 };
+  const rep = { id: newId(), name: name.trim(), initials: (initials || "").trim().toUpperCase(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, afterHoursCommissionRate: parseFloat(afterHoursCommissionRate) || 0 };
   db.salesReps.push(rep);
   saveDB(db);
-  res.json({ id: rep.id, name: rep.name, commissionRate: rep.commissionRate, afterHoursCommissionRate: rep.afterHoursCommissionRate });
+  res.json({ id: rep.id, name: rep.name, initials: rep.initials, commissionRate: rep.commissionRate, afterHoursCommissionRate: rep.afterHoursCommissionRate });
 });
 
 app.patch("/api/salesreps/:id", requireOwner, (req, res) => {
@@ -493,6 +517,7 @@ app.patch("/api/salesreps/:id", requireOwner, (req, res) => {
   if (!rep) return res.status(404).json({ error: "Not found." });
   if (req.body.commissionRate !== undefined) rep.commissionRate = parseFloat(req.body.commissionRate) || 0;
   if (req.body.afterHoursCommissionRate !== undefined) rep.afterHoursCommissionRate = parseFloat(req.body.afterHoursCommissionRate) || 0;
+  if (req.body.initials !== undefined) rep.initials = req.body.initials.trim().toUpperCase();
   if (req.body.pin) rep.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
