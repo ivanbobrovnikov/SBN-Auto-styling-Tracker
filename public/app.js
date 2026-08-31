@@ -967,6 +967,7 @@ async function renderSalesPerformance(content) {
 // ---------------- Owner: manage sales reps ----------------
 async function renderOwnerSalesReps(content) {
   const nameInput = el("input", { placeholder: "Name" });
+  const initialsInput = el("input", { placeholder: "Initials (e.g. DG)", style: "max-width:130px" });
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
   const rateInput = el("input", { type: "number", placeholder: "Commission % (9am-6pm ET, Mon-Sat)", style: "max-width:220px" });
   const afterRateInput = el("input", { type: "number", placeholder: "After-hours %", style: "max-width:130px" });
@@ -978,6 +979,8 @@ async function renderOwnerSalesReps(content) {
     list.innerHTML = "";
     if (reps.length === 0) list.appendChild(el("div", { class: "muted", text: "No sales reps added yet." }));
     reps.forEach((r) => {
+      const initials = el("input", { value: r.initials || "", placeholder: "Initials", style: "max-width:70px" });
+      initials.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ initials: initials.value }) }));
       const rate = el("input", { type: "number", value: r.commissionRate || 0, style: "max-width:70px" });
       const afterRate = el("input", { type: "number", value: r.afterHoursCommissionRate || 0, style: "max-width:70px" });
       rate.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
@@ -986,6 +989,7 @@ async function renderOwnerSalesReps(content) {
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: r.name }),
+        el("span", { class: "muted", style: "font-size:11.5px", text: "Initials:" }), initials,
         el("span", { class: "muted", style: "font-size:11.5px", text: "In hours:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         el("span", { class: "muted", style: "font-size:11.5px;margin-left:8px", text: "After hours:" }), afterRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         newPinInput,
@@ -1002,12 +1006,12 @@ async function renderOwnerSalesReps(content) {
   }
 
   content.appendChild(el("div", { class: "card" }, [
-    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD SALES REP — this is the person who closed the deal, not the tech who worked it. Their commission is on the base sale, only counted once a manager marks the appointment as arrived. The rate that applies depends on when the deal actually closed — during business hours (Mon–Sat, 9am–6pm Eastern) or after." }),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput, afterRateInput,
+    el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD SALES REP — this is the person who closed the deal, not the tech who worked it. Initials should match exactly what they type at the start of the appointment title (e.g. \"DG\" for Dmitriy Gumenyuk) — that's what the tracker uses to identify who booked a job. Their commission is on the base sale, only counted once a manager marks the appointment as arrived. The rate that applies depends on when the deal actually closed — during business hours (Mon–Sat, 9am–6pm Eastern) or after." }),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, initialsInput, pinInput, rateInput, afterRateInput,
       el("button", { class: "primary", onclick: async () => {
         try {
-          await api("/api/salesreps", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value, afterHoursCommissionRate: afterRateInput.value }) });
-          nameInput.value = ""; pinInput.value = ""; rateInput.value = ""; afterRateInput.value = "";
+          await api("/api/salesreps", { method: "POST", body: JSON.stringify({ name: nameInput.value, initials: initialsInput.value, pin: pinInput.value, commissionRate: rateInput.value, afterHoursCommissionRate: afterRateInput.value }) });
+          nameInput.value = ""; initialsInput.value = ""; pinInput.value = ""; rateInput.value = ""; afterRateInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
         } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
