@@ -1282,6 +1282,50 @@ app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
   res.json(result);
 });
 
+// ---------- GHL API bulk import — Phase 1: diagnostic only ----------
+// This does NOT import anything. It makes one real API call to GHL using a Private
+// Integration token, and dumps the raw response into the debug log — the same
+// "see the real data before writing logic" approach that solved every webhook problem,
+// applied here BEFORE building the actual import instead of after it breaks.
+// Requires GHL_API_TOKEN and GHL_LOCATION_ID as environment variables.
+const GHL_API_TOKEN = process.env.GHL_API_TOKEN || "";
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
+
+app.post("/api/owner/ghl-import-test", requireOwner, async (req, res) => {
+  const db = loadDB();
+  if (!db.debugLog) db.debugLog = [];
+  if (!GHL_API_TOKEN || !GHL_LOCATION_ID) {
+    return res.status(400).json({ error: "GHL_API_TOKEN and GHL_LOCATION_ID must be set as environment variables first." });
+  }
+  // Best-known current shape of GHL's v2 API — genuinely may need correcting once we see
+  // the real response. That's expected; this is exactly why this is a separate test step.
+  const url = `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&limit=5`;
+  try {
+    const ghlRes = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${GHL_API_TOKEN}`,
+        Version: "2021-07-28",
+        Accept: "application/json",
+      },
+    });
+    const bodyText = await ghlRes.text();
+    let parsed;
+    try { parsed = JSON.parse(bodyText); } catch (e) { parsed = bodyText; }
+    db.debugLog.unshift({
+      receivedAt: new Date().toISOString(), endpoint: "ghl-import-test",
+      requestUrl: url, responseStatus: ghlRes.status, responseBody: parsed,
+    });
+    db.debugLog = db.debugLog.slice(0, 30);
+    saveDB(db);
+    res.json({ ok: true, status: ghlRes.status, note: "Check the Webhook Debug Log to see the full raw response." });
+  } catch (e) {
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "ghl-import-test", error: e.message });
+    db.debugLog = db.debugLog.slice(0, 30);
+    saveDB(db);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 function csvEscape(val) {
   const s = String(val === undefined || val === null ? "" : val);
   if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
