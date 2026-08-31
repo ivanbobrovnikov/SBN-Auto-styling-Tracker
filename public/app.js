@@ -1577,7 +1577,17 @@ async function renderTestTool(content) {
         try { await api("/api/owner/ghl-test-pipelines", { method: "POST" }); await loadDebugLog(); } catch (e) { alert(e.message); }
       }, text: "Test 2: Pipeline stage names" }),
     ]),
-    el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "Paste a real contact ID from Test 1's results to run these two:" }),
+    el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "Paste the 'Booked W Deposit' stage ID from Test 2's results:" }),
+    (() => {
+      const stageIdInput = el("input", { placeholder: "Stage ID", style: "max-width:280px;margin-bottom:10px" });
+      return el("div", {}, [
+        stageIdInput,
+        el("button", { class: "primary", onclick: async () => {
+          try { await api("/api/owner/ghl-test-booked-stage", { method: "POST", body: JSON.stringify({ stageId: stageIdInput.value.trim() }) }); await loadDebugLog(); } catch (e) { alert(e.message); }
+        }, text: "Test 2b: Real booked jobs only" }),
+      ]);
+    })(),
+    el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px;margin-top:10px", text: "Paste a real contact ID from Test 1's results to run these two:" }),
     (() => {
       const contactIdInput = el("input", { placeholder: "Contact ID", style: "max-width:220px;margin-bottom:8px" });
       return el("div", {}, [
