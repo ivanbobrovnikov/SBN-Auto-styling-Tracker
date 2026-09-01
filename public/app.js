@@ -182,6 +182,7 @@ function renderLogin() {
 
 const TAB_ICONS = {
   "owner-summary": "📊", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
+  "owner-serviced": "✅",
   "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
   "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
   "manager-performance": "📈", "sales-schedule": "📋", "sales-fullschedule": "🗓",
@@ -191,7 +192,7 @@ const TAB_ICONS = {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
     allTabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
@@ -368,6 +369,7 @@ async function renderSalesTabContent(content) {
 
 async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
+  if (currentTab === "owner-serviced") return renderServicedCars(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
@@ -807,6 +809,44 @@ function renderYearGrid(sales, yearStr) {
     el("span", { text: "More jobs" }),
   ]);
   return el("div", { style: "background:var(--panel);border-radius:12px;padding:14px" }, [months, legend]);
+}
+
+// Serviced Cars — only work that's actually been completed, regardless of payment status.
+// Distinct from All Jobs (which shows the full schedule/pipeline) and from the Dashboard's
+// stricter "Total Revenue" (which also requires paid).
+async function renderServicedCars(content) {
+  const body = el("div");
+  const picker = renderPeriodPicker((params) => load(params), "day");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const sales = await api(`/api/owner/serviced-cars?${qs}`);
+    body.innerHTML = "";
+    if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No cars completed in this period." })); return; }
+    const totalValue = sales.reduce((a, s) => a + s.total, 0);
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars serviced" }), el("div", { class: "metric-value mono", text: sales.length })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Combined value" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(totalValue) })]),
+    ]));
+    sales.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((s) => {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
+            el("div", { class: "muted", text: `${formatDateTime(s.date)}${s.customerName ? " · " + s.customerName : ""}` }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
+          ]),
+          el("div", { style: "text-align:right" }, [
+            el("div", { class: "mono", style: "color:var(--amber);font-size:16px;font-weight:600", text: money(s.total) }),
+            s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px;color:var(--red)", text: "Unpaid" }),
+          ]),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
 }
 
 async function renderOwnerSales(content) {
