@@ -1435,8 +1435,8 @@ app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
   if (db.ghlImportCursor === undefined) db.ghlImportCursor = null;
   if (db.ghlImportImportedCount === undefined) db.ghlImportImportedCount = 0;
 
-  let url = `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_stage_id=${stageId}&limit=${batchSize}`;
-  if (db.ghlImportCursor) url += `&startAfter=${db.ghlImportCursor.startAfter}&startAfterId=${db.ghlImportCursor.startAfterId}`;
+  const baseUrl = `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_stage_id=${stageId}&limit=${batchSize}`;
+  const url = db.ghlImportCursor || baseUrl;
 
   let searchRes, searchBody;
   try {
@@ -1488,9 +1488,9 @@ app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
   }
 
   if (!dryRun) {
-    db.ghlImportCursor = (searchBody.meta && searchBody.meta.nextPage)
-      ? { startAfter: searchBody.meta.startAfter, startAfterId: searchBody.meta.startAfterId }
-      : null;
+    // Use GHL's own complete next-page URL as-is, rather than reconstructing pagination
+    // params by hand — that reconstruction was the actual cause of the 422 error.
+    db.ghlImportCursor = (searchBody.meta && searchBody.meta.nextPageUrl) ? searchBody.meta.nextPageUrl : null;
     db.ghlImportImportedCount = (db.ghlImportImportedCount || 0) + results.imported;
     saveDB(db);
   }
