@@ -309,6 +309,7 @@ function resolveUpsellNames(upsells, db) {
     let name = "Unassigned";
     if (u.employeeId) name = (db.employees.find((e) => e.id === u.employeeId) || {}).name || "Removed employee";
     else if (u.managerId) name = (db.managers.find((m) => m.id === u.managerId) || {}).name || "Removed manager";
+    if (u.salesRepId) name += ` + rep: ${u.salesRepName || "Removed rep"}`;
     return { ...u, attributedToName: name };
   });
 }
@@ -934,6 +935,13 @@ app.patch("/api/sales/:saleId/upsells/:upsellId", requireManager, (req, res) => 
   if (!upsell) return res.status(404).json({ error: "Upsell not found." });
   if (req.body.name !== undefined && req.body.name.trim()) upsell.name = req.body.name.trim();
   if (req.body.price !== undefined) upsell.price = parseFloat(req.body.price) || 0;
+  // A sales rep can close an upsell too (e.g. over the phone before the appointment) —
+  // tracked here for visibility/reporting, separate from the base-sale commission rule.
+  if (req.body.salesRepId !== undefined) {
+    upsell.salesRepId = req.body.salesRepId || null;
+    const rep = db.salesReps.find((r) => r.id === req.body.salesRepId);
+    upsell.salesRepName = rep ? rep.name : null;
+  }
   saveDB(db);
   res.json({ ok: true });
 });
@@ -1133,12 +1141,22 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
     else { afterHoursValue += parseFloat(s.basePrice) || 0; afterHoursCount += 1; }
   });
 
+  // Upsells this rep personally closed — tracked for visibility, e.g. a phone upsell on
+  // someone else's booking. Separate from the base-sale commission above; shown, not
+  // auto-paid, until a specific rate/rule for it is decided.
+  const myUpsells = [];
+  db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db)).forEach((s) => {
+    (s.upsells || []).forEach((u) => { if (u.salesRepId === repId) myUpsells.push({ id: u.id, name: u.name, price: u.price, car: s.car, date: s.date, saleId: s.id }); });
+  });
+  const upsellsClosedValue = myUpsells.reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
+
   res.json({
     totalBooked, totalBookedValue, showedCount: showed.length, showedValue,
     noShowCount, pendingCount, pendingValue, commission,
     commissionRate: rep ? rep.commissionRate || 0 : 0,
     afterHoursCommissionRate: rep ? rep.afterHoursCommissionRate || 0 : 0,
     duringHoursCount, duringHoursValue, afterHoursCount, afterHoursValue,
+    upsellsClosedCount: myUpsells.length, upsellsClosedValue, upsellsClosed: myUpsells,
   });
 });
 
@@ -1204,12 +1222,23 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const b = personBreakdown("employeeId", emp.id);
     const carsWorked = sales.filter((s) => saleEmployeeIds(s).includes(emp.id)).length;
     const commission = emp.commissionRate ? b.revenue * (emp.commissionRate / 100) : 0;
-    return { id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual };
+    // Walk-ins this tech personally closed — a separate pay source from upsell commission,
+    // only counted once a job is BOTH arrived and paid. This was missing from Payroll
+    // even though it already worked correctly on the tech's own performance page.
+    const myWalkIns = sales.filter((s) => s.walkInClosedByType === "employee" && s.walkInClosedById === emp.id);
+    const walkInClosedCount = myWalkIns.length;
+    const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+    const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
+    return { id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual, walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission };
   });
   const managers = db.managers.map((mgr) => {
     const b = personBreakdown("managerId", mgr.id);
     const commission = mgr.commissionRate ? b.revenue * (mgr.commissionRate / 100) : 0;
-    return { id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual };
+    const myWalkIns = sales.filter((s) => s.walkInClosedByType === "manager" && s.walkInClosedById === mgr.id);
+    const walkInClosedCount = myWalkIns.length;
+    const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+    const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
+    return { id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual, walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission };
   });
   // Sales reps are a different pay structure entirely — commission on the base sale, only
   // when the manager marked it arrived. Not tied to upsells at all.
