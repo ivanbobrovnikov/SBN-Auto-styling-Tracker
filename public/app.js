@@ -182,7 +182,7 @@ function renderLogin() {
 
 const TAB_ICONS = {
   "owner-summary": "📊", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
-  "owner-serviced": "✅",
+  "owner-serviced": "✅", "owner-audit": "🕐",
   "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
   "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
   "manager-performance": "📈", "sales-schedule": "📋", "sales-fullschedule": "🗓",
@@ -192,7 +192,7 @@ const TAB_ICONS = {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-audit", "Commission Audit"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
     allTabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
@@ -370,6 +370,7 @@ async function renderSalesTabContent(content) {
 async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
   if (currentTab === "owner-serviced") return renderServicedCars(content);
+  if (currentTab === "owner-audit") return renderCommissionAudit(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
@@ -814,6 +815,47 @@ function renderYearGrid(sales, yearStr) {
 // Serviced Cars — only work that's actually been completed, regardless of payment status.
 // Distinct from All Jobs (which shows the full schedule/pipeline) and from the Dashboard's
 // stricter "Total Revenue" (which also requires paid).
+// Commission Audit — every appointment attributed to any sales rep, any status, with the
+// exact moment it closed and why it got the rate it did. This is the shop-wide answer to
+// "how can I be sure this is accurate" — no manual checking required.
+async function renderCommissionAudit(content) {
+  const body = el("div");
+  const picker = renderPeriodPicker((params) => load(params), "payperiod");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const rows = await api(`/api/owner/commission-audit?${qs}`);
+    body.innerHTML = "";
+    if (rows.length === 0) { body.appendChild(el("div", { class: "muted", text: "No sales rep-attributed appointments in this period." })); return; }
+    const totalCommission = rows.reduce((a, r) => a + r.commissionAmount, 0);
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Appointments" }), el("div", { class: "metric-value mono", text: rows.length })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(totalCommission) })]),
+    ]));
+    rows.forEach((r) => {
+      const statusLabel = r.status === "arrived" ? "Arrived" : r.status === "no_show" ? "No-show" : "Upcoming";
+      const statusColor = r.status === "arrived" ? "var(--green)" : r.status === "no_show" ? "var(--red)" : "var(--sub)";
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: r.car }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: `${r.customerName || ""} · ${r.salesRepName}` }),
+            el("div", { class: "muted", style: "font-size:11.5px", text: `Closed: ${r.closedAtEastern} — ${r.duringHours ? "in-hours" : "after-hours"} (${r.rateApplied}%)` }),
+          ]),
+          el("div", { style: "text-align:right" }, [
+            el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
+            el("div", { class: "mono", style: "color:var(--amber);font-size:14px", text: money(r.basePrice) }),
+            r.status === "arrived" ? el("div", { class: "mono", style: "color:var(--green);font-size:12px", text: `+${money(r.commissionAmount)}` }) : null,
+          ]),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
+}
+
 async function renderServicedCars(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "day");
@@ -1096,6 +1138,18 @@ async function renderSalesPerformance(content) {
           ])
         : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:8px", text: "No commission rate set for you yet — ask the owner." }),
     ]));
+    if ((stats.commissionAudit || []).length > 0) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "COMMISSION AUDIT — exactly when each deal closed and why it got the rate it did" }),
+        ...stats.commissionAudit.map((a) => el("div", { class: "row", style: "margin-bottom:6px;font-size:12.5px" }, [
+          el("span", {}, [
+            el("div", { text: a.car }),
+            el("div", { class: "muted", style: "font-size:11px", text: `${a.closedAtEastern} — ${a.duringHours ? "in-hours" : "after-hours"} (${a.rateApplied}%)` }),
+          ]),
+          el("span", { class: "mono", style: `color:${a.duringHours ? "var(--cyan)" : "var(--amber)"}`, text: money(a.commissionAmount) }),
+        ])),
+      ]));
+    }
     if (stats.upsellsClosedCount > 0) {
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "muted", style: "margin-bottom:8px", text: "UPSELLS YOU CLOSED (tracked separately from your base-sale commission above)" }),
@@ -1450,12 +1504,12 @@ async function renderManagerJobs(content) {
           text: (active ? "✓ " : "") + label,
         });
       };
-      const paymentBtn = (value, label) => {
-        const active = job.paymentMethod === value;
+      const paymentBtn = (field, label) => {
+        const active = field === "paidCash" ? !!job.paidCash : !!job.paidCard;
         return el("button", {
           class: "tab-btn" + (active ? " active" : ""),
           style: "border-color:" + (active ? "var(--green)" : "var(--border)") + ";color:" + (active ? "var(--green)" : "var(--sub)"),
-          onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ paymentMethod: active ? null : value }) }); load(); },
+          onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ [field]: !active }) }); load(); },
           text: (active ? "✓ " : "") + label,
         });
       };
@@ -1555,8 +1609,8 @@ async function renderManagerJobs(content) {
           statusBtn("arrived", "Arrived"),
           statusBtn("no_show", "No-show"),
           boolBtn("completed", "Service complete"),
-          paymentBtn("cash", "Paid — Cash"),
-          paymentBtn("card", "Paid — Card"),
+          paymentBtn("paidCash", "Paid — Cash"),
+          paymentBtn("paidCard", "Paid — Card"),
           el("button", {
             class: "tab-btn" + (job.isWalkIn ? " active" : ""),
             style: "border-color:" + (job.isWalkIn ? "var(--amber)" : "var(--border)") + ";color:" + (job.isWalkIn ? "var(--amber)" : "var(--sub)"),
