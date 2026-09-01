@@ -152,6 +152,17 @@ function easternWallClockToUTC(y, mo, d, h, mi, s) {
 function normalizeDate(input) {
   if (!input) return null;
   const hasExplicitOffset = /Z$|[+-]\d{2}:?\d{2}$/.test(String(input).trim());
+
+  // GHL's own API (used by the bulk import) sends dates like "2026-09-03 09:00:00" — no
+  // timezone marker, and not the same shape as the human-readable format below. Without
+  // this, a real 9am Eastern appointment gets treated as 9am UTC and displays as 5am
+  // Eastern — exactly the bug this catches.
+  const plainFormat = !hasExplicitOffset && String(input).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/);
+  if (plainFormat) {
+    const d = easternWallClockToUTC(parseInt(plainFormat[1], 10), parseInt(plainFormat[2], 10) - 1, parseInt(plainFormat[3], 10), parseInt(plainFormat[4], 10), parseInt(plainFormat[5], 10), parseInt(plainFormat[6], 10));
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+
   const humanFormat = String(input).match(/(\w+),?\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
   if (!hasExplicitOffset && humanFormat) {
     const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
@@ -1230,12 +1241,29 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
   const idCounts = {};
   withOppId.forEach((s) => { idCounts[s.ghlOpportunityId] = (idCounts[s.ghlOpportunityId] || 0) + 1; });
   const duplicateIds = Object.entries(idCounts).filter(([id, count]) => count > 1);
+
+  // Same real customer, multiple separate opportunities — a much stronger signal than
+  // opportunity ID, and the one that actually catches "duplicate-looking" jobs that are
+  // genuinely different GHL records (e.g. left over from testing appointment status
+  // toggles before the bulk import existed).
+  const withContactId = db.sales.filter((s) => s.contactId && s.status !== "cancelled");
+  const byContact = {};
+  withContactId.forEach((s) => { (byContact[s.contactId] = byContact[s.contactId] || []).push(s); });
+  const contactDuplicates = Object.entries(byContact)
+    .filter(([id, group]) => group.length > 1)
+    .map(([contactId, group]) => ({
+      contactId, count: group.length,
+      jobs: group.map((s) => ({ id: s.id, car: s.car, date: s.date, customerName: s.customerName, basePrice: s.basePrice, ghlOpportunityId: s.ghlOpportunityId })),
+    }));
+
   res.json({
     totalSalesInDatabase: db.sales.length,
     salesWithGhlOpportunityId: withOppId.length,
     uniqueOpportunityIds: Object.keys(idCounts).length,
     duplicateOpportunityIds: duplicateIds.length,
     duplicateExamples: duplicateIds.slice(0, 5).map(([id, count]) => ({ ghlOpportunityId: id, count })),
+    contactsWithMultipleJobs: contactDuplicates.length,
+    contactDuplicates: contactDuplicates.slice(0, 20),
   });
 });
 
