@@ -72,11 +72,11 @@ function dateRangeFor(query) {
     start = monday.toISOString();
     end = sunday.toISOString();
   } else if (period === "payperiod") {
-    // Your biweekly pay period: 14 days ending on the payroll-processing Tuesday you pick,
-    // starting the Wednesday 13 days before it.
+    // Real payroll schedule: Tuesday through the following Tuesday, inclusive — e.g.
+    // Aug 25 through Sept 8 when Sept 8 is the payroll-processing date you pick.
     const endDate = query.date ? new Date(query.date + "T23:59:59.999Z") : new Date();
     const startDate = new Date(endDate);
-    startDate.setUTCDate(startDate.getUTCDate() - 13);
+    startDate.setUTCDate(startDate.getUTCDate() - 14);
     startDate.setUTCHours(0, 0, 0, 0);
     start = startDate.toISOString();
     end = endDate.toISOString();
@@ -1174,7 +1174,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
 
   function personBreakdown(idField, id) {
     const mine = [];
-    sales.forEach((s) => (s.upsells || []).forEach((u) => { if (u[idField] === id) mine.push(u); }));
+    sales.forEach((s) => (s.upsells || []).forEach((u) => { if (u[idField] === id) mine.push({ ...u, saleId: s.id, car: s.car, date: s.date }); }));
     const revenue = mine.reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
     const grouped = {};
     mine.forEach((u) => {
@@ -1183,19 +1183,22 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
       grouped[k].count += 1;
       grouped[k].revenue += parseFloat(u.price) || 0;
     });
-    return { revenue, count: mine.length, items: Object.values(grouped).sort((a, b) => b.revenue - a.revenue) };
+    return {
+      revenue, count: mine.length, items: Object.values(grouped).sort((a, b) => b.revenue - a.revenue),
+      individual: mine.slice().sort((a, b) => (a.date < b.date ? 1 : -1)),
+    };
   }
 
   const employees = db.employees.map((emp) => {
     const b = personBreakdown("employeeId", emp.id);
     const carsWorked = sales.filter((s) => saleEmployeeIds(s).includes(emp.id)).length;
     const commission = emp.commissionRate ? b.revenue * (emp.commissionRate / 100) : 0;
-    return { id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items };
+    return { id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual };
   });
   const managers = db.managers.map((mgr) => {
     const b = personBreakdown("managerId", mgr.id);
     const commission = mgr.commissionRate ? b.revenue * (mgr.commissionRate / 100) : 0;
-    return { id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items };
+    return { id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual };
   });
   // Sales reps are a different pay structure entirely — commission on the base sale, only
   // when the manager marked it arrived. Not tied to upsells at all.
