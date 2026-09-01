@@ -418,10 +418,16 @@ async function renderOwnerPayroll(content) {
       el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-bottom:8px" }, upsellRows),
       p.commissionRate > 0
         ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
-            el("span", { class: "muted", style: "font-size:12.5px", text: `Commission owed (${p.commissionRate}% of upsells)` }),
+            el("span", { class: "muted", style: "font-size:12.5px", text: `Upsell commission (${p.commissionRate}%)` }),
             el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.commission) }),
           ])
-        : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No commission rate set for this person." }),
+        : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No upsell commission rate set for this person." }),
+      (p.walkInClosedCount > 0 || p.walkInCommissionRate > 0)
+        ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
+            el("span", { class: "muted", style: "font-size:12.5px", text: `Walk-in close commission (${p.walkInCommissionRate}%, ${p.walkInArrivedPaidCount} arrived+paid of ${p.walkInClosedCount} closed)` }),
+            el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.walkInCommission) }),
+          ])
+        : null,
     ]);
   }
 
@@ -433,7 +439,7 @@ async function renderOwnerPayroll(content) {
 
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Combined upsell revenue — everyone" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(d.shopTotalUpsellRevenue) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission owed" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.employees.reduce((a, e) => a + e.commission, 0) + d.managers.reduce((a, m) => a + m.commission, 0) + (d.salesReps || []).reduce((a, r) => a + r.commission, 0)) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission owed" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.employees.reduce((a, e) => a + e.commission + e.walkInCommission, 0) + d.managers.reduce((a, m) => a + m.commission + m.walkInCommission, 0) + (d.salesReps || []).reduce((a, r) => a + r.commission, 0)) })]),
     ]));
 
     body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "EMPLOYEES — EACH PERSON'S OWN UPSELLS" }));
@@ -1019,6 +1025,22 @@ async function renderSalesPerformance(content) {
           ])
         : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:8px", text: "No commission rate set for you yet — ask the owner." }),
     ]));
+    if (stats.upsellsClosedCount > 0) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "UPSELLS YOU CLOSED (tracked separately from your base-sale commission above)" }),
+        ...stats.upsellsClosed.map((u) => el("div", { class: "row", style: "margin-bottom:4px;font-size:13px" }, [
+          el("span", {}, [
+            el("div", { text: u.name }),
+            el("div", { class: "muted", style: "font-size:11px", text: `${u.car} · ${formatDateTime(u.date)}` }),
+          ]),
+          el("span", { class: "mono", style: "color:var(--cyan)", text: money(u.price) }),
+        ])),
+        el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
+          el("span", { class: "muted", text: "Total" }),
+          el("span", { class: "mono", style: "font-weight:600", text: money(stats.upsellsClosedValue) }),
+        ]),
+      ]));
+    }
   }
   content.appendChild(picker.el);
   content.appendChild(body);
@@ -1330,6 +1352,7 @@ async function renderManagerJobs(content) {
   const body = el("div");
   const employees = await api("/api/manager/employees");
   const managersList = await api("/api/manager/managers-list");
+  const salesRepsList = await api("/api/manager/salesreps-list");
   const nav = renderDayNav((params) => load(params));
   async function load(params) {
     const p = params || nav.getParams();
@@ -1396,7 +1419,22 @@ async function renderManagerJobs(content) {
         managerAssignWrap.appendChild(chip);
       });
 
-      const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })));
+      const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => {
+        const repSelect = el("select", {
+          style: "max-width:150px;font-size:11px;margin-left:6px;background:var(--panel);border:0.5px solid var(--border);border-radius:6px;color:var(--sub);padding:2px 4px",
+          onchange: async (e) => {
+            await api(`/api/sales/${job.id}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ salesRepId: e.target.value || null }) });
+            load();
+          },
+        }, [
+          el("option", { value: "", text: "No rep credit" }),
+          ...salesRepsList.map((r) => el("option", { value: r.id, text: `Rep: ${r.name}`, ...(u.salesRepId === r.id ? { selected: "true" } : {}) })),
+        ]);
+        return el("div", { style: "display:inline-flex;align-items:center;margin-bottom:4px;margin-right:8px" }, [
+          el("span", { class: "pill", style: "margin:0", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }),
+          repSelect,
+        ]);
+      }));
       const upsellForm = renderUpsellForm(job.id, () => load());
 
       const priceInput = el("input", { type: "number", value: job.basePrice, style: "max-width:90px;text-align:right;font-family:monospace" });
@@ -1425,7 +1463,20 @@ async function renderManagerJobs(content) {
           ]),
         ]),
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
-        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: `Sales rep: ${job.salesRepName}` }),
+        el("div", { style: "margin-bottom:10px" }, [
+          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `SALES REP (currently: ${job.salesRepName})` }),
+          el("select", {
+            style: "max-width:220px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
+            onchange: async (e) => {
+              if (!e.target.value) return;
+              await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ salesRepId: e.target.value }) });
+              load();
+            },
+          }, [
+            el("option", { value: "", text: "Assign a sales rep..." }),
+            ...salesRepsList.map((r) => el("option", { value: r.id, text: r.name, ...(job.salesRepId === r.id ? { selected: "true" } : {}) })),
+          ]),
+        ]),
         el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
           statusBtn("arrived", "Arrived"),
           statusBtn("no_show", "No-show"),
