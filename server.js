@@ -309,7 +309,7 @@ function resolveUpsellNames(upsells, db) {
     let name = "Unassigned";
     if (u.employeeId) name = (db.employees.find((e) => e.id === u.employeeId) || {}).name || "Removed employee";
     else if (u.managerId) name = (db.managers.find((m) => m.id === u.managerId) || {}).name || "Removed manager";
-    if (u.salesRepId) name += ` + rep: ${u.salesRepName || "Removed rep"}`;
+    else if (u.salesRepId) name = `${u.salesRepName || "Removed rep"} (sales rep)`;
     return { ...u, attributedToName: name };
   });
 }
@@ -935,12 +935,21 @@ app.patch("/api/sales/:saleId/upsells/:upsellId", requireManager, (req, res) => 
   if (!upsell) return res.status(404).json({ error: "Upsell not found." });
   if (req.body.name !== undefined && req.body.name.trim()) upsell.name = req.body.name.trim();
   if (req.body.price !== undefined) upsell.price = parseFloat(req.body.price) || 0;
-  // A sales rep can close an upsell too (e.g. over the phone before the appointment) —
-  // tracked here for visibility/reporting, separate from the base-sale commission rule.
-  if (req.body.salesRepId !== undefined) {
-    upsell.salesRepId = req.body.salesRepId || null;
-    const rep = db.salesReps.find((r) => r.id === req.body.salesRepId);
-    upsell.salesRepName = rep ? rep.name : null;
+  // Who gets credit for this upsell is ONE choice across everyone in the system — an
+  // employee, a manager, or a sales rep — not separate bolted-on fields. Setting one
+  // clears the others, so credit is never ambiguous or double-counted.
+  if (req.body.creditType !== undefined) {
+    upsell.employeeId = null; upsell.managerId = null; upsell.salesRepId = null; upsell.salesRepName = null;
+    if (req.body.creditType === "employee" && req.body.creditId) {
+      upsell.employeeId = req.body.creditId;
+    } else if (req.body.creditType === "manager" && req.body.creditId) {
+      upsell.managerId = req.body.creditId;
+    } else if (req.body.creditType === "salesrep" && req.body.creditId) {
+      const rep = db.salesReps.find((r) => r.id === req.body.creditId);
+      upsell.salesRepId = req.body.creditId;
+      upsell.salesRepName = rep ? rep.name : null;
+    }
+    // creditType === "none" (or an unmatched value) leaves it fully unassigned.
   }
   saveDB(db);
   res.json({ ok: true });
