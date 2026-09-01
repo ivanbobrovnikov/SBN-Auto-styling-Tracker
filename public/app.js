@@ -341,11 +341,26 @@ async function renderOwnerPayroll(content) {
   const picker = renderPeriodPicker((params) => load(params), "payperiod");
 
   function personCard(p, subtitle) {
-    const upsellRows = p.upsells.length
-      ? p.upsells.map((u) => el("div", { class: "row", style: "margin-bottom:3px" }, [
-          el("span", { style: "font-size:13px", text: u.name }),
-          el("span", { class: "mono muted", style: "font-size:13px", text: `${u.count}x · ${money(u.revenue)}` }),
-        ]))
+    const upsellRows = (p.individualUpsells || []).length
+      ? p.individualUpsells.map((u) => {
+          const nameInput = el("input", { value: u.name, style: "max-width:130px;font-size:12px" });
+          const priceInput = el("input", { type: "number", value: u.price, style: "max-width:70px;font-size:12px" });
+          return el("div", { class: "row", style: "margin-bottom:6px;align-items:center;flex-wrap:wrap;gap:4px" }, [
+            el("div", { style: "min-width:0" }, [
+              nameInput,
+              el("div", { class: "muted", style: "font-size:10px", text: `${u.car || ""} · ${formatDateTime(u.date)}` }),
+            ]),
+            priceInput,
+            el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: async () => {
+              await api(`/api/sales/${u.saleId}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ name: nameInput.value, price: priceInput.value }) });
+              load();
+            }, text: "Save" }),
+            el("button", { class: "icon-danger", style: "padding:3px 7px", onclick: async () => {
+              await api(`/api/sales/${u.saleId}/upsells/${u.id}`, { method: "DELETE" });
+              load();
+            }, text: "✕" }),
+          ]);
+        })
       : [el("div", { class: "muted", style: "font-size:12.5px", text: "No upsells logged in this period." })];
 
     return el("div", { class: "card" }, [
