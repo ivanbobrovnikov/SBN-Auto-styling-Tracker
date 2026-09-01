@@ -1654,6 +1654,35 @@ async function renderTestTool(content) {
     }
   }
 
+  let autoImportRunning = false;
+  const autoImportLog = el("div", { style: "margin-top:10px;max-height:240px;overflow-y:auto" });
+
+  async function runAutoImport(stopBtn, startBtn) {
+    autoImportRunning = true;
+    stopBtn.style.display = "inline-block";
+    startBtn.disabled = true;
+    while (autoImportRunning) {
+      let r;
+      try {
+        r = await api("/api/owner/ghl-bulk-import", { method: "POST", body: JSON.stringify({ stageId: importStageId.value.trim(), cutoffDate: importCutoff.value, dryRun: false, batchSize: 15 }) });
+      } catch (e) {
+        autoImportLog.appendChild(el("div", { style: "color:var(--red);font-size:12px", text: `Error: ${e.message} — stopped.` }));
+        break;
+      }
+      autoImportLog.appendChild(el("div", { style: "font-size:12px", text: `Batch done — imported ${r.imported}, skipped ${r.skippedOld + r.skippedNoAppointment}, total so far: ${r.totalImportedSoFar}${r.totalAvailable ? ` of ~${r.totalAvailable}` : ""}` }));
+      autoImportLog.scrollTop = autoImportLog.scrollHeight;
+      await loadImportStatus();
+      if (!r.hasMore) {
+        autoImportLog.appendChild(el("div", { style: "color:var(--green);font-size:12px;font-weight:600", text: "✓ All done — nothing left to import." }));
+        break;
+      }
+      await new Promise((res) => setTimeout(res, 500)); // brief pause between batches, easy on GHL's rate limits
+    }
+    autoImportRunning = false;
+    stopBtn.style.display = "none";
+    startBtn.disabled = false;
+  }
+
   content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "PHASE 2: REAL IMPORT — imports real jobs from GHL's Booked stage using everything confirmed above. Preview first (nothing saved), then import in small batches. Safe to re-run — matches by opportunity ID, never creates duplicates." }),
     el("div", { class: "field" }, [el("label", { text: "Booked w/ Deposit stage ID" }), importStageId]),
@@ -1678,7 +1707,17 @@ async function renderTestTool(content) {
         await loadImportStatus();
       }, text: "Reset progress" }),
     ]),
+    (() => {
+      const startBtn = el("button", { class: "primary", style: "margin-top:8px;background:var(--green)" });
+      const stopBtn = el("button", { class: "icon-danger", style: "margin-top:8px;margin-left:8px;display:none" });
+      startBtn.textContent = "Auto-import everything remaining (keep this tab open)";
+      startBtn.onclick = () => runAutoImport(stopBtn, startBtn);
+      stopBtn.textContent = "Stop";
+      stopBtn.onclick = () => { autoImportRunning = false; };
+      return el("div", {}, [startBtn, stopBtn]);
+    })(),
     importStatus,
+    autoImportLog,
     importResults,
   ]));
   await loadImportStatus();
