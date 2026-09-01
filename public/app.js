@@ -117,13 +117,23 @@ function render() {
     return;
   }
 
+  const roleLabel = session.role === "owner" ? "Owner" : session.role === "manager" ? "Manager" : session.role === "sales" ? "Sales" : "Employee";
   app.appendChild(el("div", { class: "header" }, [
-    el("div", { class: "title oswald", text: "SBN Autostyling Tracker" }),
-    el("div", { class: "subtitle", text: "Window tint · PPF · Ceramic coating — West Berlin, NJ" }),
+    el("img", { class: "logo", src: "/logo.png", alt: "SBN Auto Styling" }),
+    el("div", { style: "flex:1;min-width:0" }, [
+      el("div", { class: "title oswald", text: "SBN Autostyling Tracker" }),
+      el("div", { class: "subtitle", text: "Window tint · PPF · Ceramic coating — West Berlin, NJ" }),
+    ]),
+    el("div", { style: "text-align:right;flex-shrink:0" }, [
+      el("div", { style: "font-size:12.5px;font-weight:500", text: session.name || "Owner" }),
+      el("div", { class: "muted", style: "font-size:10px;text-transform:uppercase;letter-spacing:0.04em", text: roleLabel }),
+      el("button", { class: "ghost", style: "font-size:10px;padding:3px 8px;margin-top:3px", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); }, text: "Log out" }),
+    ]),
   ]));
-  app.appendChild(renderTabs());
+
   const content = el("div", { id: "content" });
   app.appendChild(content);
+  app.appendChild(renderBottomNav());
   if (session.role === "owner") renderOwnerTabContent(content);
   else if (session.role === "manager") renderManagerTabContent(content);
   else if (session.role === "sales") renderSalesTabContent(content);
@@ -133,9 +143,9 @@ function render() {
 function renderLoginScreen() {
   const inner = session.ownerPinSet ? renderLogin() : renderOwnerSetup();
   return el("div", { style: "min-height:78vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px" }, [
+    el("img", { src: "/logo.png", alt: "SBN Auto Styling", style: "height:64px;width:auto;margin-bottom:10px" }),
     el("div", { style: "text-align:center;margin-bottom:28px" }, [
-      el("div", { class: "oswald", style: "font-size:26px;font-weight:700;color:var(--amber);letter-spacing:0.04em", text: "SBN AUTOSTYLING" }),
-      el("div", { class: "muted", style: "font-size:11px;margin-top:4px;letter-spacing:0.12em;text-transform:uppercase", text: "Shop Management Tracker" }),
+      el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.12em;text-transform:uppercase", text: "Shop Management Tracker" }),
     ]),
     inner,
   ]);
@@ -170,35 +180,71 @@ function renderLogin() {
   ]);
 }
 
-function renderTabs() {
-  let tabs;
+const TAB_ICONS = {
+  "owner-summary": "📊", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
+  "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
+  "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
+  "manager-performance": "📈", "sales-schedule": "📋", "sales-fullschedule": "🗓",
+  "sales-performance": "📈", "schedule": "🗓", "performance": "📈",
+};
+
+function renderBottomNav() {
+  let allTabs, primaryKeys;
   if (session.role === "owner") {
-    tabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
-    tabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
+    allTabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
+    primaryKeys = ["manager-jobs", "owner-attendance", "owner-search", "manager-performance"];
   } else if (session.role === "sales") {
-    tabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
+    allTabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
+    primaryKeys = allTabs.map((t) => t[0]);
   } else {
-    tabs = [["schedule", "Schedule"], ["performance", "My performance"]];
+    allTabs = [["schedule", "Schedule"], ["performance", "My performance"]];
+    primaryKeys = allTabs.map((t) => t[0]);
   }
-  const wrap = el("div", { class: "tabs" });
-  tabs.forEach(([key, label]) => {
-    wrap.appendChild(el("button", {
-      class: "tab-btn" + (currentTab === key ? " active" : ""),
+
+  const primaryTabs = primaryKeys.map((k) => allTabs.find((t) => t[0] === k));
+  const moreTabs = allTabs.filter((t) => !primaryKeys.includes(t[0]));
+
+  const bar = el("div", { class: "bottom-tabs" });
+  primaryTabs.forEach(([key, label]) => {
+    bar.appendChild(el("button", {
+      class: "bottom-tab" + (currentTab === key ? " active" : ""),
       onclick: () => { currentTab = key; render(); },
-      text: label,
-    }));
+    }, [
+      el("div", { class: "tab-icon", text: TAB_ICONS[key] || "•" }),
+      el("div", { text: label }),
+    ]));
   });
-  const roleLabel = session.role === "owner" ? "Owner" : session.role === "manager" ? "Manager" : session.role === "sales" ? "Sales" : "Employee";
-  const whoAmI = el("div", { style: "margin-left:auto;display:flex;align-items:center;gap:10px" }, [
-    el("div", { style: "text-align:right" }, [
-      el("div", { style: "font-size:12.5px;font-weight:500", text: session.name || "Owner" }),
-      el("div", { class: "muted", style: "font-size:10.5px;text-transform:uppercase;letter-spacing:0.04em", text: roleLabel }),
-    ]),
-    el("button", { class: "tab-btn", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); }, text: "Log out" }),
-  ]);
-  wrap.appendChild(whoAmI);
-  return wrap;
+  if (moreTabs.length) {
+    const isMoreActive = moreTabs.some((t) => t[0] === currentTab);
+    bar.appendChild(el("button", {
+      class: "bottom-tab" + (isMoreActive ? " active" : ""),
+      onclick: () => openMoreSheet(moreTabs),
+    }, [
+      el("div", { class: "tab-icon", text: "☰" }),
+      el("div", { text: "More" }),
+    ]));
+  }
+  return bar;
+}
+
+function closeMoreSheet() {
+  document.querySelectorAll(".more-sheet, .more-sheet-backdrop").forEach((n) => n.remove());
+}
+
+function openMoreSheet(moreTabs) {
+  const backdrop = el("div", { class: "more-sheet-backdrop", onclick: closeMoreSheet });
+  const sheet = el("div", { class: "more-sheet" }, moreTabs.map(([key, label]) =>
+    el("button", {
+      class: "more-sheet-item" + (currentTab === key ? " active" : ""),
+      onclick: () => { currentTab = key; closeMoreSheet(); render(); },
+      text: label,
+    })
+  ));
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
 }
 
 // ---------------- Employee views ----------------
