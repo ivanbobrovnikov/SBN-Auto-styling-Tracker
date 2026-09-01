@@ -1735,6 +1735,33 @@ async function renderTestTool(content) {
     autoImportLog,
     importResults,
     (() => {
+      const dedupeResult = el("div", { style: "margin-top:10px" });
+      const dedupeBtn = el("button", { class: "ghost", text: "Preview one-click cleanup", onclick: async () => {
+        const r = await api("/api/owner/dedupe-contacts", { method: "POST", body: JSON.stringify({ dryRun: true }) });
+        dedupeResult.innerHTML = "";
+        if (r.groupsAffected === 0) { dedupeResult.appendChild(el("div", { class: "muted", text: "Nothing to clean up." })); return; }
+        dedupeResult.appendChild(el("div", { class: "card" }, [
+          el("div", { style: "font-size:12.5px;margin-bottom:6px", text: `Would keep ${r.groupsAffected} job(s) (the most recent per customer) and delete ${r.totalRemoved} older duplicate(s). Check the times below before confirming.` }),
+          el("button", { class: "primary", style: "background:var(--red)", onclick: async () => {
+            if (!confirm(`This deletes ${r.totalRemoved} job(s) permanently, keeping only the most recent per customer. Continue?`)) return;
+            const real = await api("/api/owner/dedupe-contacts", { method: "POST", body: JSON.stringify({ dryRun: false }) });
+            dedupeResult.innerHTML = "";
+            dedupeResult.appendChild(el("div", { class: "card", style: "color:var(--green)", text: `Done — removed ${real.totalRemoved} duplicate(s).` }));
+          }, text: `Confirm — delete ${r.totalRemoved} older duplicates now` }),
+        ]));
+        r.plan.forEach((p) => {
+          dedupeResult.appendChild(el("div", { class: "card", style: "font-size:11.5px" }, [
+            el("div", { style: "color:var(--green);margin-bottom:3px", text: `✓ Keeping: ${p.keep.car || "(no car)"} — ${p.keep.customerName} — ${formatDateTime(p.keep.date)}` }),
+            ...p.remove.map((rm) => el("div", { class: "muted", style: "margin-left:12px", text: `✕ Deleting: ${rm.car || "(no car)"} — ${formatDateTime(rm.date)}` })),
+          ]));
+        });
+      } });
+      return el("div", { style: "margin-bottom:10px" }, [
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "ONE-CLICK CLEANUP — keeps whichever job has the most recent date per customer, deletes the rest. Preview first, no per-group review needed." }),
+        dedupeBtn, dedupeResult,
+      ]);
+    })(),
+    (() => {
       const diagResult = el("div", { style: "margin-top:10px" });
       async function runDiag() {
         const d = await api("/api/owner/import-diagnostic");
@@ -1743,7 +1770,7 @@ async function renderTestTool(content) {
           el("div", { style: "font-size:12.5px", text: `Total jobs in database: ${d.totalSalesInDatabase}` }),
           el("div", { style: "font-size:12.5px", text: `Unique GHL opportunity IDs: ${d.uniqueOpportunityIds}` }),
           el("div", { style: `font-size:12.5px;font-weight:600;color:${d.duplicateOpportunityIds > 0 ? "var(--red)" : "var(--green)"}`, text: d.duplicateOpportunityIds > 0 ? `⚠ ${d.duplicateOpportunityIds} exact duplicate(s) found` : "✓ No exact duplicates (same opportunity ID)" }),
-          el("div", { style: `font-size:12.5px;font-weight:600;color:${d.contactsWithMultipleJobs > 0 ? "var(--amber)" : "var(--green)"}`, text: d.contactsWithMultipleJobs > 0 ? `⚠ ${d.contactsWithMultipleJobs} customer(s) with multiple separate jobs — review below` : "✓ No customers with multiple jobs" }),
+          el("div", { style: `font-size:12.5px;font-weight:600;color:${d.contactsWithMultipleJobs > 0 ? "var(--amber)" : "var(--green)"}`, text: d.contactsWithMultipleJobs > 0 ? `⚠ ${d.contactsWithMultipleJobs} customer(s) with multiple separate jobs — review below, or use one-click cleanup above` : "✓ No customers with multiple jobs" }),
         ]));
         (d.contactDuplicates || []).forEach((group) => {
           diagResult.appendChild(el("div", { class: "card" }, [
@@ -1758,7 +1785,7 @@ async function renderTestTool(content) {
           ]));
         });
       }
-      const diagBtn = el("button", { class: "ghost", text: "Check for duplicate jobs", onclick: runDiag });
+      const diagBtn = el("button", { class: "ghost", text: "Check for duplicate jobs (manual review)", onclick: runDiag });
       return el("div", {}, [diagBtn, diagResult]);
     })(),
   ]));
