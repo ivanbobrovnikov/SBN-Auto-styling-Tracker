@@ -1719,6 +1719,19 @@ async function renderTestTool(content) {
     importStatus,
     autoImportLog,
     importResults,
+    (() => {
+      const diagResult = el("div", { style: "margin-top:10px" });
+      const diagBtn = el("button", { class: "ghost", text: "Check for duplicate jobs", onclick: async () => {
+        const d = await api("/api/owner/import-diagnostic");
+        diagResult.innerHTML = "";
+        diagResult.appendChild(el("div", { class: "card" }, [
+          el("div", { style: "font-size:12.5px", text: `Total jobs in database: ${d.totalSalesInDatabase}` }),
+          el("div", { style: "font-size:12.5px", text: `Unique GHL opportunity IDs: ${d.uniqueOpportunityIds}` }),
+          el("div", { style: `font-size:12.5px;font-weight:600;color:${d.duplicateOpportunityIds > 0 ? "var(--red)" : "var(--green)"}`, text: d.duplicateOpportunityIds > 0 ? `⚠ ${d.duplicateOpportunityIds} duplicate(s) found` : "✓ No duplicates found" }),
+        ]));
+      } });
+      return el("div", {}, [diagBtn, diagResult]);
+    })(),
   ]));
   await loadImportStatus();
   content.appendChild(el("div", { class: "card", style: "max-width:600px" }, [
