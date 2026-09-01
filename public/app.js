@@ -385,18 +385,34 @@ async function renderOwnerTabContent(content) {
 async function renderOwnerPayroll(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "payperiod");
+  const payrollEmployees = await api("/api/employees");
+  const payrollManagers = await api("/api/managers");
+  const payrollSalesReps = await api("/api/salesreps");
 
   function personCard(p, subtitle) {
     const upsellRows = (p.individualUpsells || []).length
       ? p.individualUpsells.map((u) => {
           const nameInput = el("input", { value: u.name, style: "max-width:130px;font-size:12px" });
           const priceInput = el("input", { type: "number", value: u.price, style: "max-width:70px;font-size:12px" });
+          const creditSelect = el("select", {
+            style: "max-width:150px;font-size:11px;background:var(--panel);border:0.5px solid var(--border);border-radius:6px;color:var(--sub);padding:2px 4px",
+            onchange: async (e) => {
+              const [creditType, creditId] = e.target.value ? e.target.value.split("::") : ["none", ""];
+              await api(`/api/sales/${u.saleId}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ creditType, creditId }) });
+              load();
+            },
+          }, [
+            el("option", { value: "", text: "Unassigned" }),
+            ...payrollEmployees.map((e) => el("option", { value: `employee::${e.id}`, text: `Tech: ${e.name}`, ...(u.employeeId === e.id ? { selected: "true" } : {}) })),
+            ...payrollManagers.map((m) => el("option", { value: `manager::${m.id}`, text: `Manager: ${m.name}`, ...(u.managerId === m.id ? { selected: "true" } : {}) })),
+            ...payrollSalesReps.map((r) => el("option", { value: `salesrep::${r.id}`, text: `Rep: ${r.name}`, ...(u.salesRepId === r.id ? { selected: "true" } : {}) })),
+          ]);
           return el("div", { class: "row", style: "margin-bottom:6px;align-items:center;flex-wrap:wrap;gap:4px" }, [
             el("div", { style: "min-width:0" }, [
               nameInput,
               el("div", { class: "muted", style: "font-size:10px", text: `${u.car || ""} · ${formatDateTime(u.date)}` }),
             ]),
-            priceInput,
+            priceInput, creditSelect,
             el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: async () => {
               await api(`/api/sales/${u.saleId}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ name: nameInput.value, price: priceInput.value }) });
               load();
@@ -796,6 +812,9 @@ function renderYearGrid(sales, yearStr) {
 async function renderOwnerSales(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "day");
+  const employees = await api("/api/employees");
+  const managersList = await api("/api/managers");
+  const salesRepsList = await api("/api/salesreps");
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
@@ -824,9 +843,21 @@ async function renderOwnerSales(content) {
       const upsellRows = (s.upsells || []).map((u) => {
         const nameInput = el("input", { value: u.name, style: "max-width:130px;font-size:11.5px" });
         const priceI = el("input", { type: "number", value: u.price, style: "max-width:70px;font-size:11.5px" });
-        return el("div", { style: "display:flex;align-items:center;gap:5px;margin-top:4px" }, [
-          nameInput, priceI,
-          el("span", { class: "muted", style: "font-size:10.5px", text: `(${u.attributedToName})` }),
+        const creditSelect = el("select", {
+          style: "max-width:150px;font-size:11px;background:var(--panel);border:0.5px solid var(--border);border-radius:6px;color:var(--sub);padding:2px 4px",
+          onchange: async (e) => {
+            const [creditType, creditId] = e.target.value ? e.target.value.split("::") : ["none", ""];
+            await api(`/api/sales/${s.id}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ creditType, creditId }) });
+            load();
+          },
+        }, [
+          el("option", { value: "", text: "Unassigned" }),
+          ...employees.map((e) => el("option", { value: `employee::${e.id}`, text: `Tech: ${e.name}`, ...(u.employeeId === e.id ? { selected: "true" } : {}) })),
+          ...managersList.map((m) => el("option", { value: `manager::${m.id}`, text: `Manager: ${m.name}`, ...(u.managerId === m.id ? { selected: "true" } : {}) })),
+          ...salesRepsList.map((r) => el("option", { value: `salesrep::${r.id}`, text: `Rep: ${r.name}`, ...(u.salesRepId === r.id ? { selected: "true" } : {}) })),
+        ]);
+        return el("div", { style: "display:flex;align-items:center;gap:5px;margin-top:4px;flex-wrap:wrap" }, [
+          nameInput, priceI, creditSelect,
           el("button", { class: "ghost", style: "font-size:10px;padding:2px 6px", onclick: async () => {
             await api(`/api/sales/${s.id}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ name: nameInput.value, price: priceI.value }) });
             load();
@@ -1420,19 +1451,22 @@ async function renderManagerJobs(content) {
       });
 
       const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => {
-        const repSelect = el("select", {
-          style: "max-width:150px;font-size:11px;margin-left:6px;background:var(--panel);border:0.5px solid var(--border);border-radius:6px;color:var(--sub);padding:2px 4px",
+        const creditSelect = el("select", {
+          style: "max-width:170px;font-size:11px;margin-left:6px;background:var(--panel);border:0.5px solid var(--border);border-radius:6px;color:var(--sub);padding:2px 4px",
           onchange: async (e) => {
-            await api(`/api/sales/${job.id}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ salesRepId: e.target.value || null }) });
+            const [creditType, creditId] = e.target.value ? e.target.value.split("::") : ["none", ""];
+            await api(`/api/sales/${job.id}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ creditType, creditId }) });
             load();
           },
         }, [
-          el("option", { value: "", text: "No rep credit" }),
-          ...salesRepsList.map((r) => el("option", { value: r.id, text: `Rep: ${r.name}`, ...(u.salesRepId === r.id ? { selected: "true" } : {}) })),
+          el("option", { value: "", text: "Unassigned" }),
+          ...employees.map((e) => el("option", { value: `employee::${e.id}`, text: `Tech: ${e.name}`, ...(u.employeeId === e.id ? { selected: "true" } : {}) })),
+          ...managersList.map((m) => el("option", { value: `manager::${m.id}`, text: `Manager: ${m.name}`, ...(u.managerId === m.id ? { selected: "true" } : {}) })),
+          ...salesRepsList.map((r) => el("option", { value: `salesrep::${r.id}`, text: `Rep: ${r.name}`, ...(u.salesRepId === r.id ? { selected: "true" } : {}) })),
         ]);
         return el("div", { style: "display:inline-flex;align-items:center;margin-bottom:4px;margin-right:8px" }, [
           el("span", { class: "pill", style: "margin:0", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }),
-          repSelect,
+          creditSelect,
         ]);
       }));
       const upsellForm = renderUpsellForm(job.id, () => load());
