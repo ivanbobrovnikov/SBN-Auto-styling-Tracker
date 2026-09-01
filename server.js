@@ -36,10 +36,10 @@ function newId() {
 function monthKey(dateStr) {
   return (dateStr || "").slice(0, 7);
 }
-// Business hours: Mon–Sat, 9am–6pm, Eastern time — regardless of what timezone the server
+// Business hours: Mon–Sat, 8am–6pm, Eastern time — regardless of what timezone the server
 // itself runs in. This decides which of a sales rep's two commission rates applies, based
 // on the moment the deal actually closed (opportunity hit Booked w/ Deposit), not the
-// scheduled appointment time.
+// scheduled appointment time. Sundays are ALWAYS after-hours, all day, regardless of time.
 function isDuringBusinessHours(isoString) {
   const d = new Date(isoString);
   if (isNaN(d.getTime())) return true; // safest default if something's malformed — don't silently overpay
@@ -50,7 +50,7 @@ function isDuringBusinessHours(isoString) {
   let hour = parseInt((parts.find((p) => p.type === "hour") || {}).value, 10);
   if (hour === 24) hour = 0; // some ICU builds report midnight as "24" instead of "00"
   const openDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]; // closed Sunday
-  return openDays.includes(weekday) && hour >= 9 && hour < 18;
+  return openDays.includes(weekday) && hour >= 8 && hour < 18;
 }
 
 function dateRangeFor(query) {
@@ -844,7 +844,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
-    status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
+    status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
   })));
 });
 
@@ -860,11 +860,15 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
   if (req.body.paid !== undefined) {
     sale.paid = !!req.body.paid;
-    if (!sale.paid) sale.paymentMethod = null;
+    if (!sale.paid) { sale.paidCash = false; sale.paidCard = false; sale.paymentMethod = null; }
   }
-  if (req.body.paymentMethod !== undefined) {
-    sale.paymentMethod = req.body.paymentMethod; // "cash" | "card" | null
-    sale.paid = !!req.body.paymentMethod;
+  // Cash and card are independent toggles now, not mutually exclusive — a customer can
+  // genuinely pay part cash, part card, and both need to be markable at once.
+  if (req.body.paidCash !== undefined) sale.paidCash = !!req.body.paidCash;
+  if (req.body.paidCard !== undefined) sale.paidCard = !!req.body.paidCard;
+  if (req.body.paidCash !== undefined || req.body.paidCard !== undefined) {
+    sale.paid = !!(sale.paidCash || sale.paidCard);
+    sale.paymentMethod = sale.paidCash && sale.paidCard ? "both" : sale.paidCash ? "cash" : sale.paidCard ? "card" : null;
   }
   if (req.body.employeeIds !== undefined) {
     sale.employeeIds = req.body.employeeIds;
@@ -1126,6 +1130,30 @@ app.get("/api/sales/full-schedule", requireSales, (req, res) => {
   res.json(jobs);
 });
 
+// Owner-wide commission audit — every appointment attributed to any sales rep, regardless
+// of status (pending, arrived, no-show), with exactly when it closed and why it got the
+// rate it did. This is the full-system version of the per-rep audit trail below.
+app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const relevant = db.sales.filter((s) => s.salesRepId && inRange(s.date, start, end) && s.status !== "cancelled");
+  const rows = relevant.map((s) => {
+    const rep = db.salesReps.find((r) => r.id === s.salesRepId);
+    const closedAtRaw = s.closedAt || s.date;
+    const closedDate = new Date(closedAtRaw);
+    const easternLabel = isNaN(closedDate.getTime()) ? "unknown" : closedDate.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "long", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const duringHours = isDuringBusinessHours(closedAtRaw);
+    const rateApplied = duringHours ? (rep ? rep.commissionRate || 0 : 0) : (rep ? rep.afterHoursCommissionRate || 0 : 0);
+    const commissionAmount = s.status === "arrived" && rep ? salesRepCommissionForSale(rep, s).amount : 0;
+    return {
+      saleId: s.id, car: s.car, customerName: s.customerName, basePrice: parseFloat(s.basePrice) || 0,
+      salesRepName: rep ? rep.name : "Removed rep", status: s.status || "pending",
+      closedAtRaw, closedAtEastern: easternLabel, duringHours, rateApplied, commissionAmount,
+    };
+  }).sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1));
+  res.json(rows);
+});
+
 app.get("/api/my/sales-performance", requireSales, (req, res) => {
   const db = loadDB();
   const repId = req.auth.role === "owner" && req.query.salesRepId ? req.query.salesRepId : req.auth.id;
@@ -1143,12 +1171,25 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
   const pendingValue = pending.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
 
   let commission = 0, duringHoursValue = 0, afterHoursValue = 0, duringHoursCount = 0, afterHoursCount = 0;
+  const commissionAudit = [];
   showed.forEach((s) => {
     const c = salesRepCommissionForSale(rep, s);
     commission += c.amount;
     if (c.duringHours) { duringHoursValue += parseFloat(s.basePrice) || 0; duringHoursCount += 1; }
     else { afterHoursValue += parseFloat(s.basePrice) || 0; afterHoursCount += 1; }
+    // A real, per-job audit line — exactly when it closed, which bucket it landed in, and
+    // why — so nobody ever has to manually reconstruct this by hand.
+    const closedAtRaw = s.closedAt || s.date;
+    const closedDate = new Date(closedAtRaw);
+    const easternLabel = isNaN(closedDate.getTime()) ? "unknown" : closedDate.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "long", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    commissionAudit.push({
+      saleId: s.id, car: s.car, basePrice: parseFloat(s.basePrice) || 0,
+      closedAtRaw, closedAtEastern: easternLabel,
+      duringHours: c.duringHours, rateApplied: c.duringHours ? (rep ? rep.commissionRate || 0 : 0) : (rep ? rep.afterHoursCommissionRate || 0 : 0),
+      commissionAmount: c.amount,
+    });
   });
+  commissionAudit.sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1));
 
   // Upsells this rep personally closed — tracked for visibility, e.g. a phone upsell on
   // someone else's booking. Separate from the base-sale commission above; shown, not
@@ -1166,6 +1207,7 @@ app.get("/api/my/sales-performance", requireSales, (req, res) => {
     afterHoursCommissionRate: rep ? rep.afterHoursCommissionRate || 0 : 0,
     duringHoursCount, duringHoursValue, afterHoursCount, afterHoursValue,
     upsellsClosedCount: myUpsells.length, upsellsClosedValue, upsellsClosed: myUpsells,
+    commissionAudit,
   });
 });
 
