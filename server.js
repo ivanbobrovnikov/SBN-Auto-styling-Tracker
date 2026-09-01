@@ -1445,7 +1445,13 @@ app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: "Failed to reach GHL: " + e.message });
   }
-  if (!searchRes.ok) return res.status(400).json({ error: `GHL returned ${searchRes.status}`, detail: searchBody });
+  if (!searchRes.ok) {
+    if (!db.debugLog) db.debugLog = [];
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "ghl-bulk-import", requestUrl: url, responseStatus: searchRes.status, responseBody: searchBody });
+    db.debugLog = db.debugLog.slice(0, 30);
+    saveDB(db);
+    return res.status(400).json({ error: `GHL returned ${searchRes.status} — check the Webhook Debug Log for the exact reason.`, detail: searchBody });
+  }
 
   const opportunities = searchBody.opportunities || [];
   const results = { processed: 0, imported: 0, skippedOld: 0, skippedNoAppointment: 0, errors: [] };
