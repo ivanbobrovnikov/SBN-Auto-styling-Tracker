@@ -1736,15 +1736,29 @@ async function renderTestTool(content) {
     importResults,
     (() => {
       const diagResult = el("div", { style: "margin-top:10px" });
-      const diagBtn = el("button", { class: "ghost", text: "Check for duplicate jobs", onclick: async () => {
+      async function runDiag() {
         const d = await api("/api/owner/import-diagnostic");
         diagResult.innerHTML = "";
         diagResult.appendChild(el("div", { class: "card" }, [
           el("div", { style: "font-size:12.5px", text: `Total jobs in database: ${d.totalSalesInDatabase}` }),
           el("div", { style: "font-size:12.5px", text: `Unique GHL opportunity IDs: ${d.uniqueOpportunityIds}` }),
-          el("div", { style: `font-size:12.5px;font-weight:600;color:${d.duplicateOpportunityIds > 0 ? "var(--red)" : "var(--green)"}`, text: d.duplicateOpportunityIds > 0 ? `⚠ ${d.duplicateOpportunityIds} duplicate(s) found` : "✓ No duplicates found" }),
+          el("div", { style: `font-size:12.5px;font-weight:600;color:${d.duplicateOpportunityIds > 0 ? "var(--red)" : "var(--green)"}`, text: d.duplicateOpportunityIds > 0 ? `⚠ ${d.duplicateOpportunityIds} exact duplicate(s) found` : "✓ No exact duplicates (same opportunity ID)" }),
+          el("div", { style: `font-size:12.5px;font-weight:600;color:${d.contactsWithMultipleJobs > 0 ? "var(--amber)" : "var(--green)"}`, text: d.contactsWithMultipleJobs > 0 ? `⚠ ${d.contactsWithMultipleJobs} customer(s) with multiple separate jobs — review below` : "✓ No customers with multiple jobs" }),
         ]));
-      } });
+        (d.contactDuplicates || []).forEach((group) => {
+          diagResult.appendChild(el("div", { class: "card" }, [
+            el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: `Same customer, ${group.count} separate jobs — keep the real one, delete the rest:` }),
+            ...group.jobs.map((j) => el("div", { class: "row", style: "margin-bottom:4px" }, [
+              el("div", { style: "font-size:12px" }, [
+                el("div", { text: j.car || "(no car)" }),
+                el("div", { class: "muted", style: "font-size:10.5px", text: `${j.customerName} · ${formatDateTime(j.date)} · $${j.basePrice} · opp: ${j.ghlOpportunityId}` }),
+              ]),
+              el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${j.id}`, { method: "DELETE" }); runDiag(); }, text: "Delete this one" }),
+            ])),
+          ]));
+        });
+      }
+      const diagBtn = el("button", { class: "ghost", text: "Check for duplicate jobs", onclick: runDiag });
       return el("div", {}, [diagBtn, diagResult]);
     })(),
   ]));
