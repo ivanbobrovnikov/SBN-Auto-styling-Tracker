@@ -1202,6 +1202,15 @@ app.get("/api/owner/sales", requireOwner, (req, res) => {
   res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db) })));
 });
 
+// Serviced Cars — only jobs actually marked Service Complete, regardless of payment status.
+// This is the "work actually done" view, distinct from the schedule/booking pipeline.
+app.get("/api/owner/serviced-cars", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const sales = db.sales.filter((s) => inRange(s.date, start, end) && s.completed && s.status !== "cancelled");
+  res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db) })));
+});
+
 // Payroll view — every person's own upsells grouped together (for paying commission),
 // plus the shop-wide combined total for comparison. Owner-only.
 app.get("/api/owner/payroll", requireOwner, (req, res) => {
