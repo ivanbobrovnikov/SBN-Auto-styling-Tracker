@@ -1267,6 +1267,37 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
   });
 });
 
+// One-click cleanup: for every customer with multiple separate jobs, keep whichever one
+// has the most recent date and delete the rest. Dry run shows exactly what would happen
+// before anything is touched — worth a quick skim, but not a per-group manual review.
+app.post("/api/owner/dedupe-contacts", requireOwner, (req, res) => {
+  const db = loadDB();
+  const dryRun = !!req.body.dryRun;
+  const withContactId = db.sales.filter((s) => s.contactId && s.status !== "cancelled");
+  const byContact = {};
+  withContactId.forEach((s) => { (byContact[s.contactId] = byContact[s.contactId] || []).push(s); });
+
+  const plan = [];
+  Object.values(byContact).forEach((group) => {
+    if (group.length < 2) return;
+    const sorted = group.slice().sort((a, b) => (a.date < b.date ? 1 : -1));
+    const keep = sorted[0];
+    const remove = sorted.slice(1);
+    plan.push({
+      keep: { id: keep.id, car: keep.car, date: keep.date, customerName: keep.customerName },
+      remove: remove.map((s) => ({ id: s.id, car: s.car, date: s.date, customerName: s.customerName })),
+    });
+  });
+
+  if (!dryRun) {
+    const removeIds = new Set(plan.flatMap((p) => p.remove.map((r) => r.id)));
+    db.sales = db.sales.filter((s) => !removeIds.has(s.id));
+    saveDB(db);
+  }
+
+  res.json({ ok: true, dryRun, groupsAffected: plan.length, totalRemoved: plan.reduce((a, p) => a + p.remove.length, 0), plan: plan.slice(0, 30) });
+});
+
 app.get("/api/owner/backup", requireOwner, (req, res) => {
   const db = loadDB();
   const filename = `sbn-tracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
