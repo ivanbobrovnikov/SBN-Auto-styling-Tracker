@@ -1217,6 +1217,25 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
 
 // Full raw backup — everyone's data, as a downloadable file the owner can save anywhere
 // (their own computer, Google Drive, wherever) independent of Railway entirely.
+// Checks whether the GHL import actually created duplicate jobs, or whether the running
+// "imported" counter just double-counted re-processed records without creating duplicates
+// (the counter increments on every upsert call, including ones that update an existing
+// job rather than creating a new one — so the counter can honestly exceed the real total).
+app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
+  const db = loadDB();
+  const withOppId = db.sales.filter((s) => s.ghlOpportunityId);
+  const idCounts = {};
+  withOppId.forEach((s) => { idCounts[s.ghlOpportunityId] = (idCounts[s.ghlOpportunityId] || 0) + 1; });
+  const duplicateIds = Object.entries(idCounts).filter(([id, count]) => count > 1);
+  res.json({
+    totalSalesInDatabase: db.sales.length,
+    salesWithGhlOpportunityId: withOppId.length,
+    uniqueOpportunityIds: Object.keys(idCounts).length,
+    duplicateOpportunityIds: duplicateIds.length,
+    duplicateExamples: duplicateIds.slice(0, 5).map(([id, count]) => ({ ghlOpportunityId: id, count })),
+  });
+});
+
 app.get("/api/owner/backup", requireOwner, (req, res) => {
   const db = loadDB();
   const filename = `sbn-tracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
