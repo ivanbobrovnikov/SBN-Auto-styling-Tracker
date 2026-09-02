@@ -83,7 +83,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
   function updatePayPeriodLabel() {
     const end = new Date(payPeriodEnd + "T00:00:00Z");
     const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - 14); // matches the server's real Tue-to-Tue math exactly
+    start.setUTCDate(start.getUTCDate() - 13); // matches the server's non-overlapping 14-day span exactly
     const fmt = (d) => formatPlainDate(d.toISOString().slice(0, 10)); // read the calendar date straight from UTC, never through local-timezone display
     payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)} (payroll processed ${fmt(end)})`;
   }
@@ -888,7 +888,12 @@ async function renderCommissionAudit(content) {
       const stopBtn = el("button", { class: "icon-danger", style: "margin-top:8px;margin-left:8px;display:none" });
       startBtn.textContent = "Repair all"; startBtn.onclick = () => runRepair(stopBtn, startBtn);
       stopBtn.textContent = "Stop"; stopBtn.onclick = () => { repairRunning = false; };
-      return el("div", {}, [startBtn, stopBtn]);
+      const resetBtn = el("button", { class: "icon-danger", style: "margin-top:8px;margin-left:8px", onclick: async () => {
+        if (!confirm("Reset repair progress? You'll start over from the beginning next time.")) return;
+        await api("/api/owner/ghl-repair-closedat-reset", { method: "POST" });
+        await loadRepairStatus();
+      }, text: "Reset progress" });
+      return el("div", {}, [startBtn, stopBtn, resetBtn]);
     })(),
     repairStatus, repairLog,
   ]));
