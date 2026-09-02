@@ -37,6 +37,21 @@ function nextOrTodayTuesday(fromDateStr) {
   return d.toISOString().slice(0, 10);
 }
 
+// The real payroll cycle is anchored to Tuesday, August 25, 2026 — every 14 days from
+// there, forever (Sept 8, Sept 22, Oct 6, ...). A free date-picker let you accidentally
+// land on a Tuesday that doesn't align with that cadence (e.g. Sept 1, which is a real
+// Tuesday but only 7 days after the anchor, not 14) — this stepper makes that impossible.
+const PAY_PERIOD_ANCHOR = "2026-08-25";
+function nearestValidPayPeriodEnd(referenceDateStr) {
+  const anchor = new Date(PAY_PERIOD_ANCHOR + "T00:00:00Z");
+  const ref = new Date(referenceDateStr + "T00:00:00Z");
+  let n = Math.max(1, Math.ceil((ref - anchor) / (1000 * 60 * 60 * 24 * 14)));
+  let end = new Date(anchor);
+  end.setUTCDate(end.getUTCDate() + 14 * n);
+  while (end < ref) { n++; end = new Date(anchor); end.setUTCDate(end.getUTCDate() + 14 * n); }
+  return end.toISOString().slice(0, 10);
+}
+
 function renderPeriodPicker(onChange, defaultPeriod = "month") {
   let period = defaultPeriod;
   const today = new Date().toISOString().slice(0, 10);
@@ -45,25 +60,38 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
   const weekInput = el("input", { type: "date", value: today, style: vis("week") });
   const monthInput = el("input", { type: "month", value: today.slice(0, 7), style: vis("month") });
   const yearInput = el("input", { type: "number", value: String(new Date().getFullYear()), style: vis("year") + ";max-width:100px" });
-  const payPeriodInput = el("input", { type: "date", value: nextOrTodayTuesday(today), style: vis("payperiod") });
+  let payPeriodEnd = nearestValidPayPeriodEnd(today);
   const payPeriodLabel = el("div", { class: "muted", style: `font-size:11.5px;${vis("payperiod")}` });
+  const payPeriodStepper = el("div", { style: `display:flex;gap:8px;align-items:center;${vis("payperiod")}` });
+
+  function shiftPayPeriod(deltaDays) {
+    const d = new Date(payPeriodEnd + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + deltaDays);
+    payPeriodEnd = d.toISOString().slice(0, 10);
+    updatePayPeriodLabel();
+    fire();
+  }
 
   function updatePayPeriodLabel() {
-    const end = new Date(payPeriodInput.value + "T00:00:00Z");
+    const end = new Date(payPeriodEnd + "T00:00:00Z");
     const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - 13);
+    start.setUTCDate(start.getUTCDate() - 14); // matches the server's real Tue-to-Tue math exactly
     const fmt = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)}`;
+    payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)} (payroll processed ${fmt(end)})`;
   }
 
   function currentParams() {
     if (period === "day") return { period, date: dayInput.value };
     if (period === "week") return { period, date: weekInput.value };
     if (period === "year") return { period, date: `${yearInput.value}-01-01` };
-    if (period === "payperiod") return { period, date: payPeriodInput.value };
+    if (period === "payperiod") return { period, date: payPeriodEnd };
     return { period: "month", month: monthInput.value };
   }
   function fire() { onChange(currentParams()); }
+
+  payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => shiftPayPeriod(-14), text: "◀ Prev" }));
+  payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => { payPeriodEnd = nearestValidPayPeriodEnd(today); updatePayPeriodLabel(); fire(); }, text: "Current" }));
+  payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => shiftPayPeriod(14), text: "Next ▶" }));
 
   const periodTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" });
   [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["payperiod", "Pay period"]].forEach(([p, label]) => {
@@ -78,7 +106,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
       weekInput.style.display = p === "week" ? "" : "none";
       monthInput.style.display = p === "month" ? "" : "none";
       yearInput.style.display = p === "year" ? "" : "none";
-      payPeriodInput.style.display = p === "payperiod" ? "" : "none";
+      payPeriodStepper.style.display = p === "payperiod" ? "flex" : "none";
       payPeriodLabel.style.display = p === "payperiod" ? "" : "none";
       if (p === "payperiod") updatePayPeriodLabel();
       btn.classList.add("active");
@@ -88,13 +116,12 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
   });
 
   [dayInput, weekInput, monthInput, yearInput].forEach((inp) => inp.addEventListener("change", fire));
-  payPeriodInput.addEventListener("change", () => { updatePayPeriodLabel(); fire(); });
   if (period === "payperiod") updatePayPeriodLabel();
 
   const wrap = el("div", { class: "field", style: "max-width:320px" }, [
     el("label", { text: "Time period" }),
     periodTabs,
-    dayInput, weekInput, monthInput, yearInput, payPeriodInput,
+    dayInput, weekInput, monthInput, yearInput, payPeriodStepper,
     payPeriodLabel,
   ]);
   return { el: wrap, getParams: currentParams };
@@ -821,6 +848,44 @@ function renderYearGrid(sales, yearStr) {
 async function renderCommissionAudit(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "payperiod");
+
+  // Repair tool for historical data imported before the closedAt fix existed.
+  const repairStageId = el("input", { placeholder: "Booked stage ID (from Test 2 in Test Tool)", style: "max-width:280px" });
+  const repairLog = el("div", { style: "margin-top:8px;max-height:180px;overflow-y:auto" });
+  const repairStatus = el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px" });
+  async function loadRepairStatus() {
+    const s = await api("/api/owner/ghl-repair-closedat-status");
+    repairStatus.textContent = s.cursorSet ? `In progress — ${s.totalFixedSoFar} fixed so far.` : s.totalFixedSoFar > 0 ? `Done — ${s.totalFixedSoFar} total fixed.` : "Not started.";
+  }
+  let repairRunning = false;
+  async function runRepair(stopBtn, startBtn) {
+    repairRunning = true; stopBtn.style.display = "inline-block"; startBtn.disabled = true;
+    while (repairRunning) {
+      let r;
+      try {
+        r = await api("/api/owner/ghl-repair-closedat", { method: "POST", body: JSON.stringify({ stageId: repairStageId.value.trim(), dryRun: false, batchSize: 15 }) });
+      } catch (e) { repairLog.appendChild(el("div", { style: "color:var(--red);font-size:12px", text: `Error: ${e.message} — stopped.` })); break; }
+      repairLog.appendChild(el("div", { style: "font-size:12px", text: `Batch done — fixed ${r.fixed}, already correct ${r.alreadyCorrect}, no match ${r.noMatchingJob}, total fixed: ${r.totalFixedSoFar}` }));
+      await loadRepairStatus();
+      if (!r.hasMore) { repairLog.appendChild(el("div", { style: "color:var(--green);font-size:12px;font-weight:600", text: "✓ All done." })); break; }
+      await new Promise((res) => setTimeout(res, 500));
+    }
+    repairRunning = false; stopBtn.style.display = "none"; startBtn.disabled = false;
+  }
+  content.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "muted", style: "margin-bottom:8px", text: "REPAIR HISTORICAL TIMES — fixes closedAt on jobs already imported before this bug was caught. Only touches the timestamp; price, status, and attribution stay exactly as-is. Safe to re-run." }),
+    repairStageId,
+    (() => {
+      const startBtn = el("button", { class: "primary", style: "margin-top:8px;background:var(--green)" });
+      const stopBtn = el("button", { class: "icon-danger", style: "margin-top:8px;margin-left:8px;display:none" });
+      startBtn.textContent = "Repair all"; startBtn.onclick = () => runRepair(stopBtn, startBtn);
+      stopBtn.textContent = "Stop"; stopBtn.onclick = () => { repairRunning = false; };
+      return el("div", {}, [startBtn, stopBtn]);
+    })(),
+    repairStatus, repairLog,
+  ]));
+  loadRepairStatus();
+
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
@@ -832,23 +897,30 @@ async function renderCommissionAudit(content) {
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Appointments" }), el("div", { class: "metric-value mono", text: rows.length })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(totalCommission) })]),
     ]));
-    rows.forEach((r) => {
-      const statusLabel = r.status === "arrived" ? "Arrived" : r.status === "no_show" ? "No-show" : "Upcoming";
-      const statusColor = r.status === "arrived" ? "var(--green)" : r.status === "no_show" ? "var(--red)" : "var(--sub)";
-      body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "row" }, [
-          el("div", {}, [
-            el("div", { style: "font-weight:500", text: r.car }),
-            el("div", { class: "muted", style: "font-size:12.5px", text: `${r.customerName || ""} · ${r.salesRepName}` }),
-            el("div", { class: "muted", style: "font-size:11.5px", text: `Closed: ${r.closedAtEastern} — ${r.duringHours ? "in-hours" : "after-hours"} (${r.rateApplied}%)` }),
+    // Grouped by sales rep, each with its own subtotal, sorted chronologically within the group.
+    const grouped = {};
+    rows.forEach((r) => { (grouped[r.salesRepName] = grouped[r.salesRepName] || []).push(r); });
+    Object.entries(grouped).sort((a, b) => a[0].localeCompare(b[0])).forEach(([repName, repRows]) => {
+      const repCommission = repRows.reduce((a, r) => a + r.commissionAmount, 0);
+      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 6px;font-size:12px;font-weight:600;letter-spacing:0.03em", text: `${repName.toUpperCase()} — ${repRows.length} appointment${repRows.length !== 1 ? "s" : ""}, ${money(repCommission)} commission` }));
+      repRows.sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1)).forEach((r) => {
+        const statusLabel = r.status === "arrived" ? "Arrived" : r.status === "no_show" ? "No-show" : "Upcoming";
+        const statusColor = r.status === "arrived" ? "var(--green)" : r.status === "no_show" ? "var(--red)" : "var(--sub)";
+        body.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "row" }, [
+            el("div", {}, [
+              el("div", { style: "font-weight:500", text: r.car }),
+              el("div", { class: "muted", style: "font-size:12.5px", text: r.customerName || "" }),
+              el("div", { class: "muted", style: "font-size:11.5px", text: `Closed: ${r.closedAtEastern} — ${r.duringHours ? "in-hours" : "after-hours"} (${r.rateApplied}%)` }),
+            ]),
+            el("div", { style: "text-align:right" }, [
+              el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
+              el("div", { class: "mono", style: "color:var(--amber);font-size:14px", text: money(r.basePrice) }),
+              r.status === "arrived" ? el("div", { class: "mono", style: "color:var(--green);font-size:12px", text: `+${money(r.commissionAmount)}` }) : null,
+            ]),
           ]),
-          el("div", { style: "text-align:right" }, [
-            el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
-            el("div", { class: "mono", style: "color:var(--amber);font-size:14px", text: money(r.basePrice) }),
-            r.status === "arrived" ? el("div", { class: "mono", style: "color:var(--green);font-size:12px", text: `+${money(r.commissionAmount)}` }) : null,
-          ]),
-        ]),
-      ]));
+        ]));
+      });
     });
   }
   content.appendChild(picker.el);
