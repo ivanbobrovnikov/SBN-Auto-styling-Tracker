@@ -53,44 +53,59 @@ function isDuringBusinessHours(isoString) {
   return openDays.includes(weekday) && hour >= 8 && hour < 18;
 }
 
+// True start/end of a calendar day in Eastern time, converted to the correct UTC instant.
+// Every period boundary in this app needs this — using UTC midnight instead (the old way)
+// meant "end of day" was actually landing around 8pm Eastern, silently excluding anything
+// that happened later that same real day.
+function startOfDayEastern(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return easternWallClockToUTC(y, m - 1, d, 0, 0, 0).toISOString();
+}
+function endOfDayEastern(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const nextDayMidnight = easternWallClockToUTC(y, m - 1, d + 1, 0, 0, 0);
+  return new Date(nextDayMidnight.getTime() - 1).toISOString();
+}
+
 function dateRangeFor(query) {
   const period = query.period || "month";
   const ref = query.date ? new Date(query.date) : new Date();
   let start, end;
   if (period === "day") {
     const d = query.date || new Date().toISOString().slice(0, 10);
-    start = d + "T00:00:00.000Z";
-    end = d + "T23:59:59.999Z";
+    start = startOfDayEastern(d);
+    end = endOfDayEastern(d);
   } else if (period === "week") {
     const day = ref.getUTCDay(); // 0=Sun
     const monday = new Date(ref);
     monday.setUTCDate(ref.getUTCDate() - ((day + 6) % 7));
-    monday.setUTCHours(0, 0, 0, 0);
+    const mondayStr = monday.toISOString().slice(0, 10);
     const sunday = new Date(monday);
     sunday.setUTCDate(monday.getUTCDate() + 6);
-    sunday.setUTCHours(23, 59, 59, 999);
-    start = monday.toISOString();
-    end = sunday.toISOString();
+    const sundayStr = sunday.toISOString().slice(0, 10);
+    start = startOfDayEastern(mondayStr);
+    end = endOfDayEastern(sundayStr);
   } else if (period === "payperiod") {
-    // Real payroll schedule: Tuesday through the following Tuesday, inclusive — e.g.
-    // Aug 25 through Sept 8 when Sept 8 is the payroll-processing date you pick.
-    const endDate = query.date ? new Date(query.date + "T23:59:59.999Z") : new Date();
-    const startDate = new Date(endDate);
-    startDate.setUTCDate(startDate.getUTCDate() - 14);
-    startDate.setUTCHours(0, 0, 0, 0);
-    start = startDate.toISOString();
-    end = endDate.toISOString();
+    // Real payroll schedule: a true 14-calendar-day span, non-overlapping with adjacent
+    // periods — e.g. Aug 26 through Sept 8 when Sept 8 is the payroll-processing date you
+    // pick, with the very next period picking up Sept 9, not re-claiming Sept 8.
+    const endDateStr = query.date || new Date().toISOString().slice(0, 10);
+    const endRef = new Date(endDateStr + "T12:00:00Z"); // noon avoids any day-boundary ambiguity
+    const startRef = new Date(endRef);
+    startRef.setUTCDate(startRef.getUTCDate() - 13);
+    start = startOfDayEastern(startRef.toISOString().slice(0, 10));
+    end = endOfDayEastern(endDateStr);
   } else if (period === "year") {
     const y = query.date ? query.date.slice(0, 4) : String(ref.getUTCFullYear());
-    start = `${y}-01-01T00:00:00.000Z`;
-    end = `${y}-12-31T23:59:59.999Z`;
+    start = startOfDayEastern(`${y}-01-01`);
+    end = endOfDayEastern(`${y}-12-31`);
   } else {
     // month
     const m = query.month || new Date().toISOString().slice(0, 7);
-    start = `${m}-01T00:00:00.000Z`;
     const [y, mo] = m.split("-").map(Number);
     const lastDay = new Date(y, mo, 0).getDate();
-    end = `${m}-${String(lastDay).padStart(2, "0")}T23:59:59.999Z`;
+    start = startOfDayEastern(`${m}-01`);
+    end = endOfDayEastern(`${m}-${String(lastDay).padStart(2, "0")}`);
   }
   return { start, end };
 }
