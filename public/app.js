@@ -72,11 +72,19 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
     fire();
   }
 
+  function formatPlainDate(dateStr) {
+    // Formats a "YYYY-MM-DD" calendar date directly, with zero timezone conversion —
+    // this is a plain date, not a real instant, so it should never shift based on
+    // whatever timezone the browser happens to be in.
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return `${months[m - 1]} ${d}`;
+  }
   function updatePayPeriodLabel() {
     const end = new Date(payPeriodEnd + "T00:00:00Z");
     const start = new Date(end);
     start.setUTCDate(start.getUTCDate() - 14); // matches the server's real Tue-to-Tue math exactly
-    const fmt = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const fmt = (d) => formatPlainDate(d.toISOString().slice(0, 10)); // read the calendar date straight from UTC, never through local-timezone display
     payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)} (payroll processed ${fmt(end)})`;
   }
 
