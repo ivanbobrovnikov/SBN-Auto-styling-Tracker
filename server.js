@@ -1369,12 +1369,20 @@ app.post("/api/owner/dedupe-contacts", requireOwner, (req, res) => {
   const plan = [];
   Object.values(byContact).forEach((group) => {
     if (group.length < 2) return;
-    const sorted = group.slice().sort((a, b) => (a.date < b.date ? 1 : -1));
+    // Prefer whichever record actually has a real price — a $0 duplicate is almost always
+    // a stale/incomplete GHL record, not the real booking, regardless of which one happens
+    // to have the most recent date.
+    const sorted = group.slice().sort((a, b) => {
+      const aPriced = (parseFloat(a.basePrice) || 0) > 0;
+      const bPriced = (parseFloat(b.basePrice) || 0) > 0;
+      if (aPriced !== bPriced) return aPriced ? -1 : 1;
+      return a.date < b.date ? 1 : -1;
+    });
     const keep = sorted[0];
     const remove = sorted.slice(1);
     plan.push({
-      keep: { id: keep.id, car: keep.car, date: keep.date, customerName: keep.customerName },
-      remove: remove.map((s) => ({ id: s.id, car: s.car, date: s.date, customerName: s.customerName })),
+      keep: { id: keep.id, car: keep.car, date: keep.date, customerName: keep.customerName, basePrice: keep.basePrice },
+      remove: remove.map((s) => ({ id: s.id, car: s.car, date: s.date, customerName: s.customerName, basePrice: s.basePrice })),
     });
   });
 
@@ -1671,7 +1679,7 @@ app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
 
   res.json({
     ok: true, dryRun, ...results, preview: dryRun ? preview : undefined,
-    hasMore: !!(searchBody.meta && searchBody.meta.nextPage),
+    hasMore: !!(searchBody.meta && searchBody.meta.nextPageUrl) && opportunities.length > 0,
     totalAvailable: searchBody.meta ? searchBody.meta.total : null,
     totalImportedSoFar: db.ghlImportImportedCount || 0,
   });
@@ -1733,7 +1741,7 @@ app.post("/api/owner/ghl-repair-closedat", requireOwner, async (req, res) => {
 
   res.json({
     ok: true, dryRun, ...results,
-    hasMore: !!(searchBody.meta && searchBody.meta.nextPage),
+    hasMore: !!(searchBody.meta && searchBody.meta.nextPageUrl) && opportunities.length > 0,
     totalFixedSoFar: db.ghlRepairFixedCount || 0,
   });
 });
