@@ -302,12 +302,14 @@ async function renderSchedule(content) {
     const jobs = await api(`/api/my/jobs?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
+    const { cols, wrap } = makeServiceColumns();
+    body.appendChild(wrap);
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) =>
         el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })
       ));
       const upsellForm = renderUpsellForm(job.id, () => load());
-      body.appendChild(el("div", { class: "card" }, [
+      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: job.car }),
@@ -993,6 +995,15 @@ async function renderOwnerSales(content) {
     if (p.period === "month") { body.appendChild(renderMonthGrid(sales, p.month)); return; }
     if (p.period === "year") { body.appendChild(renderYearGrid(sales, p.date.slice(0, 4))); return; }
 
+    // Day view specifically gets split into service columns; a multi-day list (like Pay
+    // period) stays a flat chronological agenda, since columns don't make sense across days.
+    let dayCols = null, mountTarget = body;
+    if (p.period === "day") {
+      const { cols, wrap } = makeServiceColumns();
+      dayCols = cols;
+      body.appendChild(wrap);
+    }
+
     sales.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((s) => {
       const cancelled = s.status === "cancelled";
       const statusLabel = cancelled ? "Cancelled" : s.status === "arrived" ? "Arrived" : s.status === "no_show" ? "No-show" : "Upcoming";
@@ -1033,7 +1044,7 @@ async function renderOwnerSales(content) {
         ]);
       });
 
-      body.appendChild(el("div", { class: "card", style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
+      (dayCols ? dayCols[serviceColumnFor(s.baseService)] : body).appendChild(el("div", { class: "card", style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
         el("div", { style: "min-width:64px;text-align:center;background:var(--cardAlt);border-radius:7px;padding:8px 4px;flex-shrink:0" }, [
           el("div", { class: "mono", style: "font-size:14px;font-weight:600", text: timeOnly }),
           el("div", { class: "muted", style: "font-size:10px", text: dateOnly }),
@@ -1558,6 +1569,23 @@ function renderDayNav(onChange) {
   return { el: wrap, getParams: () => ({ period: "day", date: dateInput.value }) };
 }
 
+// Groups a job into a display column by service - reused by both Job Status and All Jobs.
+function serviceColumnFor(baseService) {
+  const s = (baseService || "").toLowerCase();
+  if (s.includes("tint")) return "Window Tint";
+  if (s.includes("ceramic")) return "Ceramic Coating";
+  return "PPF";
+}
+function makeServiceColumns() {
+  const cols = {
+    "Window Tint": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "WINDOW TINT" })]),
+    "Ceramic Coating": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "CERAMIC COATING" })]),
+    "PPF": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "PPF / NEEDS SERVICE SET" })]),
+  };
+  const wrap = el("div", { style: "display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start" }, Object.values(cols));
+  return { cols, wrap };
+}
+
 async function renderManagerJobs(content) {
   const body = el("div");
   const employees = await api("/api/manager/employees");
@@ -1570,6 +1598,8 @@ async function renderManagerJobs(content) {
     const jobs = await api(`/api/manager/jobs?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs on this day." })); return; }
+    const { cols, wrap } = makeServiceColumns();
+    body.appendChild(wrap);
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const statusBtn = (value, label) => {
         const active = job.status === value;
@@ -1662,7 +1692,7 @@ async function renderManagerJobs(content) {
         }, text: "Save" }),
       ]);
 
-      body.appendChild(el("div", { class: "card" }, [
+      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:10px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: job.car }),
