@@ -1642,11 +1642,15 @@ app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
       if (cutoffDate && normalizedDate && normalizedDate.slice(0, 10) < cutoffDate) { results.skippedOld++; continue; }
 
       const contact = opp.contact || {};
+      // The real "closed" moment — when GHL's opportunity actually moved to Won — not
+      // whenever this import happened to run. Without this, every bulk-imported job's
+      // business-hours classification was silently based on the import's run time.
+      const realClosedAt = opp.lastStatusChangeAt || opp.createdAt || null;
       const record = {
         ghlOpportunityId: opp.id, contactId: opp.contactId,
         car: appt.title || "", date: appt.startTime, basePrice: opp.monetaryValue,
         customerName: contact.name || "", customerPhone: contact.phone || "", customerEmail: contact.email || "",
-        baseService: guessServiceFromTitle(appt.title),
+        baseService: guessServiceFromTitle(appt.title), closedAt: realClosedAt,
       };
       if (dryRun) preview.push(record);
       else { upsertSaleFromGHL(db, record); results.imported++; }
@@ -1671,6 +1675,80 @@ app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
     totalAvailable: searchBody.meta ? searchBody.meta.total : null,
     totalImportedSoFar: db.ghlImportImportedCount || 0,
   });
+});
+
+// Repairs the real closing timestamp on jobs already sitting in the tracker from a
+// previous import that ran before this fix existed. Uses its OWN separate progress
+// cursor from the main import, so running one never interferes with the other. Only
+// touches closedAt — price, status, attribution, everything else stays exactly as-is.
+app.post("/api/owner/ghl-repair-closedat", requireOwner, async (req, res) => {
+  const db = loadDB();
+  if (!GHL_API_TOKEN || !GHL_LOCATION_ID) {
+    return res.status(400).json({ error: "GHL_API_TOKEN and GHL_LOCATION_ID must be set first." });
+  }
+  const stageId = req.body.stageId;
+  const dryRun = !!req.body.dryRun;
+  const batchSize = Math.min(parseInt(req.body.batchSize, 10) || 15, 25);
+  if (!stageId) return res.status(400).json({ error: "stageId is required." });
+
+  if (db.ghlRepairCursor === undefined) db.ghlRepairCursor = null;
+  if (db.ghlRepairFixedCount === undefined) db.ghlRepairFixedCount = 0;
+
+  const baseUrl = `https://services.leadconnectorhq.com/opportunities/search?location_id=${GHL_LOCATION_ID}&pipeline_stage_id=${stageId}&limit=${batchSize}`;
+  const url = db.ghlRepairCursor || baseUrl;
+
+  let searchRes, searchBody;
+  try {
+    searchRes = await fetch(url, { headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" } });
+    searchBody = await searchRes.json();
+  } catch (e) {
+    return res.status(500).json({ error: "Failed to reach GHL: " + e.message });
+  }
+  if (!searchRes.ok) return res.status(400).json({ error: `GHL returned ${searchRes.status}`, detail: searchBody });
+
+  const opportunities = searchBody.opportunities || [];
+  const results = { processed: 0, fixed: 0, noMatchingJob: 0, alreadyCorrect: 0, preview: [] };
+
+  opportunities.forEach((opp) => {
+    results.processed++;
+    const sale = db.sales.find((s) => s.ghlOpportunityId === opp.id);
+    if (!sale) { results.noMatchingJob++; return; }
+    const correctClosedAt = opp.lastStatusChangeAt || opp.createdAt || null;
+    if (!correctClosedAt) return;
+    if (sale.closedAt === correctClosedAt) { results.alreadyCorrect++; return; }
+    const before = sale.closedAt;
+    if (dryRun) {
+      results.preview.push({ car: sale.car, before, after: correctClosedAt });
+    } else {
+      sale.closedAt = correctClosedAt;
+      results.fixed++;
+    }
+  });
+
+  if (!dryRun) {
+    db.ghlRepairCursor = (searchBody.meta && searchBody.meta.nextPageUrl) ? searchBody.meta.nextPageUrl : null;
+    db.ghlRepairFixedCount = (db.ghlRepairFixedCount || 0) + results.fixed;
+    saveDB(db);
+  }
+
+  res.json({
+    ok: true, dryRun, ...results,
+    hasMore: !!(searchBody.meta && searchBody.meta.nextPage),
+    totalFixedSoFar: db.ghlRepairFixedCount || 0,
+  });
+});
+
+app.get("/api/owner/ghl-repair-closedat-status", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json({ cursorSet: !!db.ghlRepairCursor, totalFixedSoFar: db.ghlRepairFixedCount || 0 });
+});
+
+app.post("/api/owner/ghl-repair-closedat-reset", requireOwner, (req, res) => {
+  const db = loadDB();
+  db.ghlRepairCursor = null;
+  db.ghlRepairFixedCount = 0;
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 app.get("/api/owner/ghl-bulk-import-status", requireOwner, (req, res) => {
