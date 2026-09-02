@@ -838,13 +838,13 @@ app.get("/api/owner/attendance-summary", requireOwner, (req, res) => {
 // this is the cleanup tool for catching up jobs that came in before a fix was live.
 app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   const db = loadDB();
-  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn)));
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn) || !s.baseService));
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-    employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
+    employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
-    basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn,
+    basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn, missingService: !s.baseService,
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
@@ -871,6 +871,9 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   // can negotiate down after the fact. This flows through to every downstream number
   // automatically (total, commission math), since everything reads from this one field.
   if (req.body.basePrice !== undefined) sale.basePrice = parseFloat(req.body.basePrice) || 0;
+  // Which service this actually is — needed for the Window Tint / Ceramic Coating / PPF
+  // column split, and previously had no way to set or fix it anywhere in the app.
+  if (req.body.baseService !== undefined) sale.baseService = req.body.baseService;
   if (req.body.status !== undefined) sale.status = req.body.status;
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
   if (req.body.paid !== undefined) {
