@@ -1406,6 +1406,12 @@ async function renderCleanup(content) {
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing to clean up — every job has a price and a sales rep or walk-in assignment." })); return; }
     jobs.forEach((job) => {
       const priceInput = el("input", { type: "number", value: job.basePrice || "", placeholder: "Base price", style: "max-width:100px" });
+      const serviceSelect = el("select", { style: "max-width:170px" }, [
+        el("option", { value: "", text: "Set service..." }),
+        el("option", { value: "Window Tint", text: "Window Tint", ...(job.baseService === "Window Tint" ? { selected: "true" } : {}) }),
+        el("option", { value: "Ceramic Coating", text: "Ceramic Coating", ...(job.baseService === "Ceramic Coating" ? { selected: "true" } : {}) }),
+        el("option", { value: "PPF", text: "PPF", ...(job.baseService === "PPF" ? { selected: "true" } : {}) }),
+      ]);
       const repSelect = el("select", { style: "max-width:200px" }, [
         el("option", { value: "", text: "Assign a sales rep..." }),
         ...salesReps.map((r) => el("option", { value: r.id, text: r.name, ...(job.salesRepId === r.id ? { selected: "true" } : {}) })),
@@ -1419,16 +1425,18 @@ async function renderCleanup(content) {
 
       body.appendChild(el("div", { class: "card" }, [
         el("div", { style: "font-weight:500", text: job.car }),
-        el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:8px", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""} · ${job.baseService || ""}` }),
-        el("div", { style: "display:flex;gap:6px;margin-bottom:6px" }, [
+        el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:8px", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""} · ${job.baseService || "no service set"}` }),
+        el("div", { style: "display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap" }, [
           job.missingPrice ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing price" }) : null,
           job.missingRep ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing sales rep" }) : null,
+          job.missingService ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing service" }) : null,
         ]),
         el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [
-          priceInput, repSelect, closerSelect,
+          priceInput, serviceSelect, repSelect, closerSelect,
           el("button", { class: "primary", onclick: async () => {
             const patch = {};
             if (priceInput.value) patch.basePrice = priceInput.value;
+            if (serviceSelect.value) patch.baseService = serviceSelect.value;
             if (repSelect.value) patch.salesRepId = repSelect.value;
             if (closerSelect.value) {
               const [type, id] = closerSelect.value.split("::");
@@ -1703,6 +1711,22 @@ async function renderManagerJobs(content) {
             el("div", { class: "muted", style: "font-size:11px", text: `Base: ${money(job.basePrice)}` }),
             job.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:11px", text: `Upsells: ${money(job.upsellTotal)}` }) : null,
             el("div", { class: "mono", style: "color:var(--amber);font-size:17px;font-weight:600;margin-top:2px", text: `Total: ${money(job.total)}` }),
+          ]),
+        ]),
+        el("div", { style: "margin-bottom:10px" }, [
+          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `SERVICE (currently: ${job.baseService || "not set"})` }),
+          el("select", {
+            style: "max-width:200px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
+            onchange: async (e) => {
+              if (!e.target.value) return;
+              await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ baseService: e.target.value }) });
+              load();
+            },
+          }, [
+            el("option", { value: "", text: "Set service..." }),
+            el("option", { value: "Window Tint", text: "Window Tint", ...(job.baseService === "Window Tint" ? { selected: "true" } : {}) }),
+            el("option", { value: "Ceramic Coating", text: "Ceramic Coating", ...(job.baseService === "Ceramic Coating" ? { selected: "true" } : {}) }),
+            el("option", { value: "PPF", text: "PPF", ...(job.baseService === "PPF" ? { selected: "true" } : {}) }),
           ]),
         ]),
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
