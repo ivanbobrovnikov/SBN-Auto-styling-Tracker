@@ -585,6 +585,16 @@ async function renderOwnerPayroll(content) {
                 el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(r.commission) }),
               ])
             : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No commission rate set for this person." }),
+          (r.duplicateWarnings || []).length > 0
+            ? el("div", { style: "margin-top:10px;padding:10px;border:1px solid var(--red);border-radius:var(--radius);background:var(--fill-danger, rgba(242,88,95,0.08))" }, [
+                el("div", { style: "font-size:12px;font-weight:600;color:var(--red);margin-bottom:6px", text: `⚠ ${r.duplicateWarnings.length} possible duplicate job(s) — same real customer appears more than once, both counted toward the commission above` }),
+                ...r.duplicateWarnings.map((w) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:2px" }, [
+                  el("span", {}, [el("span", { text: w.car }), el("span", { class: "muted", text: ` · ${formatDateTime(w.date)}` })]),
+                  el("span", { class: "mono", style: "color:var(--red)", text: `+${money(w.commissionAmount)}` }),
+                ])),
+                el("div", { class: "muted", style: "font-size:10.5px;margin-top:6px", text: "Check Test Tool → \"Check for duplicate jobs\" to review and remove the extra one." }),
+              ])
+            : null,
         ]));
       });
     }
@@ -2288,6 +2298,7 @@ async function renderTestTool(content) {
           el("div", { style: "font-size:12.5px", text: `Unique GHL opportunity IDs: ${d.uniqueOpportunityIds}` }),
           el("div", { style: `font-size:12.5px;font-weight:600;color:${d.duplicateOpportunityIds > 0 ? "var(--red)" : "var(--green)"}`, text: d.duplicateOpportunityIds > 0 ? `⚠ ${d.duplicateOpportunityIds} exact duplicate(s) found` : "✓ No exact duplicates (same opportunity ID)" }),
           el("div", { style: `font-size:12.5px;font-weight:600;color:${d.contactsWithMultipleJobs > 0 ? "var(--amber)" : "var(--green)"}`, text: d.contactsWithMultipleJobs > 0 ? `⚠ ${d.contactsWithMultipleJobs} customer(s) with multiple separate jobs — review below, or use one-click cleanup above` : "✓ No customers with multiple jobs" }),
+          el("div", { style: `font-size:12.5px;font-weight:600;color:${d.nameOnlyDuplicateGroups > 0 ? "var(--amber)" : "var(--green)"}`, text: d.nameOnlyDuplicateGroups > 0 ? `⚠ ${d.nameOnlyDuplicateGroups} customer(s) with the same name on multiple jobs, any date — could be a reschedule that moved days, could be a genuine repeat customer, check below` : "✓ No same-name jobs on different dates" }),
         ]));
         (d.contactDuplicates || []).forEach((group) => {
           diagResult.appendChild(el("div", { class: "card" }, [
@@ -2296,6 +2307,18 @@ async function renderTestTool(content) {
               el("div", { style: "font-size:12px" }, [
                 el("div", { text: j.car || "(no car)" }),
                 el("div", { class: "muted", style: "font-size:10.5px", text: `${j.customerName} · ${formatDateTime(j.date)} · $${j.basePrice} · opp: ${j.ghlOpportunityId}` }),
+              ]),
+              el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${j.id}`, { method: "DELETE" }); runDiag(); }, text: "Delete this one" }),
+            ])),
+          ]));
+        });
+        (d.nameOnlyDuplicates || []).forEach((group) => {
+          diagResult.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
+            el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: `"${group.customerName}" appears ${group.count} times — could be a reschedule moved to a different day, or a genuine repeat visit. Check the dates before deleting:` }),
+            ...group.jobs.map((j) => el("div", { class: "row", style: "margin-bottom:4px" }, [
+              el("div", { style: "font-size:12px" }, [
+                el("div", { text: j.car || "(no car)" }),
+                el("div", { class: "muted", style: "font-size:10.5px", text: `${formatDateTime(j.date)} · $${j.basePrice} · opp: ${j.ghlOpportunityId || "none"}` }),
               ]),
               el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${j.id}`, { method: "DELETE" }); runDiag(); }, text: "Delete this one" }),
             ])),
