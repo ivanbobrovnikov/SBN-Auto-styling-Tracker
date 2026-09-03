@@ -58,6 +58,25 @@ function logAudit(db, req, sale, field, oldValue, newValue) {
   });
   db.auditLog = db.auditLog.slice(0, 1000); // cap size so this can't grow forever
 }
+// A permanent safeguard, not a separate tool to remember to run — this flags every sale
+// that shares a real customer with another active sale, right where commission actually
+// gets calculated. Matches by contactId when both have one (strongest signal); falls back
+// to same customer name + same calendar day when contactId is missing.
+function findDuplicateSaleIds(sales) {
+  const flagged = new Set();
+  const byContact = {};
+  const byNameDay = {};
+  sales.forEach((s) => {
+    if (s.contactId) (byContact[s.contactId] = byContact[s.contactId] || []).push(s);
+    else if (s.customerName && s.date) {
+      const key = `${s.customerName.trim().toLowerCase()}|${s.date.slice(0, 10)}`;
+      (byNameDay[key] = byNameDay[key] || []).push(s);
+    }
+  });
+  Object.values(byContact).forEach((group) => { if (group.length > 1) group.forEach((s) => flagged.add(s.id)); });
+  Object.values(byNameDay).forEach((group) => { if (group.length > 1) group.forEach((s) => flagged.add(s.id)); });
+  return flagged;
+}
 function monthKey(dateStr) {
   return (dateStr || "").slice(0, 7);
 }
@@ -1426,6 +1445,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
   const { start, end } = dateRangeFor(req.query);
   const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db);
   const shopTotalUpsellRevenue = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
+  const duplicateSaleIds = findDuplicateSaleIds(sales);
 
   function personBreakdown(idField, id) {
     const mine = [];
@@ -1476,12 +1496,14 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const noShowRate = resolved > 0 ? (noShow.length / resolved) * 100 : 0;
     const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
     let commission = 0, duringHoursCount = 0, afterHoursCount = 0;
+    const duplicateWarnings = [];
     showed.forEach((s) => {
       const c = salesRepCommissionForSale(rep, s);
       commission += c.amount;
       if (c.duringHours) duringHoursCount += 1; else afterHoursCount += 1;
+      if (duplicateSaleIds.has(s.id)) duplicateWarnings.push({ id: s.id, car: s.car, date: s.date, basePrice: s.basePrice, commissionAmount: c.amount });
     });
-    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission, noShowCount: noShow.length, noShowRate };
+    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission, noShowCount: noShow.length, noShowRate, duplicateWarnings };
   });
 
   res.json({ shopTotalUpsellRevenue, employees, managers, salesReps });
@@ -1543,6 +1565,23 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
       jobs: group.map((s) => ({ id: s.id, car: s.car, date: s.date, basePrice: s.basePrice, ghlOpportunityId: s.ghlOpportunityId || null, contactId: s.contactId || null })),
     }));
 
+  // Broader net: same customer name, ANY date — catches a reschedule that moved someone
+  // to a completely different day, which the same-day check above structurally can't see.
+  // Wider net means real risk of a genuine repeat customer showing up here too — needs a
+  // human eye, not an auto-fix.
+  const byNameOnly = {};
+  activeSales.forEach((s) => {
+    if (!s.customerName) return;
+    const key = s.customerName.trim().toLowerCase();
+    (byNameOnly[key] = byNameOnly[key] || []).push(s);
+  });
+  const nameOnlyDuplicates = Object.entries(byNameOnly)
+    .filter(([key, group]) => group.length > 1)
+    .map(([key, group]) => ({
+      customerName: group[0].customerName, count: group.length,
+      jobs: group.map((s) => ({ id: s.id, car: s.car, date: s.date, basePrice: s.basePrice, ghlOpportunityId: s.ghlOpportunityId || null, contactId: s.contactId || null })),
+    }));
+
   res.json({
     totalSalesInDatabase: db.sales.length,
     salesWithGhlOpportunityId: withOppId.length,
@@ -1555,6 +1594,8 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
     missingContactIdCount: missingContactId.length,
     nameAndDayDuplicateGroups: nameAndDayDuplicates.length,
     nameAndDayDuplicates: nameAndDayDuplicates.slice(0, 20),
+    nameOnlyDuplicateGroups: nameOnlyDuplicates.length,
+    nameOnlyDuplicates: nameOnlyDuplicates.slice(0, 30),
   });
 });
 
