@@ -217,7 +217,7 @@ function renderLogin() {
 
 const TAB_ICONS = {
   "owner-summary": "📊", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
-  "owner-serviced": "✅", "owner-audit": "🕐",
+  "owner-serviced": "✅", "owner-audit": "🕐", "owner-edit-history": "📝",
   "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
   "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
   "manager-performance": "📈", "sales-schedule": "📋", "sales-fullschedule": "🗓",
@@ -227,7 +227,7 @@ const TAB_ICONS = {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-audit", "Commission Audit"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
     allTabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
@@ -309,6 +309,7 @@ async function renderSchedule(content) {
         el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })
       ));
       const upsellForm = renderUpsellForm(job.id, () => load());
+      const photoGrid = renderPhotoGrid(job, () => load());
       cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", {}, [
@@ -320,12 +321,70 @@ async function renderSchedule(content) {
           el("div", { class: "muted", text: job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : "Upcoming" }),
         ]),
         el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [upsellList, upsellForm]),
+        photoGrid,
       ]));
     });
   }
   content.appendChild(nav.el);
   content.appendChild(body);
   await load();
+}
+
+const PHOTO_SLOT_DEFS = [["walkaround", "Walk-Around Video"]];
+function isVideoFile(filename) {
+  return /\.(mp4|mov|webm|m4v|avi)$/i.test(filename || "");
+}
+
+// Before/after walk-around clip - shared by Manager Job Status and Tech Schedule, so a
+// tech can record it from either place. One clip per stage, video or photo, instead of a
+// dozen separate stills.
+function renderPhotoGrid(job, onDone) {
+  function stageSection(stage, label) {
+    const photos = (job.photos && job.photos[stage]) || {};
+    const filename = photos.walkaround;
+    let content;
+    if (filename) {
+      const mediaEl = isVideoFile(filename)
+        ? el("video", { src: `/api/photos/${filename}`, controls: "true", style: "width:100%;max-width:260px;border-radius:8px;border:0.5px solid var(--border);display:block" })
+        : el("img", { src: `/api/photos/${filename}`, style: "width:100%;max-width:260px;border-radius:8px;border:0.5px solid var(--border);display:block" });
+      content = el("div", { style: "position:relative;display:inline-block" }, [
+        mediaEl,
+        el("button", {
+          class: "icon-danger", style: "position:absolute;top:-8px;right:-8px;width:22px;height:22px;padding:0;font-size:12px;border-radius:50%;line-height:1",
+          onclick: async () => { await api(`/api/sales/${job.id}/photos/${stage}/walkaround`, { method: "DELETE" }); onDone(); },
+          text: "✕",
+        }),
+      ]);
+    } else {
+      const statusLabel = el("div", { style: "font-size:10px", text: "Tap to record or upload" });
+      const fileInput = el("input", { type: "file", accept: "video/*,image/*", capture: "environment", style: "display:none" });
+      const tile = el("div", {
+        style: "width:130px;height:95px;border:1px dashed var(--border);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);gap:4px",
+        onclick: () => fileInput.click(),
+      }, [el("div", { style: "font-size:24px", text: "🎥" }), statusLabel, fileInput]);
+      fileInput.addEventListener("change", async () => {
+        if (!fileInput.files[0]) return;
+        statusLabel.textContent = "Uploading...";
+        const formData = new FormData();
+        formData.append("stage", stage);
+        formData.append("slot", "walkaround");
+        formData.append("photo", fileInput.files[0]);
+        try {
+          const res = await fetch(`/api/sales/${job.id}/photos`, { method: "POST", body: formData, credentials: "same-origin" });
+          if (!res.ok) throw new Error();
+          onDone();
+        } catch (e) {
+          statusLabel.textContent = "Upload failed - tap to retry";
+        }
+      });
+      content = tile;
+    }
+    return el("div", { style: "margin-bottom:10px" }, [
+      el("div", { class: "muted", style: "font-size:11px;margin-bottom:4px;font-weight:600;letter-spacing:0.03em", text: label.toUpperCase() }),
+      content,
+    ]);
+  }
+  return el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:8px" }, [stageSection("before", "Before"), stageSection("after", "After")]);
 }
 
 function renderUpsellForm(jobId, onDone) {
@@ -408,6 +467,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
   if (currentTab === "owner-serviced") return renderServicedCars(content);
   if (currentTab === "owner-audit") return renderCommissionAudit(content);
+  if (currentTab === "owner-edit-history") return renderEditHistory(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
@@ -515,7 +575,10 @@ async function renderOwnerPayroll(content) {
             el("div", { class: "oswald", style: "font-size:15px", text: r.name }),
             el("div", { class: "mono", style: "color:var(--amber);font-size:16px", text: money(r.showedValue) }),
           ]),
-          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: `${r.totalBooked} booked · ${r.showedCount} showed (no-shows earn nothing)` }),
+          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `${r.totalBooked} booked · ${r.showedCount} showed (no-shows earn nothing)` }),
+          r.noShowCount > 0
+            ? el("div", { class: "muted", style: `font-size:11.5px;margin-bottom:10px;color:${r.noShowRate >= 20 ? "var(--red)" : "var(--sub)"}`, text: `${r.noShowCount} no-show${r.noShowCount !== 1 ? "s" : ""} — ${Math.round(r.noShowRate)}% no-show rate` })
+            : el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: "0 no-shows" }),
           r.commissionRate > 0
             ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
                 el("span", { class: "muted", style: "font-size:12.5px", text: `Commission owed (${r.commissionRate}% of showed value)` }),
@@ -855,6 +918,36 @@ function renderYearGrid(sales, yearStr) {
 // Commission Audit — every appointment attributed to any sales rep, any status, with the
 // exact moment it closed and why it got the rate it did. This is the shop-wide answer to
 // "how can I be sure this is accurate" — no manual checking required.
+// Edit History — who changed a price, service, or sales rep, and when. Every entry is
+// server-recorded at the moment the change happens; nothing here can be altered after
+// the fact from the client side.
+async function renderEditHistory(content) {
+  const body = el("div");
+  async function load() {
+    const entries = await api("/api/owner/audit-log");
+    body.innerHTML = "";
+    if (entries.length === 0) { body.appendChild(el("div", { class: "muted", text: "No edits recorded yet." })); return; }
+    entries.forEach((e) => {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: e.car || "(unknown car)" }),
+            el("div", { class: "muted", style: "font-size:12px", text: `${e.field} changed by ${e.actor}` }),
+            el("div", { class: "muted", style: "font-size:11px", text: formatDateTime(e.timestamp) }),
+          ]),
+          el("div", { style: "text-align:right;font-size:13px" }, [
+            el("div", { class: "muted", style: "text-decoration:line-through", text: e.oldValue === null || e.oldValue === "" ? "(empty)" : String(e.oldValue) }),
+            el("div", { style: "color:var(--green);font-weight:600", text: String(e.newValue) }),
+          ]),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:12px", text: "Every price, service, and sales rep change made through the app, most recent first." }));
+  content.appendChild(body);
+  await load();
+}
+
 async function renderCommissionAudit(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "payperiod");
@@ -1044,7 +1137,15 @@ async function renderOwnerSales(content) {
         ]);
       });
 
-      (dayCols ? dayCols[serviceColumnFor(s.baseService)] : body).appendChild(el("div", { class: "card", style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
+      const photoToggleWrap = el("div", { style: "display:none" });
+      const photoToggleBtn = el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => {
+        const showing = photoToggleWrap.style.display !== "none";
+        photoToggleWrap.style.display = showing ? "none" : "block";
+        photoToggleBtn.textContent = showing ? "📷 Photos" : "📷 Hide";
+      }, text: "📷 Photos" });
+
+      (dayCols ? dayCols[serviceColumnFor(s.baseService)] : body).appendChild(el("div", { class: "card" }, [
+        el("div", { style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
         el("div", { style: "min-width:64px;text-align:center;background:var(--cardAlt);border-radius:7px;padding:8px 4px;flex-shrink:0" }, [
           el("div", { class: "mono", style: "font-size:14px;font-weight:600", text: timeOnly }),
           el("div", { class: "muted", style: "font-size:10px", text: dateOnly }),
@@ -1061,11 +1162,15 @@ async function renderOwnerSales(content) {
           el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px;font-weight:600;margin-top:2px`, text: cancelled ? "—" : `Total: ${money(s.total)}` }),
           s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : "Unpaid" }),
           el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end" }, [
+            photoToggleBtn,
             el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => navigator.clipboard.writeText(s.id), text: "Copy ID" }),
             el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${s.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
           ]),
         ]),
+        ]),
+        photoToggleWrap,
       ]));
+      photoToggleWrap.appendChild(renderPhotoGrid(s, load));
     });
   }
   content.appendChild(picker.el);
@@ -1349,15 +1454,30 @@ async function renderAttendance(content) {
           text: (active ? "✓ " : "") + label,
         });
       };
-      dayBody.appendChild(el("div", { class: "card row" }, [
-        el("div", {}, [
-          el("div", { style: "font-weight:500", text: p.name }),
-          el("div", { class: "muted", style: "font-size:11.5px", text: p.type === "manager" ? "Manager" : "Employee" }),
+      const startInput = el("input", { type: "time", value: p.startTime || "", style: "max-width:110px" });
+      const endInput = el("input", { type: "time", value: p.endTime || "", style: "max-width:110px" });
+      const saveTimes = async () => {
+        await api("/api/manager/attendance", { method: "POST", body: JSON.stringify({ personType: p.type, personId: p.id, date, startTime: startInput.value, endTime: endInput.value }) });
+      };
+      startInput.addEventListener("change", saveTimes);
+      endInput.addEventListener("change", saveTimes);
+
+      dayBody.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row", style: "margin-bottom:8px" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: p.name }),
+            el("div", { class: "muted", style: "font-size:11.5px", text: p.type === "manager" ? "Manager" : "Employee" }),
+          ]),
+          el("div", { style: "display:flex;gap:8px" }, [
+            statusBtn("present", "Present", "var(--green)"),
+            statusBtn("half_day", "Half day", "var(--amber)"),
+            statusBtn("absent", "Absent", "var(--red)"),
+          ]),
         ]),
-        el("div", { style: "display:flex;gap:8px" }, [
-          statusBtn("present", "Present", "var(--green)"),
-          statusBtn("half_day", "Half day", "var(--amber)"),
-          statusBtn("absent", "Absent", "var(--red)"),
+        el("div", { style: "display:flex;gap:8px;align-items:center" }, [
+          el("span", { class: "muted", style: "font-size:11.5px", text: "In:" }), startInput,
+          el("span", { class: "muted", style: "font-size:11.5px", text: "Out:" }), endInput,
+          el("span", { class: "muted", style: "font-size:10.5px", text: "usually 9–5 or 9–6, only fill in if it was different" }),
         ]),
       ]));
     });
@@ -1399,6 +1519,38 @@ async function renderCleanup(content) {
   const salesReps = await api("/api/manager/salesreps-list");
   const employees = await api("/api/manager/employees");
   const managersList = await api("/api/manager/managers-list");
+
+  const autoFixResult = el("div", { style: "margin-top:10px" });
+  const autoFixBtn = el("button", { class: "primary", style: "background:var(--green)", onclick: async () => {
+    const r = await api("/api/manager/cleanup-auto-fix", { method: "POST", body: JSON.stringify({ dryRun: true }) });
+    autoFixResult.innerHTML = "";
+    if (r.fixedService + r.fixedRep === 0) {
+      autoFixResult.appendChild(el("div", { class: "muted", text: "Nothing found that can be auto-fixed from the car/title text — the rest genuinely need a human look." }));
+      return;
+    }
+    autoFixResult.appendChild(el("div", { class: "card" }, [
+      el("div", { style: "font-size:12.5px;margin-bottom:6px", text: `Would auto-fix ${r.fixedService} service(s) and ${r.fixedRep} sales rep(s) from the car/title text. ${r.stillNeedsPrice} job(s) still need a price entered by hand — that can never be guessed.` }),
+      el("button", { class: "primary", style: "background:var(--red)", onclick: async () => {
+        if (!confirm(`Apply these ${r.fixedService + r.fixedRep} fixes now?`)) return;
+        await api("/api/manager/cleanup-auto-fix", { method: "POST", body: JSON.stringify({ dryRun: false }) });
+        autoFixResult.innerHTML = "";
+        load();
+      }, text: `Apply ${r.fixedService + r.fixedRep} fixes now` }),
+    ]));
+    r.preview.forEach((p) => {
+      autoFixResult.appendChild(el("div", { class: "card", style: "font-size:11.5px" }, [
+        el("div", { text: p.car }),
+        el("div", { class: "muted" }, [
+          p.serviceFix ? el("span", { text: `Service → ${p.serviceFix}  ` }) : null,
+          p.repFix ? el("span", { text: `Rep → ${p.repFix}` }) : null,
+        ]),
+      ]));
+    });
+  }, text: "Auto-fix what we can from car/title text" });
+  content.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "muted", style: "margin-bottom:8px", text: "Detects service and sales rep the same way the live GHL flow already does — from the car/title text (e.g. \"DG 2024 Toyota Venza Ceramic Coating\"). Only fixes what it can clearly detect; price always needs a human. Preview first, nothing changes until you confirm." }),
+    autoFixBtn, autoFixResult,
+  ]));
 
   async function load() {
     const jobs = await api("/api/manager/needs-cleanup");
@@ -1781,6 +1933,7 @@ async function renderManagerJobs(content) {
           upsellList,
           upsellForm,
         ]),
+        renderPhotoGrid(job, () => load()),
       ]));
     });
   }
