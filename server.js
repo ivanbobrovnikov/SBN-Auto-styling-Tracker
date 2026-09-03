@@ -1179,7 +1179,10 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       employeeNames: s.employeeNames || "Unassigned",
       managerHelperNames: s.managerHelperNames || "",
       status: s.status || "pending",
-      upsells: resolveUpsellNames((s.upsells || []).filter((u) => u.employeeId === myId), db),
+      // Every upsell on this car is visible to any tech working it, so someone tag-teaming
+      // a job (like Nick alongside Gio) can see what's already been upsold, even though
+      // commission credit still only goes to whoever actually logged it.
+      upsells: resolveUpsellNames(s.upsells || [], db),
       photos: s.photos || { before: {}, after: {} },
       // basePrice and total sale $ intentionally NOT sent to employees
     }));
