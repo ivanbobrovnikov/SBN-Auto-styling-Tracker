@@ -2050,10 +2050,11 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db);
-  // "Total revenue" means money actually earned — a job that's booked for a future date
-  // isn't revenue yet, it's a scheduled booking. Only count it once a manager has marked
-  // it BOTH Service Complete and Paid, same as how commission already works elsewhere.
-  const realizedSales = sales.filter((s) => s.completed && s.paid);
+  // "Total revenue" means money actually collected — decided purely by whether payment
+  // (cash, card, or both) has been marked, regardless of whether Service Complete is
+  // checked. A job can be paid before the work is finished (deposit, pay-ahead, etc.) and
+  // that money is real the moment it's collected.
+  const realizedSales = sales.filter((s) => s.paid);
   const totalRevenue = realizedSales.reduce((a, s) => a + saleTotal(s), 0);
   const totalUpsell = realizedSales.reduce((a, s) => a + saleUpsellTotal(s), 0);
   // "Cars serviced" means the job is actually done — a manager marked it Service Complete.
