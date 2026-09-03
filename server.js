@@ -1520,6 +1520,29 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
       jobs: group.map((s) => ({ id: s.id, car: s.car, date: s.date, customerName: s.customerName, basePrice: s.basePrice, ghlOpportunityId: s.ghlOpportunityId })),
     }));
 
+  // Jobs missing the very IDs the checks above rely on — if a webhook event (like a
+  // reschedule) doesn't include these, duplicates from it are invisible to every check
+  // above, since there's nothing shared to match them by.
+  const activeSales = db.sales.filter((s) => s.status !== "cancelled");
+  const missingOppId = activeSales.filter((s) => !s.ghlOpportunityId);
+  const missingContactId = activeSales.filter((s) => !s.contactId);
+
+  // Fallback: same customer name + same calendar day, regardless of whether ghlOpportunityId
+  // or contactId are present at all — catches duplicates the ID-based checks structurally
+  // cannot see.
+  const byNameAndDay = {};
+  activeSales.forEach((s) => {
+    if (!s.customerName || !s.date) return;
+    const key = `${s.customerName.trim().toLowerCase()}|${s.date.slice(0, 10)}`;
+    (byNameAndDay[key] = byNameAndDay[key] || []).push(s);
+  });
+  const nameAndDayDuplicates = Object.entries(byNameAndDay)
+    .filter(([key, group]) => group.length > 1)
+    .map(([key, group]) => ({
+      customerName: group[0].customerName, date: group[0].date.slice(0, 10), count: group.length,
+      jobs: group.map((s) => ({ id: s.id, car: s.car, date: s.date, basePrice: s.basePrice, ghlOpportunityId: s.ghlOpportunityId || null, contactId: s.contactId || null })),
+    }));
+
   res.json({
     totalSalesInDatabase: db.sales.length,
     salesWithGhlOpportunityId: withOppId.length,
@@ -1528,6 +1551,10 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
     duplicateExamples: duplicateIds.slice(0, 5).map(([id, count]) => ({ ghlOpportunityId: id, count })),
     contactsWithMultipleJobs: contactDuplicates.length,
     contactDuplicates: contactDuplicates.slice(0, 20),
+    missingOppIdCount: missingOppId.length,
+    missingContactIdCount: missingContactId.length,
+    nameAndDayDuplicateGroups: nameAndDayDuplicates.length,
+    nameAndDayDuplicates: nameAndDayDuplicates.slice(0, 20),
   });
 });
 
