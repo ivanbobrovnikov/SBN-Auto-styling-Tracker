@@ -4,9 +4,12 @@ const cookieParser = require("cookie-parser");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const multer = require("multer");
 
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const DB_PATH = path.join(DATA_DIR, "data.json");
+const PHOTOS_DIR = path.join(DATA_DIR, "photos");
+if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-too";
@@ -14,7 +17,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-too";
 // ---------- tiny JSON "database" ----------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const fresh = { employees: [], managers: [], salesReps: [], sales: [], attendance: [], ownerPinHash: null };
+    const fresh = { employees: [], managers: [], salesReps: [], sales: [], attendance: [], auditLog: [], ownerPinHash: null };
     fs.writeFileSync(DB_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
@@ -22,6 +25,7 @@ function loadDB() {
   if (!db.managers) db.managers = [];
   if (!db.salesReps) db.salesReps = [];
   if (!db.attendance) db.attendance = [];
+  if (!db.auditLog) db.auditLog = [];
   return db;
 }
 function saveDB(db) {
@@ -32,6 +36,23 @@ function hash(pin) {
 }
 function newId() {
   return crypto.randomBytes(8).toString("hex");
+}
+// Records who changed a price, service, or sales rep assignment, and when — the actual
+// answer to "who changed this and why does the number look different now."
+function logAudit(db, req, sale, field, oldValue, newValue) {
+  if (oldValue === newValue) return; // no real change, nothing to log
+  if (!db.auditLog) db.auditLog = [];
+  let actor = "Unknown";
+  if (req.auth.role === "owner") actor = "Owner";
+  else if (req.auth.role === "manager") {
+    const mgr = (db.managers || []).find((m) => m.id === req.auth.id);
+    actor = `${mgr ? mgr.name : "Removed manager"} (manager)`;
+  }
+  db.auditLog.unshift({
+    id: newId(), timestamp: new Date().toISOString(), actor,
+    saleId: sale.id, car: sale.car, field, oldValue: oldValue === undefined ? null : oldValue, newValue,
+  });
+  db.auditLog = db.auditLog.slice(0, 1000); // cap size so this can't grow forever
 }
 function monthKey(dateStr) {
   return (dateStr || "").slice(0, 7);
@@ -377,6 +398,71 @@ function setAuthCookie(res, payload) {
 app.use((req, res, next) => {
   req.auth = verifyAuth(req.cookies[AUTH_COOKIE]) || { role: null };
   next();
+});
+
+// Before/after documentation — one walk-around clip per stage instead of a dozen separate
+// stills. Accepts either video or a photo in that same slot, since not every phone/network
+// makes video easy in the moment.
+const PHOTO_SLOTS = ["walkaround"];
+const photoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, PHOTOS_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname || "") || ".mp4";
+    cb(null, `${req.params.saleId}-${req.body.stage}-${req.body.slot}-${newId()}${ext}`);
+  },
+});
+const photoUpload = multer({
+  storage: photoStorage,
+  limits: { fileSize: 300 * 1024 * 1024 }, // 300MB - a real walk-around video needs real room
+  fileFilter: (req, file, cb) => {
+    if (!/^image\/|^video\//.test(file.mimetype)) return cb(new Error("Only image or video files are allowed."));
+    cb(null, true);
+  },
+});
+
+app.post("/api/sales/:saleId/photos", requireEmployee, photoUpload.single("photo"), (req, res) => {
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.params.saleId);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  const { stage, slot } = req.body;
+  if (!["before", "after"].includes(stage)) return res.status(400).json({ error: "stage must be 'before' or 'after'." });
+  if (!PHOTO_SLOTS.includes(slot)) return res.status(400).json({ error: "Invalid photo slot." });
+  if (!req.file) return res.status(400).json({ error: "No photo file received." });
+
+  if (!sale.photos) sale.photos = { before: {}, after: {} };
+  if (!sale.photos[stage]) sale.photos[stage] = {};
+  // Replacing an existing photo in this slot — delete the old file so they don't pile up.
+  const existing = sale.photos[stage][slot];
+  if (existing) {
+    const oldPath = path.join(PHOTOS_DIR, existing);
+    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+  }
+  sale.photos[stage][slot] = req.file.filename;
+  saveDB(db);
+  res.json({ ok: true, filename: req.file.filename });
+});
+
+app.delete("/api/sales/:saleId/photos/:stage/:slot", requireEmployee, (req, res) => {
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.params.saleId);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  const { stage, slot } = req.params;
+  const filename = sale.photos && sale.photos[stage] && sale.photos[stage][slot];
+  if (filename) {
+    const filePath = path.join(PHOTOS_DIR, filename);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    sale.photos[stage][slot] = null;
+    saveDB(db);
+  }
+  res.json({ ok: true });
+});
+
+// Serves an actual photo file - requires login, same as everything else in this app.
+app.get("/api/photos/:filename", requireEmployee, (req, res) => {
+  const filePath = path.join(PHOTOS_DIR, req.params.filename);
+  if (!filePath.startsWith(PHOTOS_DIR)) return res.status(400).end(); // guards against path traversal
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+  res.sendFile(filePath);
 });
 
 function requireOwner(req, res, next) {
@@ -793,21 +879,25 @@ app.get("/api/manager/attendance", requireManager, (req, res) => {
   const records = db.attendance.filter((a) => a.date === date);
   res.json(people.map((p) => {
     const rec = records.find((r) => r.personType === p.type && r.personId === p.id);
-    return { ...p, status: rec ? rec.status : null };
+    return { ...p, status: rec ? rec.status : null, startTime: rec ? rec.startTime || "" : "", endTime: rec ? rec.endTime || "" : "" };
   }));
 });
 
 app.post("/api/manager/attendance", requireManager, (req, res) => {
   const db = loadDB();
-  const { personType, personId, date, status } = req.body;
+  const { personType, personId, date, status, startTime, endTime } = req.body;
   if (!personType || !personId || !date) return res.status(400).json({ error: "personType, personId, and date are required." });
   const existing = db.attendance.find((a) => a.personType === personType && a.personId === personId && a.date === date);
-  if (!status) {
+  if (!status && startTime === undefined && endTime === undefined) {
     db.attendance = db.attendance.filter((a) => a !== existing);
   } else if (existing) {
-    existing.status = status;
+    if (status !== undefined) existing.status = status;
+    // Usually 9-5 or 9-6, but not every day is usual — these stay optional and blank
+    // unless a manager actually fills in a different time for that specific day.
+    if (startTime !== undefined) existing.startTime = startTime;
+    if (endTime !== undefined) existing.endTime = endTime;
   } else {
-    db.attendance.push({ id: newId(), personType, personId, date, status });
+    db.attendance.push({ id: newId(), personType, personId, date, status: status || null, startTime: startTime || "", endTime: endTime || "" });
   }
   saveDB(db);
   res.json({ ok: true });
@@ -848,6 +938,50 @@ app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
+// Auto-fix as much of Cleanup as can be safely derived from data already on the job —
+// the car/title text — using the exact same detection already proven for the live GHL
+// flow and bulk import. Only acts when a real pattern is found; price can never be
+// guessed and always needs a human, so it's reported but never touched here.
+app.post("/api/manager/cleanup-auto-fix", requireManager, (req, res) => {
+  const db = loadDB();
+  const dryRun = !!req.body.dryRun;
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn) || !s.baseService));
+  const results = { fixedService: 0, fixedRep: 0, stillNeedsPrice: 0, stillNeedsManualService: 0, stillNeedsManualRep: 0, preview: [] };
+
+  jobs.forEach((s) => {
+    const hadService = !!s.baseService;
+    const hadRep = !!(s.salesRepId || s.isWalkIn);
+    const hadPrice = !!s.basePrice;
+
+    let serviceFix = null, repFix = null;
+    if (!hadService) {
+      const guessed = guessServiceFromTitle(s.car);
+      if (guessed) serviceFix = guessed;
+    }
+    if (!hadRep) {
+      const rep = repFromTitleInitials(db, s.car);
+      if (rep) repFix = rep;
+    }
+
+    if (serviceFix || repFix) {
+      results.preview.push({ id: s.id, car: s.car, serviceFix, repFix: repFix ? repFix.name : null });
+      if (!dryRun) {
+        if (serviceFix) { logAudit(db, req, s, "Service", s.baseService, serviceFix); s.baseService = serviceFix; }
+        if (repFix) { logAudit(db, req, s, "Sales rep", s.salesRepName, repFix.name); s.salesRepId = repFix.id; s.salesRepName = repFix.name; s.isWalkIn = false; }
+      }
+      if (serviceFix) results.fixedService++;
+      if (repFix) results.fixedRep++;
+    }
+
+    if (!hadPrice) results.stillNeedsPrice++;
+    if (!hadService && !serviceFix) results.stillNeedsManualService++;
+    if (!hadRep && !repFix) results.stillNeedsManualRep++;
+  });
+
+  if (!dryRun) saveDB(db);
+  res.json({ ok: true, dryRun, totalJobsChecked: jobs.length, ...results });
+});
+
 app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
@@ -860,6 +994,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
+    photos: s.photos || { before: {}, after: {} },
   })));
 });
 
@@ -870,10 +1005,17 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   // Manual price correction — the price GHL/sync captured isn't always final; a customer
   // can negotiate down after the fact. This flows through to every downstream number
   // automatically (total, commission math), since everything reads from this one field.
-  if (req.body.basePrice !== undefined) sale.basePrice = parseFloat(req.body.basePrice) || 0;
+  if (req.body.basePrice !== undefined) {
+    const newPrice = parseFloat(req.body.basePrice) || 0;
+    logAudit(db, req, sale, "Base price", sale.basePrice, newPrice);
+    sale.basePrice = newPrice;
+  }
   // Which service this actually is — needed for the Window Tint / Ceramic Coating / PPF
   // column split, and previously had no way to set or fix it anywhere in the app.
-  if (req.body.baseService !== undefined) sale.baseService = req.body.baseService;
+  if (req.body.baseService !== undefined) {
+    logAudit(db, req, sale, "Service", sale.baseService, req.body.baseService);
+    sale.baseService = req.body.baseService;
+  }
   if (req.body.status !== undefined) sale.status = req.body.status;
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
   if (req.body.paid !== undefined) {
@@ -900,8 +1042,9 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     sale.managerHelperNames = names.join(", ");
   }
   if (req.body.salesRepId !== undefined) {
-    sale.salesRepId = req.body.salesRepId;
     const rep = db.salesReps.find((r) => r.id === req.body.salesRepId);
+    logAudit(db, req, sale, "Sales rep", sale.salesRepName, rep ? rep.name : "Unassigned");
+    sale.salesRepId = req.body.salesRepId;
     sale.salesRepName = rep ? rep.name : "Unassigned";
     sale.isWalkIn = false;
   }
@@ -1014,6 +1157,7 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       managerHelperNames: s.managerHelperNames || "",
       status: s.status || "pending",
       upsells: resolveUpsellNames((s.upsells || []).filter((u) => u.employeeId === myId), db),
+      photos: s.photos || { before: {}, after: {} },
       // basePrice and total sale $ intentionally NOT sent to employees
     }));
   res.json(jobs);
@@ -1323,6 +1467,9 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
   const salesReps = db.salesReps.map((rep) => {
     const mine = sales.filter((s) => s.salesRepId === rep.id);
     const showed = mine.filter((s) => s.status === "arrived");
+    const noShow = mine.filter((s) => s.status === "no_show");
+    const resolved = showed.length + noShow.length; // excludes still-pending future bookings
+    const noShowRate = resolved > 0 ? (noShow.length / resolved) * 100 : 0;
     const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
     let commission = 0, duringHoursCount = 0, afterHoursCount = 0;
     showed.forEach((s) => {
@@ -1330,7 +1477,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
       commission += c.amount;
       if (c.duringHours) duringHoursCount += 1; else afterHoursCount += 1;
     });
-    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission };
+    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission, noShowCount: noShow.length, noShowRate };
   });
 
   res.json({ shopTotalUpsellRevenue, employees, managers, salesReps });
@@ -1342,6 +1489,12 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
 // "imported" counter just double-counted re-processed records without creating duplicates
 // (the counter increments on every upsert call, including ones that update an existing
 // job rather than creating a new one — so the counter can honestly exceed the real total).
+// Real audit trail for price, service, and sales rep changes - who changed what, when.
+app.get("/api/owner/audit-log", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json((db.auditLog || []).slice(0, 200));
+});
+
 app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
   const db = loadDB();
   const withOppId = db.sales.filter((s) => s.ghlOpportunityId);
@@ -1885,10 +2038,14 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`SBN Autostyling Tracker running on port ${PORT}`);
   // First backup shortly after boot (so you don't wait an hour to confirm it's working),
   // then every hour after that — no manual clicking required.
   setTimeout(runCloudBackup, 15 * 1000);
   setInterval(runCloudBackup, 60 * 60 * 1000);
 });
+// A walk-around video can take a while to upload on a slow shop wifi or mobile connection —
+// Node's default request timeout is too tight for that, so this gives uploads real room.
+server.requestTimeout = 10 * 60 * 1000; // 10 minutes
+server.headersTimeout = 10 * 60 * 1000 + 1000;
