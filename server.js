@@ -13,6 +13,10 @@ if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-too";
+// This same codebase runs as multiple separate deployments, one per shop location — this
+// is the one thing that should differ between them without touching any code. Defaults to
+// West Berlin so the existing NJ deployment keeps working exactly as-is if this is never set.
+const SHOP_LOCATION_LABEL = process.env.SHOP_LOCATION_LABEL || "West Berlin, NJ";
 
 // ---------- tiny JSON "database" ----------
 function loadDB() {
@@ -485,20 +489,20 @@ function requireSales(req, res, next) {
 // ---------- session / login ----------
 app.get("/api/session", (req, res) => {
   const db = loadDB();
-  if (req.auth.role === "owner") return res.json({ role: "owner" });
+  if (req.auth.role === "owner") return res.json({ role: "owner", shopLocation: SHOP_LOCATION_LABEL });
   if (req.auth.role === "manager") {
     const mgr = db.managers.find((m) => m.id === req.auth.id);
-    if (mgr) return res.json({ role: "manager", managerId: mgr.id, name: mgr.name });
+    if (mgr) return res.json({ role: "manager", managerId: mgr.id, name: mgr.name, shopLocation: SHOP_LOCATION_LABEL });
   }
   if (req.auth.role === "employee") {
     const emp = db.employees.find((e) => e.id === req.auth.id);
-    if (emp) return res.json({ role: "employee", employeeId: emp.id, name: emp.name });
+    if (emp) return res.json({ role: "employee", employeeId: emp.id, name: emp.name, shopLocation: SHOP_LOCATION_LABEL });
   }
   if (req.auth.role === "sales") {
     const rep = db.salesReps.find((r) => r.id === req.auth.id);
-    if (rep) return res.json({ role: "sales", salesRepId: rep.id, name: rep.name });
+    if (rep) return res.json({ role: "sales", salesRepId: rep.id, name: rep.name, shopLocation: SHOP_LOCATION_LABEL });
   }
-  return res.json({ role: null, ownerPinSet: !!db.ownerPinHash });
+  return res.json({ role: null, ownerPinSet: !!db.ownerPinHash, shopLocation: SHOP_LOCATION_LABEL });
 });
 
 app.post("/api/setup/owner-pin", (req, res) => {
