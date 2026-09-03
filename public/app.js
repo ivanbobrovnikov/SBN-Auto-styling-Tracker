@@ -157,7 +157,7 @@ function render() {
     el("img", { class: "logo", src: "/logo.png", alt: "SBN Auto Styling" }),
     el("div", { style: "flex:1;min-width:0" }, [
       el("div", { class: "title oswald", text: "SBN Autostyling Tracker" }),
-      el("div", { class: "subtitle", text: "Window tint · PPF · Ceramic coating — West Berlin, NJ" }),
+      el("div", { class: "subtitle", text: `Window tint · PPF · Ceramic coating — ${session.shopLocation || ""}` }),
     ]),
     el("div", { style: "text-align:right;flex-shrink:0" }, [
       el("div", { style: "font-size:12.5px;font-weight:500", text: session.name || "Owner" }),
