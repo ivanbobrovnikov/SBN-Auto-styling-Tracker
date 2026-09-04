@@ -21,7 +21,7 @@ const SHOP_LOCATION_LABEL = process.env.SHOP_LOCATION_LABEL || "West Berlin, NJ"
 // ---------- tiny JSON "database" ----------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const fresh = { employees: [], managers: [], salesReps: [], sales: [], attendance: [], auditLog: [], ownerPinHash: null };
+    const fresh = { employees: [], managers: [], salesReps: [], sales: [], attendance: [], auditLog: [], cashEntries: [], ownerPinHash: null };
     fs.writeFileSync(DB_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
@@ -30,6 +30,7 @@ function loadDB() {
   if (!db.salesReps) db.salesReps = [];
   if (!db.attendance) db.attendance = [];
   if (!db.auditLog) db.auditLog = [];
+  if (!db.cashEntries) db.cashEntries = [];
   return db;
 }
 function saveDB(db) {
@@ -565,13 +566,13 @@ app.post("/api/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- employees (owner only to manage; employee can read own record) ----------
-app.get("/api/employees", requireOwner, (req, res) => {
+// ---------- employees (owner or manager can manage; employee can read own record) ----------
+app.get("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
   res.json(db.employees.map((e) => ({ id: e.id, name: e.name, commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0 })));
 });
 
-app.post("/api/employees", requireOwner, (req, res) => {
+app.post("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
   const { name, commissionRate, walkInCommissionRate, pin } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
@@ -581,7 +582,7 @@ app.post("/api/employees", requireOwner, (req, res) => {
   res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate });
 });
 
-app.patch("/api/employees/:id", requireOwner, (req, res) => {
+app.patch("/api/employees/:id", requireManager, (req, res) => {
   const db = loadDB();
   const emp = db.employees.find((e) => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: "Not found." });
@@ -593,7 +594,7 @@ app.patch("/api/employees/:id", requireOwner, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete("/api/employees/:id", requireOwner, (req, res) => {
+app.delete("/api/employees/:id", requireManager, (req, res) => {
   const db = loadDB();
   db.employees = db.employees.filter((e) => e.id !== req.params.id);
   saveDB(db);
@@ -892,6 +893,118 @@ app.get("/api/manager/salesreps-list", requireManager, (req, res) => {
 });
 
 // ---------- attendance — who showed up, who didn't, who worked a half day ----------
+// ---------- cash and expense tracker ----------
+// Managers log entries but only ever see their OWN log — never shop-wide totals. Full
+// visibility and editing across everyone belongs to the owner only. This is a deliberate
+// boundary, not an oversight: managers track what they spend, they don't see the till.
+const CASH_CATEGORIES = ["Supplies", "Utilities", "Marketing", "Payroll Advance", "Other"];
+
+function actorInfo(req, db) {
+  if (req.auth.role === "owner") return { type: "owner", id: "owner", name: "Owner" };
+  const mgr = db.managers.find((m) => m.id === req.auth.id);
+  return { type: "manager", id: req.auth.id, name: mgr ? mgr.name : "Removed manager" };
+}
+
+app.post("/api/manager/cash-entries", requireManager, (req, res) => {
+  const db = loadDB();
+  const { type, amount, category, note, isOnline } = req.body;
+  if (!["cashIn", "cashOut", "cardExpense"].includes(type)) return res.status(400).json({ error: "Invalid entry type." });
+  const amt = parseFloat(amount);
+  if (!amt || amt <= 0) return res.status(400).json({ error: "A real amount is required." });
+  const actor = actorInfo(req, db);
+  const entry = {
+    id: newId(), type, amount: amt, category: category && CASH_CATEGORIES.includes(category) ? category : "Other",
+    note: (note || "").trim(), isOnline: !!isOnline, receiptPhoto: null,
+    enteredByType: actor.type, enteredById: actor.id, enteredByName: actor.name,
+    timestamp: new Date().toISOString(),
+  };
+  db.cashEntries.unshift(entry);
+  saveDB(db);
+  res.json(entry);
+});
+
+// A manager's own log only — never shop-wide totals. The owner sees everyone through the
+// separate /api/owner/cash-entries endpoint below.
+app.get("/api/my/cash-entries", requireManager, (req, res) => {
+  const db = loadDB();
+  const actor = actorInfo(req, db);
+  const mine = db.cashEntries.filter((e) => e.enteredByType === actor.type && e.enteredById === actor.id);
+  res.json(mine.slice(0, 50));
+});
+
+app.patch("/api/manager/cash-entries/:id", requireManager, (req, res) => {
+  const db = loadDB();
+  const entry = db.cashEntries.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: "Not found." });
+  const actor = actorInfo(req, db);
+  // A manager can only fix their own entries; the owner can fix anyone's.
+  if (actor.type !== "owner" && !(entry.enteredByType === actor.type && entry.enteredById === actor.id)) {
+    return res.status(403).json({ error: "You can only edit your own entries." });
+  }
+  if (req.body.amount !== undefined) entry.amount = parseFloat(req.body.amount) || entry.amount;
+  if (req.body.category !== undefined && CASH_CATEGORIES.includes(req.body.category)) entry.category = req.body.category;
+  if (req.body.note !== undefined) entry.note = req.body.note.trim();
+  if (req.body.isOnline !== undefined) entry.isOnline = !!req.body.isOnline;
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+app.delete("/api/manager/cash-entries/:id", requireManager, (req, res) => {
+  const db = loadDB();
+  const entry = db.cashEntries.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: "Not found." });
+  const actor = actorInfo(req, db);
+  if (actor.type !== "owner" && !(entry.enteredByType === actor.type && entry.enteredById === actor.id)) {
+    return res.status(403).json({ error: "You can only delete your own entries." });
+  }
+  if (entry.receiptPhoto) {
+    const p = path.join(PHOTOS_DIR, entry.receiptPhoto);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  }
+  db.cashEntries = db.cashEntries.filter((e) => e.id !== req.params.id);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+const receiptUpload = multer({ storage: photoStorage, limits: { fileSize: 15 * 1024 * 1024 }, fileFilter: (req, file, cb) => {
+  if (!/^image\//.test(file.mimetype)) return cb(new Error("Receipts must be an image."));
+  cb(null, true);
+} });
+app.post("/api/manager/cash-entries/:id/receipt", requireManager, receiptUpload.single("receipt"), (req, res) => {
+  const db = loadDB();
+  const entry = db.cashEntries.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: "Not found." });
+  const actor = actorInfo(req, db);
+  if (actor.type !== "owner" && !(entry.enteredByType === actor.type && entry.enteredById === actor.id)) {
+    return res.status(403).json({ error: "You can only attach a receipt to your own entry." });
+  }
+  if (!req.file) return res.status(400).json({ error: "No receipt file received." });
+  if (entry.receiptPhoto) {
+    const oldPath = path.join(PHOTOS_DIR, entry.receiptPhoto);
+    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+  }
+  entry.receiptPhoto = req.file.filename;
+  saveDB(db);
+  res.json({ ok: true, filename: req.file.filename });
+});
+
+// Full visibility, owner-only — every entry from every manager, plus real totals.
+app.get("/api/owner/cash-entries", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const entries = db.cashEntries.filter((e) => e.timestamp >= start && e.timestamp <= end);
+  const totalCashIn = entries.filter((e) => e.type === "cashIn").reduce((a, e) => a + e.amount, 0);
+  const totalCashOut = entries.filter((e) => e.type === "cashOut").reduce((a, e) => a + e.amount, 0);
+  const totalCardExpense = entries.filter((e) => e.type === "cardExpense").reduce((a, e) => a + e.amount, 0);
+  const byCategory = {};
+  entries.filter((e) => e.type !== "cashIn").forEach((e) => { byCategory[e.category] = (byCategory[e.category] || 0) + e.amount; });
+  res.json({
+    entries: entries.slice(0, 200),
+    totalCashIn, totalCashOut, totalCardExpense, netCash: totalCashIn - totalCashOut,
+    byCategory: Object.entries(byCategory).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total),
+  });
+});
+
 app.get("/api/manager/attendance", requireManager, (req, res) => {
   const db = loadDB();
   const date = req.query.date || new Date().toISOString().slice(0, 10);
