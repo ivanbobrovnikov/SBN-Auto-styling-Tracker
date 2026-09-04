@@ -1877,6 +1877,18 @@ async function renderManagerJobs(content) {
           ]),
         ]),
         el("div", { style: "margin-bottom:10px" }, [
+          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "CAR / TITLE — GHL doesn't tell us if this gets edited after booking, fix it here if it changes" }),
+          (() => {
+            const carInput = el("input", { value: job.car || "", style: "max-width:280px" });
+            const saveBtn = el("button", { class: "ghost", style: "margin-left:6px", onclick: async () => {
+              if (!carInput.value.trim()) return;
+              await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ car: carInput.value }) });
+              load();
+            }, text: "Save" });
+            return el("div", { style: "display:flex;align-items:center" }, [carInput, saveBtn]);
+          })(),
+        ]),
+        el("div", { style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `SERVICE (currently: ${job.baseService || "not set"})` }),
           el("select", {
             style: "max-width:200px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
