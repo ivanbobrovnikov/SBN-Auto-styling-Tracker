@@ -227,10 +227,10 @@ const TAB_ICONS = {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
-    allTabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-performance", "My performance"]];
+    allTabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"]];
     primaryKeys = ["manager-jobs", "owner-attendance", "owner-search", "manager-performance"];
   } else if (session.role === "sales") {
     allTabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
@@ -453,6 +453,8 @@ async function renderManagerTabContent(content) {
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);
   if (currentTab === "owner-cleanup") return renderCleanup(content);
+  if (currentTab === "owner-team") return renderOwnerTeam(content);
+  if (currentTab === "manager-cash") return renderCashLog(content);
   if (currentTab === "manager-performance") return renderManagerPerformance(content);
   return renderManagerJobs(content);
 }
@@ -468,6 +470,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-serviced") return renderServicedCars(content);
   if (currentTab === "owner-audit") return renderCommissionAudit(content);
   if (currentTab === "owner-edit-history") return renderEditHistory(content);
+  if (currentTab === "owner-cash") return renderOwnerCash(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
@@ -932,6 +935,152 @@ function renderYearGrid(sales, yearStr) {
 // Edit History — who changed a price, service, or sales rep, and when. Every entry is
 // server-recorded at the moment the change happens; nothing here can be altered after
 // the fact from the client side.
+// Manager Cash Log — log entries, see only your own history. Never shows shop-wide
+// totals; that's the owner's view specifically, on purpose.
+async function renderCashLog(content) {
+  const CATEGORIES = ["Supplies", "Utilities", "Marketing", "Payroll Advance", "Other"];
+  const listEl = el("div", { style: "margin-top:16px" });
+  let selectedType = "cashOut";
+
+  const amountInput = el("input", { type: "number", placeholder: "0.00", style: "max-width:140px" });
+  const categorySelect = el("select", {}, CATEGORIES.map((c) => el("option", { value: c, text: c })));
+  const noteInput = el("input", { placeholder: "What was it for?", style: "width:100%" });
+  const onlineCheck = el("input", { type: "checkbox" });
+  const receiptInput = el("input", { type: "file", accept: "image/*", style: "display:none" });
+  const receiptLabel = el("span", { class: "muted", style: "font-size:12px", text: "No receipt attached" });
+  let pendingReceiptFile = null;
+  receiptInput.addEventListener("change", () => {
+    pendingReceiptFile = receiptInput.files[0] || null;
+    receiptLabel.textContent = pendingReceiptFile ? pendingReceiptFile.name : "No receipt attached";
+  });
+
+  const typeBtns = {};
+  function typeBtn(value, label) {
+    const btn = el("button", {
+      class: "tab-btn" + (value === selectedType ? " active" : ""),
+      style: "flex:1",
+      onclick: () => {
+        selectedType = value;
+        Object.values(typeBtns).forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+      },
+      text: label,
+    });
+    typeBtns[value] = btn;
+    return btn;
+  }
+
+  async function loadMine() {
+    const mine = await api("/api/my/cash-entries");
+    listEl.innerHTML = "";
+    listEl.appendChild(el("div", { class: "muted", style: "margin-bottom:8px", text: "YOUR RECENT ENTRIES" }));
+    if (mine.length === 0) { listEl.appendChild(el("div", { class: "muted", text: "Nothing logged yet." })); return; }
+    mine.forEach((e) => {
+      const typeLabel = e.type === "cashIn" ? "Cash in" : e.type === "cashOut" ? "Cash out" : "Card expense";
+      const typeColor = e.type === "cashIn" ? "var(--green)" : "var(--red)";
+      listEl.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: `${e.category}${e.isOnline ? " · Online" : ""}` }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: e.note || "(no description)" }),
+            el("div", { class: "muted", style: "font-size:11px", text: formatDateTime(e.timestamp) }),
+          ]),
+          el("div", { style: "text-align:right" }, [
+            el("div", { style: `color:${typeColor};font-size:12px;font-weight:600`, text: typeLabel }),
+            el("div", { class: "mono", style: "font-weight:600", text: money(e.amount) }),
+          ]),
+        ]),
+        el("div", { style: "display:flex;gap:8px;margin-top:6px;justify-content:flex-end" }, [
+          e.receiptPhoto ? el("a", { href: `/api/photos/${e.receiptPhoto}`, target: "_blank", class: "ghost", style: "font-size:10px;padding:3px 7px;text-decoration:none", text: "View receipt" }) : null,
+          el("button", { class: "icon-danger", style: "font-size:10px;padding:3px 7px", onclick: async () => { await api(`/api/manager/cash-entries/${e.id}`, { method: "DELETE" }); loadMine(); }, text: "Delete" }),
+        ]),
+      ]));
+    });
+  }
+
+  content.appendChild(el("div", { class: "card" }, [
+    el("div", { style: "font-weight:500;margin-bottom:10px", text: "Log an expense" }),
+    el("div", { style: "display:flex;gap:8px;margin-bottom:12px" }, [
+      typeBtn("cashOut", "Cash out"), typeBtn("cardExpense", "Card expense"), typeBtn("cashIn", "Cash in"),
+    ]),
+    el("div", { class: "field" }, [el("label", { text: "Amount" }), amountInput]),
+    el("div", { class: "field" }, [el("label", { text: "Category" }), categorySelect]),
+    el("div", { class: "field" }, [el("label", { text: "What was it for" }), noteInput]),
+    el("div", { style: "display:flex;align-items:center;gap:8px;margin:8px 0" }, [onlineCheck, el("span", { style: "font-size:13px", text: "Bought online" })]),
+    el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:12px" }, [
+      el("button", { class: "ghost", onclick: () => receiptInput.click(), text: "Attach receipt" }),
+      receiptLabel, receiptInput,
+    ]),
+    el("button", { class: "primary", onclick: async () => {
+      if (!amountInput.value || parseFloat(amountInput.value) <= 0) { alert("Enter a real amount first."); return; }
+      const entry = await api("/api/manager/cash-entries", { method: "POST", body: JSON.stringify({
+        type: selectedType, amount: amountInput.value, category: categorySelect.value, note: noteInput.value, isOnline: onlineCheck.checked,
+      }) });
+      if (pendingReceiptFile) {
+        const formData = new FormData();
+        formData.append("receipt", pendingReceiptFile);
+        await fetch(`/api/manager/cash-entries/${entry.id}/receipt`, { method: "POST", body: formData, credentials: "same-origin" });
+      }
+      amountInput.value = ""; noteInput.value = ""; onlineCheck.checked = false; pendingReceiptFile = null; receiptLabel.textContent = "No receipt attached";
+      loadMine();
+    }, text: "Save entry" }),
+  ]));
+  content.appendChild(listEl);
+  await loadMine();
+}
+
+// Owner Cash & Expenses — full visibility across every manager, real totals, editable.
+async function renderOwnerCash(content) {
+  const body = el("div");
+  const picker = renderPeriodPicker((params) => load(params), "month");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const d = await api(`/api/owner/cash-entries?${qs}`);
+    body.innerHTML = "";
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash in" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.totalCashIn) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash out" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCashOut) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Card expenses" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCardExpense) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Net cash" }), el("div", { class: "metric-value mono", style: `color:${d.netCash >= 0 ? "var(--green)" : "var(--red)"}`, text: money(d.netCash) })]),
+    ]));
+    if (d.byCategory.length) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "BY CATEGORY" }),
+        ...d.byCategory.map((c) => el("div", { class: "row", style: "font-size:13px;margin-bottom:4px" }, [
+          el("span", { text: c.category }), el("span", { class: "mono", text: money(c.total) }),
+        ])),
+      ]));
+    }
+    body.appendChild(el("div", { class: "muted", style: "margin:14px 0 8px", text: "ALL ENTRIES" }));
+    if (d.entries.length === 0) body.appendChild(el("div", { class: "muted", text: "Nothing logged in this period." }));
+    d.entries.forEach((e) => {
+      const typeLabel = e.type === "cashIn" ? "Cash in" : e.type === "cashOut" ? "Cash out" : "Card expense";
+      const typeColor = e.type === "cashIn" ? "var(--green)" : "var(--red)";
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: `${e.category}${e.isOnline ? " · Online" : ""}` }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: e.note || "(no description)" }),
+            el("div", { class: "muted", style: "font-size:11px", text: `${e.enteredByName} · ${formatDateTime(e.timestamp)}` }),
+          ]),
+          el("div", { style: "text-align:right" }, [
+            el("div", { style: `color:${typeColor};font-size:12px;font-weight:600`, text: typeLabel }),
+            el("div", { class: "mono", style: "font-weight:600", text: money(e.amount) }),
+          ]),
+        ]),
+        el("div", { style: "display:flex;gap:8px;margin-top:6px;justify-content:flex-end" }, [
+          e.receiptPhoto ? el("a", { href: `/api/photos/${e.receiptPhoto}`, target: "_blank", class: "ghost", style: "font-size:10px;padding:3px 7px;text-decoration:none", text: "View receipt" }) : null,
+          el("button", { class: "icon-danger", style: "font-size:10px;padding:3px 7px", onclick: async () => { await api(`/api/manager/cash-entries/${e.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
+}
+
 async function renderEditHistory(content) {
   const body = el("div");
   async function load() {
@@ -1246,28 +1395,54 @@ async function renderOwnerTeam(content) {
 async function renderSalesSchedule(content) {
   const body = el("div");
   const nav = renderDayNav((params) => load(params));
+  const searchInput = el("input", { placeholder: "Search by car or customer name...", style: "max-width:320px" });
+  let searchMode = false;
+
+  function renderJobRow(job) {
+    const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : "Upcoming";
+    const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : "var(--sub)";
+    return el("div", { class: "card row" }, [
+      el("div", {}, [
+        el("div", { style: "font-weight:500", text: job.car }),
+        el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.customerName || ""} · ${job.baseService || ""}` }),
+      ]),
+      el("div", { style: "text-align:right" }, [
+        el("div", { class: "mono", style: "color:var(--amber)", text: money(job.basePrice) }),
+        el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
+      ]),
+    ]);
+  }
+
+  async function runSearch() {
+    const q = searchInput.value.trim().toLowerCase();
+    body.innerHTML = "";
+    if (!q) { searchMode = false; nav.el.style.display = ""; return load(); }
+    searchMode = true;
+    nav.el.style.display = "none";
+    // Searches the rep's whole history, not just one day - pulls a wide year-by-year net.
+    const thisYear = new Date().getFullYear();
+    const allJobs = [];
+    for (const y of [thisYear - 1, thisYear, thisYear + 1]) {
+      const jobs = await api(`/api/my/sales-schedule?period=year&date=${y}-01-01`);
+      allJobs.push(...jobs);
+    }
+    const matches = allJobs.filter((j) => (j.car || "").toLowerCase().includes(q) || (j.customerName || "").toLowerCase().includes(q));
+    if (matches.length === 0) { body.appendChild(el("div", { class: "muted", text: "No matching bookings found." })); return; }
+    matches.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => body.appendChild(renderJobRow(job)));
+  }
+  searchInput.addEventListener("input", () => { clearTimeout(searchInput._t); searchInput._t = setTimeout(runSearch, 300); });
+
   async function load(params) {
+    if (searchMode) return; // search results already rendered - don't overwrite with the day view
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/my/sales-schedule?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No bookings on this day." })); return; }
-    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
-      const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : "Upcoming";
-      const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : "var(--sub)";
-      body.appendChild(el("div", { class: "card row" }, [
-        el("div", {}, [
-          el("div", { style: "font-weight:500", text: job.car }),
-          el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.customerName || ""} · ${job.baseService || ""}` }),
-        ]),
-        el("div", { style: "text-align:right" }, [
-          el("div", { class: "mono", style: "color:var(--amber)", text: money(job.basePrice) }),
-          el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
-        ]),
-      ]));
-    });
+    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => body.appendChild(renderJobRow(job)));
   }
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Status here is set by your manager — this is a read-only view of what you booked and whether it showed." }));
+  content.appendChild(el("div", { class: "field", style: "margin-bottom:10px" }, [el("label", { text: "Search all your bookings" }), searchInput]));
   content.appendChild(nav.el);
   content.appendChild(body);
   await load();
@@ -1753,7 +1928,29 @@ function makeServiceColumns() {
     "Ceramic Coating": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "CERAMIC COATING" })]),
     "PPF": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "PPF / NEEDS SERVICE SET" })]),
   };
-  const wrap = el("div", { style: "display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start" }, Object.values(cols));
+  const colsWrap = el("div", { style: "display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start" }, Object.values(cols));
+
+  // On a phone, three columns stacked full-width one after another is still effectively
+  // one long scroll — this lets you filter down to just one service at a time instead.
+  const tabs = ["All", "Window Tint", "Ceramic Coating", "PPF"];
+  const tabBar = el("div", { style: "display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap" });
+  function applyFilter(active) {
+    Object.entries(cols).forEach(([name, colEl]) => {
+      const show = active === "All" || active === name;
+      colEl.style.display = show ? "" : "none";
+      colEl.style.minWidth = active === "All" ? "280px" : "0";
+    });
+  }
+  tabs.forEach((t) => {
+    const btn = el("button", { class: "tab-btn" + (t === "All" ? " active" : ""), text: t, onclick: () => {
+      Array.from(tabBar.children).forEach((c) => c.classList.remove("active"));
+      btn.classList.add("active");
+      applyFilter(t);
+    } });
+    tabBar.appendChild(btn);
+  });
+
+  const wrap = el("div", {}, [tabBar, colsWrap]);
   return { cols, wrap };
 }
 
