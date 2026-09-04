@@ -1039,6 +1039,13 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     logAudit(db, req, sale, "Service", sale.baseService, req.body.baseService);
     sale.baseService = req.body.baseService;
   }
+  // GHL doesn't reliably notify us when someone just edits an appointment's title after
+  // booking (no trigger fires for a plain edit) — this makes the manual fix a quick inline
+  // correction instead of something requiring a database edit.
+  if (req.body.car !== undefined && req.body.car.trim()) {
+    logAudit(db, req, sale, "Car/Title", sale.car, req.body.car.trim());
+    sale.car = req.body.car.trim();
+  }
   if (req.body.status !== undefined) sale.status = req.body.status;
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
   if (req.body.paid !== undefined) {
