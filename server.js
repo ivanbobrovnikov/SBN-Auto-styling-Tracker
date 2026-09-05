@@ -216,10 +216,11 @@ function normalizeDate(input) {
   // GHL's own API (used by the bulk import) sends dates like "2026-09-03 09:00:00" — no
   // timezone marker, and not the same shape as the human-readable format below. Without
   // this, a real 9am Eastern appointment gets treated as 9am UTC and displays as 5am
-  // Eastern — exactly the bug this catches.
-  const plainFormat = !hasExplicitOffset && String(input).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/);
+  // Eastern — exactly the bug this catches. Seconds are optional here too, since a
+  // datetime-local input field (used for manual date/time correction) never includes them.
+  const plainFormat = !hasExplicitOffset && String(input).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (plainFormat) {
-    const d = easternWallClockToUTC(parseInt(plainFormat[1], 10), parseInt(plainFormat[2], 10) - 1, parseInt(plainFormat[3], 10), parseInt(plainFormat[4], 10), parseInt(plainFormat[5], 10), parseInt(plainFormat[6], 10));
+    const d = easternWallClockToUTC(parseInt(plainFormat[1], 10), parseInt(plainFormat[2], 10) - 1, parseInt(plainFormat[3], 10), parseInt(plainFormat[4], 10), parseInt(plainFormat[5], 10), parseInt(plainFormat[6] || "0", 10));
     if (!isNaN(d.getTime())) return d.toISOString();
   }
 
@@ -1064,13 +1065,13 @@ app.get("/api/owner/attendance-summary", requireOwner, (req, res) => {
 // this is the cleanup tool for catching up jobs that came in before a fix was live.
 app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   const db = loadDB();
-  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn) || !s.baseService));
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
-    salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
+    salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
-    basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn, missingService: !s.baseService,
+    basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
@@ -1159,6 +1160,16 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     logAudit(db, req, sale, "Car/Title", sale.car, req.body.car.trim());
     sale.car = req.body.car.trim();
   }
+  // Manual date/time correction — for the rare case an appointment's real time needs fixing
+  // directly (a reschedule that didn't sync correctly, a data entry mistake, etc). Uses the
+  // same wall-clock-to-UTC conversion as everything else, so this stays correct across DST.
+  if (req.body.date !== undefined && req.body.date) {
+    const normalized = normalizeDate(req.body.date);
+    if (normalized) {
+      logAudit(db, req, sale, "Date/Time", sale.date, normalized);
+      sale.date = normalized;
+    }
+  }
   if (req.body.status !== undefined) sale.status = req.body.status;
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
   if (req.body.paid !== undefined) {
@@ -1190,13 +1201,25 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     sale.salesRepId = req.body.salesRepId;
     sale.salesRepName = rep ? rep.name : "Unassigned";
     sale.isWalkIn = false;
+    sale.isOnlineBooking = false;
   }
   // Manual override — mark any job as a walk-in/staff-booked appointment, no sales rep
   // commission applies regardless of what GHL says.
   if (req.body.isWalkIn !== undefined) {
     sale.isWalkIn = !!req.body.isWalkIn;
-    if (sale.isWalkIn) { sale.salesRepId = null; sale.salesRepName = "Walk-in (booked by staff)"; }
+    if (sale.isWalkIn) { sale.salesRepId = null; sale.salesRepName = "Walk-in (booked by staff)"; sale.isOnlineBooking = false; }
     else { sale.walkInClosedByType = null; sale.walkInClosedById = null; sale.walkInClosedByName = null; }
+  }
+  // A genuine website self-booking — nobody actually closed this, so it correctly gets no
+  // sales rep credit and no commission, but it shouldn't sit in Cleanup forever looking
+  // like something's missing. This is its own real, resolved category, not an error state.
+  if (req.body.isOnlineBooking !== undefined) {
+    sale.isOnlineBooking = !!req.body.isOnlineBooking;
+    if (sale.isOnlineBooking) {
+      logAudit(db, req, sale, "Sales rep", sale.salesRepName, "Online Booking");
+      sale.salesRepId = null; sale.salesRepName = "Online Booking"; sale.isWalkIn = false;
+      sale.walkInClosedByType = null; sale.walkInClosedById = null; sale.walkInClosedByName = null;
+    }
   }
   // Assign or change who actually closed a walk-in — attribution/tracking only, not tied
   // to any commission calculation.
@@ -2177,6 +2200,10 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   const realizedSales = sales.filter((s) => s.paid);
   const totalRevenue = realizedSales.reduce((a, s) => a + saleTotal(s), 0);
   const totalUpsell = realizedSales.reduce((a, s) => a + saleUpsellTotal(s), 0);
+  // Walk-in revenue — how much of that realized total came from walk-ins specifically,
+  // same paid basis as Total Revenue so the numbers are a genuine breakdown, not a
+  // different measurement.
+  const walkInRevenue = realizedSales.filter((s) => s.isWalkIn).reduce((a, s) => a + saleTotal(s), 0);
   // "Cars serviced" means the job is actually done — a manager marked it Service Complete.
   // Everything still on the schedule (booked, arrived-but-not-done, etc.) doesn't count yet.
   const completedSales = sales.filter((s) => s.completed);
@@ -2227,7 +2254,7 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   Object.values(grouped).sort((a, b) => b.revenue - a.revenue).forEach((r) => leaderboard.push(r));
 
   res.json({
-    totalRevenue, totalUpsellRevenue: totalUpsell,
+    totalRevenue, totalUpsellRevenue: totalUpsell, walkInRevenue,
     upsellPercentOfRevenue: totalRevenue ? (totalUpsell / totalRevenue) * 100 : 0,
     carCount, attachRate, perEmployee, perManager, perSalesRep, leaderboard,
     bookedNotShownValue, bookedNotShownCount, shownUpValue, shownUpCount,
