@@ -633,6 +633,7 @@ function openPrintableReport(title, s, periodLabel) {
       <div class="metrics">
         <div class="metric"><div class="metric-label">Total revenue</div><div class="metric-value">${money(s.totalRevenue)}</div></div>
         <div class="metric"><div class="metric-label">Total upsell revenue</div><div class="metric-value">${money(s.totalUpsellRevenue)}</div></div>
+        <div class="metric"><div class="metric-label">Walk-in revenue</div><div class="metric-value">${money(s.walkInRevenue)}</div></div>
         <div class="metric"><div class="metric-label">Upsell % of revenue</div><div class="metric-value">${pct(s.upsellPercentOfRevenue)}</div></div>
         <div class="metric"><div class="metric-label">Cars serviced</div><div class="metric-value">${s.carCount}</div></div>
       </div>
@@ -725,6 +726,7 @@ function openPrintableReport(title, s, periodLabel) {
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total revenue" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(s.totalRevenue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total upsell revenue" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(s.totalUpsellRevenue) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Walk-in revenue" }), el("div", { class: "metric-value mono", style: "color:var(--sub)", text: money(s.walkInRevenue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Upsell % of revenue" }), el("div", { class: "metric-value mono", text: pct(s.upsellPercentOfRevenue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Shop attach rate" }), el("div", { class: "metric-value mono", text: pct(s.attachRate) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars serviced" }), el("div", { class: "metric-value mono", text: s.carCount })]),
@@ -1304,6 +1306,41 @@ async function renderOwnerSales(content) {
         photoToggleBtn.textContent = showing ? "📷 Photos" : "📷 Hide";
       }, text: "📷 Photos" });
 
+      const editToggleWrap = el("div", { style: "display:none;margin-top:8px" });
+      const editToggleBtn = el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => {
+        const showing = editToggleWrap.style.display !== "none";
+        editToggleWrap.style.display = showing ? "none" : "block";
+        editToggleBtn.textContent = showing ? "✎ Edit" : "✎ Hide";
+      }, text: "✎ Edit" });
+      (() => {
+        const d2 = new Date(s.date);
+        const pad = (n) => String(n).padStart(2, "0");
+        const localValue = isNaN(d2.getTime()) ? "" : `${d2.getFullYear()}-${pad(d2.getMonth() + 1)}-${pad(d2.getDate())}T${pad(d2.getHours())}:${pad(d2.getMinutes())}`;
+        const dtInput = el("input", { type: "datetime-local", value: localValue, style: "max-width:200px" });
+        const repSelect = el("select", { style: "max-width:200px" }, [
+          el("option", { value: "", text: "Assign a sales rep..." }),
+          ...salesRepsList.map((r) => el("option", { value: r.id, text: r.name, ...(s.salesRepId === r.id ? { selected: "true" } : {}) })),
+          el("option", { value: "__online__", text: "Online Booking (website, no rep)", ...(s.isOnlineBooking ? { selected: "true" } : {}) }),
+        ]);
+        editToggleWrap.appendChild(el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
+          el("div", { class: "muted", style: "font-size:11px;margin-bottom:4px", text: "Date / time" }),
+          el("div", { style: "display:flex;gap:6px;align-items:center;margin-bottom:10px" }, [
+            dtInput,
+            el("button", { class: "ghost", onclick: async () => { if (!dtInput.value) return; await api(`/api/manager/jobs/${s.id}`, { method: "PATCH", body: JSON.stringify({ date: dtInput.value }) }); load(); }, text: "Save" }),
+          ]),
+          el("div", { class: "muted", style: "font-size:11px;margin-bottom:4px", text: `Sales rep (currently: ${s.salesRepName || "Unassigned"})` }),
+          el("div", {}, [
+            repSelect,
+            (() => { repSelect.addEventListener("change", async (e) => {
+              if (!e.target.value) return;
+              if (e.target.value === "__online__") { await api(`/api/manager/jobs/${s.id}`, { method: "PATCH", body: JSON.stringify({ isOnlineBooking: true }) }); load(); return; }
+              await api(`/api/manager/jobs/${s.id}`, { method: "PATCH", body: JSON.stringify({ salesRepId: e.target.value }) });
+              load();
+            }); return null; })(),
+          ]),
+        ]));
+      })();
+
       (dayCols ? dayCols[serviceColumnFor(s.baseService)] : body).appendChild(el("div", { class: "card" }, [
         el("div", { style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
         el("div", { style: "min-width:64px;text-align:center;background:var(--cardAlt);border-radius:7px;padding:8px 4px;flex-shrink:0" }, [
@@ -1322,13 +1359,14 @@ async function renderOwnerSales(content) {
           el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px;font-weight:600;margin-top:2px`, text: cancelled ? "—" : `Total: ${money(s.total)}` }),
           s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : "Unpaid" }),
           el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end" }, [
-            photoToggleBtn,
+            photoToggleBtn, editToggleBtn,
             el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => navigator.clipboard.writeText(s.id), text: "Copy ID" }),
             el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${s.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
           ]),
         ]),
         ]),
         photoToggleWrap,
+        editToggleWrap,
       ]));
       photoToggleWrap.appendChild(renderPhotoGrid(s, load));
     });
@@ -2103,17 +2141,36 @@ async function renderManagerJobs(content) {
         ]),
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
         el("div", { style: "margin-bottom:10px" }, [
+          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "DATE / TIME — for the rare case it needs a manual fix" }),
+          (() => {
+            const dt = new Date(job.date);
+            const pad = (n) => String(n).padStart(2, "0");
+            const localValue = isNaN(dt.getTime()) ? "" : `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+            const dtInput = el("input", { type: "datetime-local", value: localValue, style: "max-width:220px" });
+            return el("div", { style: "display:flex;align-items:center;gap:6px" }, [
+              dtInput,
+              el("button", { class: "ghost", onclick: async () => {
+                if (!dtInput.value) return;
+                await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ date: dtInput.value }) });
+                load();
+              }, text: "Save" }),
+            ]);
+          })(),
+        ]),
+        el("div", { style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `SALES REP (currently: ${job.salesRepName})` }),
           el("select", {
             style: "max-width:220px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
             onchange: async (e) => {
               if (!e.target.value) return;
+              if (e.target.value === "__online__") { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ isOnlineBooking: true }) }); load(); return; }
               await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ salesRepId: e.target.value }) });
               load();
             },
           }, [
             el("option", { value: "", text: "Assign a sales rep..." }),
             ...salesRepsList.map((r) => el("option", { value: r.id, text: r.name, ...(job.salesRepId === r.id ? { selected: "true" } : {}) })),
+            el("option", { value: "__online__", text: "Online Booking (website, no rep)", ...(job.isOnlineBooking ? { selected: "true" } : {}) }),
           ]),
         ]),
         el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
