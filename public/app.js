@@ -310,15 +310,17 @@ async function renderSchedule(content) {
       ));
       const upsellForm = renderUpsellForm(job.id, () => load());
       const photoGrid = renderPhotoGrid(job, () => load());
-      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card" }, [
+      const { cardStyle, badge } = cancelledTreatment(job.status);
+      const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : "Upcoming";
+      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card", style: cardStyle }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", {}, [
-            el("div", { style: "font-weight:500", text: job.car }),
+            el("div", { style: "font-weight:500" }, [el("span", { text: job.car }), badge]),
             el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || "no service set"}` }),
             (job.customerName || job.customerPhone) ? el("div", { class: "muted", text: `${job.customerName || ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }) : null,
             el("div", { class: "muted", text: `Worked by: ${job.employeeNames}` }),
           ]),
-          el("div", { class: "muted", text: job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : "Upcoming" }),
+          el("div", { style: "text-decoration:none", class: "muted", text: statusLabel }),
         ]),
         el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [upsellList, upsellForm]),
         photoGrid,
@@ -493,7 +495,7 @@ async function renderOwnerPayroll(content) {
   const payrollSalesReps = await api("/api/salesreps");
 
   function personCard(p, subtitle) {
-    const upsellRows = (p.individualUpsells || []).length
+    const rowsList = (p.individualUpsells || []).length
       ? p.individualUpsells.map((u) => {
           const nameInput = el("input", { value: u.name, style: "max-width:130px;font-size:12px" });
           const priceInput = el("input", { type: "number", value: u.price, style: "max-width:70px;font-size:12px" });
@@ -528,13 +530,25 @@ async function renderOwnerPayroll(content) {
         })
       : [el("div", { class: "muted", style: "font-size:12.5px", text: "No upsells logged in this period." })];
 
+    const count = (p.individualUpsells || []).length;
+    const rowsWrap = el("div", { style: "display:none;padding-top:8px" }, rowsList);
+    const toggleBtn = el("button", {
+      class: "ghost", style: "width:100%;text-align:left;font-size:12.5px", onclick: () => {
+        const showing = rowsWrap.style.display !== "none";
+        rowsWrap.style.display = showing ? "none" : "block";
+        toggleBtn.textContent = showing ? `▸ ${count} upsell${count !== 1 ? "s" : ""} logged — tap to view/edit` : `▾ Hide upsells`;
+      },
+      text: count ? `▸ ${count} upsell${count !== 1 ? "s" : ""} logged — tap to view/edit` : "No upsells logged in this period",
+    });
+    const upsellSection = count ? [toggleBtn, rowsWrap] : [toggleBtn];
+
     return el("div", { class: "card" }, [
       el("div", { class: "row", style: "margin-bottom:2px" }, [
         el("div", { class: "oswald", style: "font-size:15px", text: p.name }),
         el("div", { class: "mono", style: "color:var(--cyan);font-size:16px", text: money(p.upsellRevenue) }),
       ]),
       el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: subtitle }),
-      el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-bottom:8px" }, upsellRows),
+      el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-bottom:8px" }, upsellSection),
       p.commissionRate > 0
         ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
             el("span", { class: "muted", style: "font-size:12.5px", text: `Upsell commission (${p.commissionRate}%)` }),
@@ -1348,7 +1362,7 @@ async function renderOwnerSales(content) {
           el("div", { class: "muted", style: "font-size:10px", text: dateOnly }),
         ]),
         el("div", { style: "flex:1;min-width:0" }, [
-          el("div", { style: "font-weight:500", text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
+          el("div", { style: `font-weight:500;${cancelled ? "text-decoration:line-through" : ""}`, text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
           el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
           upsellRows.length ? el("div", { style: "margin-top:4px" }, upsellRows) : null,
         ]),
@@ -1960,6 +1974,17 @@ function serviceColumnFor(baseService) {
   if (s.includes("ceramic")) return "Ceramic Coating";
   return "PPF";
 }
+// A cancelled job should be unmistakable at a glance, everywhere it shows up — not just
+// slightly dimmer than an active one. Returns the style string for the whole card and a
+// small "CANCELLED" badge element to drop in next to the car name.
+function cancelledTreatment(status) {
+  const isCancelled = status === "cancelled";
+  return {
+    cardStyle: isCancelled ? "opacity:0.6;text-decoration:line-through" : "",
+    badge: isCancelled ? el("span", { style: "text-decoration:none;color:var(--red);font-size:10px;font-weight:700;margin-left:6px;letter-spacing:0.04em", text: "CANCELLED" }) : null,
+  };
+}
+
 function makeServiceColumns() {
   const cols = {
     "Window Tint": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "WINDOW TINT" })]),
@@ -2098,10 +2123,11 @@ async function renderManagerJobs(content) {
         }, text: "Save" }),
       ]);
 
-      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card" }, [
+      const { cardStyle, badge } = cancelledTreatment(job.status);
+      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card", style: cardStyle }, [
         el("div", { class: "row", style: "margin-bottom:10px" }, [
           el("div", {}, [
-            el("div", { style: "font-weight:500", text: job.car }),
+            el("div", { style: "font-weight:500" }, [el("span", { text: job.car }), badge]),
             el("div", { class: "muted", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }),
             el("div", { class: "muted", text: job.baseService || "no service set" }),
           ]),
