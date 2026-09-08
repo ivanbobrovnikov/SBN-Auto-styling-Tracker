@@ -1211,7 +1211,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
-    photos: s.photos || { before: {}, after: {} },
+    photos: s.photos || { before: {}, after: {} }, notes: s.notes || [],
   })));
 });
 
@@ -1335,6 +1335,40 @@ app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
   res.json({ ok: true });
 });
 
+// A shared note log on the appointment — tech, manager, and owner can all see and add to
+// it. Useful for things like "customer wants extra wax" or "called to confirm" that
+// multiple people might need to know, not tied to any one person's own view.
+function noteAuthorInfo(req, db) {
+  if (req.auth.role === "owner") return "Owner";
+  if (req.auth.role === "manager") {
+    const mgr = db.managers.find((m) => m.id === req.auth.id);
+    return `${mgr ? mgr.name : "Removed manager"} (manager)`;
+  }
+  const emp = db.employees.find((e) => e.id === req.auth.id);
+  return emp ? emp.name : "Removed employee";
+}
+
+app.post("/api/sales/:id/notes", requireEmployee, (req, res) => {
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.params.id);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  const { text } = req.body;
+  if (!text || !text.trim()) return res.status(400).json({ error: "Note text is required." });
+  sale.notes = sale.notes || [];
+  sale.notes.push({ id: newId(), text: text.trim(), authorName: noteAuthorInfo(req, db), timestamp: new Date().toISOString() });
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+app.delete("/api/sales/:id/notes/:noteId", requireEmployee, (req, res) => {
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.params.id);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  sale.notes = (sale.notes || []).filter((n) => n.id !== req.params.noteId);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
 // Fix a mistake on an upsell already logged — wrong price, wrong name typed in, whatever.
 // Manager/owner only. Keeps the original attribution (who gets credit) intact, unlike
 // deleting and re-adding it, which would change who it's credited to.
@@ -1406,7 +1440,7 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       // a job (like Nick alongside Gio) can see what's already been upsold, even though
       // commission credit still only goes to whoever actually logged it.
       upsells: resolveUpsellNames(s.upsells || [], db),
-      photos: s.photos || { before: {}, after: {} },
+      photos: s.photos || { before: {}, after: {} }, notes: s.notes || [],
       // basePrice and total sale $ intentionally NOT sent to employees
     }));
   res.json(jobs);
