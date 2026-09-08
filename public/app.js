@@ -1797,9 +1797,63 @@ async function renderCleanup(content) {
     autoFixBtn, autoFixResult,
   ]));
 
+  const calMapResult = el("div", { style: "margin-top:10px" });
+  content.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "muted", style: "margin-bottom:8px", text: "CALENDAR → SERVICE MAPPING — for jobs whose title has nothing to guess from (a genuine online booking's title is often just the customer's name). Which calendar it came through is unambiguous, so tell it once here and it'll auto-fill going forward." }),
+    el("button", { class: "primary", onclick: async () => {
+      const d = await api("/api/manager/calendar-service-map");
+      calMapResult.innerHTML = "";
+      if (d.seenCalendars.length === 0) { calMapResult.appendChild(el("div", { class: "muted", text: "No calendar IDs seen in your data yet." })); return; }
+      d.seenCalendars.forEach((c) => {
+        const select = el("select", { style: "max-width:180px" }, [
+          el("option", { value: "", text: "Not mapped yet..." }),
+          el("option", { value: "Window Tint", text: "Window Tint", ...(d.map[c.calendarId] === "Window Tint" ? { selected: "true" } : {}) }),
+          el("option", { value: "Ceramic Coating", text: "Ceramic Coating", ...(d.map[c.calendarId] === "Ceramic Coating" ? { selected: "true" } : {}) }),
+          el("option", { value: "PPF", text: "PPF", ...(d.map[c.calendarId] === "PPF" ? { selected: "true" } : {}) }),
+        ]);
+        calMapResult.appendChild(el("div", { class: "card row" }, [
+          el("div", { style: "font-size:12px" }, [
+            el("div", { class: "mono", style: "font-size:11px", text: c.calendarId }),
+            el("div", { class: "muted", style: "font-size:11px", text: `e.g. "${c.exampleCar}"` }),
+          ]),
+          el("div", { style: "display:flex;gap:8px;align-items:center" }, [
+            select,
+            el("button", { class: "ghost", onclick: async () => {
+              if (!select.value) return;
+              await api("/api/manager/calendar-service-map", { method: "POST", body: JSON.stringify({ calendarId: c.calendarId, service: select.value }) });
+              const r = await api("/api/manager/cleanup-fix-by-calendar", { method: "POST", body: JSON.stringify({ dryRun: false }) });
+              alert(`Saved. Fixed ${r.fixed} existing job(s) using this mapping.`);
+              load();
+            }, text: "Save" }),
+          ]),
+        ]));
+      });
+    }, text: "Show calendars seen so far" }),
+    calMapResult,
+  ]));
+
+  const selectedForOnline = new Set();
+  const bulkOnlineBar = el("div", { style: "display:none;margin-bottom:12px" });
+  function updateBulkBar() {
+    if (selectedForOnline.size === 0) { bulkOnlineBar.style.display = "none"; return; }
+    bulkOnlineBar.style.display = "block";
+    bulkOnlineBar.innerHTML = "";
+    bulkOnlineBar.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
+      el("div", { style: "font-size:12.5px;margin-bottom:8px", text: `${selectedForOnline.size} job(s) selected — for genuine website self-bookings where nobody actually closed the deal.` }),
+      el("button", { class: "primary", style: "background:var(--amber)", onclick: async () => {
+        if (!confirm(`Mark ${selectedForOnline.size} job(s) as Online Booking? This clears any missing-rep flag on them.`)) return;
+        await api("/api/manager/cleanup-mark-online", { method: "POST", body: JSON.stringify({ ids: Array.from(selectedForOnline) }) });
+        selectedForOnline.clear();
+        load();
+      }, text: `Mark ${selectedForOnline.size} as Online Booking` }),
+    ]));
+  }
+
   async function load() {
     const jobs = await api("/api/manager/needs-cleanup");
     body.innerHTML = "";
+    selectedForOnline.clear();
+    updateBulkBar();
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing to clean up — every job has a price and a sales rep or walk-in assignment." })); return; }
     jobs.forEach((job) => {
       const priceInput = el("input", { type: "number", value: job.basePrice || "", placeholder: "Base price", style: "max-width:100px" });
@@ -1819,36 +1873,46 @@ async function renderCleanup(content) {
         ...managersList.map((m) => el("option", { value: `manager::${m.id}`, text: `${m.name} (manager)`, ...(job.walkInClosedById === m.id ? { selected: "true" } : {}) })),
       ]);
       const saveNotice = el("span", { class: "muted", style: "font-size:11px" });
+      const onlineCheckbox = job.missingRep ? el("input", { type: "checkbox", onchange: (e) => {
+        if (e.target.checked) selectedForOnline.add(job.id); else selectedForOnline.delete(job.id);
+        updateBulkBar();
+      } }) : null;
 
       body.appendChild(el("div", { class: "card" }, [
-        el("div", { style: "font-weight:500", text: job.car }),
-        el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:8px", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""} · ${job.baseService || "no service set"}` }),
-        el("div", { style: "display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap" }, [
-          job.missingPrice ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing price" }) : null,
-          job.missingRep ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing sales rep" }) : null,
-          job.missingService ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing service" }) : null,
-        ]),
-        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [
-          priceInput, serviceSelect, repSelect, closerSelect,
-          el("button", { class: "primary", onclick: async () => {
-            const patch = {};
-            if (priceInput.value) patch.basePrice = priceInput.value;
-            if (serviceSelect.value) patch.baseService = serviceSelect.value;
-            if (repSelect.value) patch.salesRepId = repSelect.value;
-            if (closerSelect.value) {
-              const [type, id] = closerSelect.value.split("::");
-              patch.isWalkIn = true; patch.walkInClosedByType = type; patch.walkInClosedById = id;
-            }
-            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify(patch) });
-            saveNotice.textContent = "Saved ✓"; saveNotice.style.color = "var(--green)";
-            setTimeout(load, 600);
-          }, text: "Save" }),
-          saveNotice,
+        el("div", { style: "display:flex;gap:8px;align-items:flex-start" }, [
+          onlineCheckbox ? el("div", { style: "padding-top:2px" }, [onlineCheckbox]) : null,
+          el("div", { style: "flex:1" }, [
+            el("div", { style: "font-weight:500", text: job.car }),
+            el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:8px", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""} · ${job.baseService || "no service set"}` }),
+            el("div", { style: "display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap" }, [
+              job.missingPrice ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing price" }) : null,
+              job.missingRep ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing sales rep — check the box above to bulk-mark as Online Booking" }) : null,
+              job.missingService ? el("span", { class: "pill", style: "background:var(--amberDim);color:var(--amber)", text: "Missing service" }) : null,
+            ]),
+            el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [
+              priceInput, serviceSelect, repSelect, closerSelect,
+              el("button", { class: "primary", onclick: async () => {
+                const patch = {};
+                if (priceInput.value) patch.basePrice = priceInput.value;
+                if (serviceSelect.value) patch.baseService = serviceSelect.value;
+                if (repSelect.value) patch.salesRepId = repSelect.value;
+                if (closerSelect.value) {
+                  const [type, id] = closerSelect.value.split("::");
+                  patch.isWalkIn = true; patch.walkInClosedByType = type; patch.walkInClosedById = id;
+                }
+                await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+                saveNotice.textContent = "Saved ✓"; saveNotice.style.color = "var(--green)";
+                setTimeout(load, 600);
+              }, text: "Save" }),
+              saveNotice,
+            ]),
+          ]),
         ]),
       ]));
     });
   }
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:14px", text: "Every job missing a base price or a sales rep, regardless of date. Fix what you can here — the rest can just stay as-is going forward." }));
+  content.appendChild(bulkOnlineBar);
   content.appendChild(body);
   await load();
 }
