@@ -311,7 +311,7 @@ async function renderSchedule(content) {
       const upsellForm = renderUpsellForm(job.id, () => load());
       const photoGrid = renderPhotoGrid(job, () => load());
       const { cardStyle, badge } = cancelledTreatment(job.status);
-      const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : "Upcoming";
+      const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
       cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card", style: cardStyle }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", {}, [
@@ -953,11 +953,11 @@ function renderYearGrid(sales, yearStr) {
 // the fact from the client side.
 // Manager Cash Log — log entries, see only your own history. Never shows shop-wide
 // totals; that's the owner's view specifically, on purpose.
-async function renderCashLog(content) {
+// Shared entry-logging form - used by both the manager's Cash Log and the owner's Cash &
+// Expenses page, so logging works identically for everyone regardless of role.
+function renderCashEntryForm(onSaved) {
   const CATEGORIES = ["Supplies", "Utilities", "Marketing", "Payroll Advance", "Other"];
-  const listEl = el("div", { style: "margin-top:16px" });
   let selectedType = "cashOut";
-
   const amountInput = el("input", { type: "number", placeholder: "0.00", style: "max-width:140px" });
   const categorySelect = el("select", {}, CATEGORIES.map((c) => el("option", { value: c, text: c })));
   const noteInput = el("input", { placeholder: "What was it for?", style: "width:100%" });
@@ -985,6 +985,38 @@ async function renderCashLog(content) {
     typeBtns[value] = btn;
     return btn;
   }
+
+  return el("div", { class: "card" }, [
+    el("div", { style: "font-weight:500;margin-bottom:10px", text: "Log an expense" }),
+    el("div", { style: "display:flex;gap:8px;margin-bottom:12px" }, [
+      typeBtn("cashOut", "Cash out"), typeBtn("cardExpense", "Card expense"), typeBtn("cashIn", "Cash in"),
+    ]),
+    el("div", { class: "field" }, [el("label", { text: "Amount" }), amountInput]),
+    el("div", { class: "field" }, [el("label", { text: "Category" }), categorySelect]),
+    el("div", { class: "field" }, [el("label", { text: "What was it for" }), noteInput]),
+    el("div", { style: "display:flex;align-items:center;gap:8px;margin:8px 0" }, [onlineCheck, el("span", { style: "font-size:13px", text: "Bought online" })]),
+    el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:12px" }, [
+      el("button", { class: "ghost", onclick: () => receiptInput.click(), text: "Attach receipt" }),
+      receiptLabel, receiptInput,
+    ]),
+    el("button", { class: "primary", onclick: async () => {
+      if (!amountInput.value || parseFloat(amountInput.value) <= 0) { alert("Enter a real amount first."); return; }
+      const entry = await api("/api/manager/cash-entries", { method: "POST", body: JSON.stringify({
+        type: selectedType, amount: amountInput.value, category: categorySelect.value, note: noteInput.value, isOnline: onlineCheck.checked,
+      }) });
+      if (pendingReceiptFile) {
+        const formData = new FormData();
+        formData.append("receipt", pendingReceiptFile);
+        await fetch(`/api/manager/cash-entries/${entry.id}/receipt`, { method: "POST", body: formData, credentials: "same-origin" });
+      }
+      amountInput.value = ""; noteInput.value = ""; onlineCheck.checked = false; pendingReceiptFile = null; receiptLabel.textContent = "No receipt attached";
+      onSaved();
+    }, text: "Save entry" }),
+  ]);
+}
+
+async function renderCashLog(content) {
+  const listEl = el("div", { style: "margin-top:16px" });
 
   async function loadMine() {
     const mine = await api("/api/my/cash-entries");
@@ -1014,33 +1046,7 @@ async function renderCashLog(content) {
     });
   }
 
-  content.appendChild(el("div", { class: "card" }, [
-    el("div", { style: "font-weight:500;margin-bottom:10px", text: "Log an expense" }),
-    el("div", { style: "display:flex;gap:8px;margin-bottom:12px" }, [
-      typeBtn("cashOut", "Cash out"), typeBtn("cardExpense", "Card expense"), typeBtn("cashIn", "Cash in"),
-    ]),
-    el("div", { class: "field" }, [el("label", { text: "Amount" }), amountInput]),
-    el("div", { class: "field" }, [el("label", { text: "Category" }), categorySelect]),
-    el("div", { class: "field" }, [el("label", { text: "What was it for" }), noteInput]),
-    el("div", { style: "display:flex;align-items:center;gap:8px;margin:8px 0" }, [onlineCheck, el("span", { style: "font-size:13px", text: "Bought online" })]),
-    el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:12px" }, [
-      el("button", { class: "ghost", onclick: () => receiptInput.click(), text: "Attach receipt" }),
-      receiptLabel, receiptInput,
-    ]),
-    el("button", { class: "primary", onclick: async () => {
-      if (!amountInput.value || parseFloat(amountInput.value) <= 0) { alert("Enter a real amount first."); return; }
-      const entry = await api("/api/manager/cash-entries", { method: "POST", body: JSON.stringify({
-        type: selectedType, amount: amountInput.value, category: categorySelect.value, note: noteInput.value, isOnline: onlineCheck.checked,
-      }) });
-      if (pendingReceiptFile) {
-        const formData = new FormData();
-        formData.append("receipt", pendingReceiptFile);
-        await fetch(`/api/manager/cash-entries/${entry.id}/receipt`, { method: "POST", body: formData, credentials: "same-origin" });
-      }
-      amountInput.value = ""; noteInput.value = ""; onlineCheck.checked = false; pendingReceiptFile = null; receiptLabel.textContent = "No receipt attached";
-      loadMine();
-    }, text: "Save entry" }),
-  ]));
+  content.appendChild(renderCashEntryForm(loadMine));
   content.appendChild(listEl);
   await loadMine();
 }
@@ -1092,6 +1098,7 @@ async function renderOwnerCash(content) {
       ]));
     });
   }
+  content.appendChild(renderCashEntryForm(load));
   content.appendChild(picker.el);
   content.appendChild(body);
   await load();
@@ -1275,8 +1282,8 @@ async function renderOwnerSales(content) {
 
     sales.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((s) => {
       const cancelled = s.status === "cancelled";
-      const statusLabel = cancelled ? "Cancelled" : s.status === "arrived" ? "Arrived" : s.status === "no_show" ? "No-show" : "Upcoming";
-      const statusColor = cancelled ? "var(--red)" : s.status === "arrived" ? "var(--green)" : s.status === "no_show" ? "var(--red)" : "var(--sub)";
+      const statusLabel = cancelled ? "Cancelled" : s.status === "arrived" ? "Arrived" : s.status === "no_show" ? "No-show" : s.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
+      const statusColor = cancelled ? "var(--red)" : s.status === "arrived" ? "var(--green)" : s.status === "no_show" ? "var(--red)" : s.status === "unconfirmed" ? "var(--amber)" : "var(--sub)";
       const d = new Date(s.date);
       const timeOnly = isNaN(d.getTime()) ? "—" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
       const dateOnly = isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -1451,8 +1458,8 @@ async function renderSalesSchedule(content) {
   let searchMode = false;
 
   function renderJobRow(job) {
-    const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : "Upcoming";
-    const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : "var(--sub)";
+    const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
+    const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)";
     return el("div", { class: "card row" }, [
       el("div", {}, [
         el("div", { style: "font-weight:500", text: job.car }),
@@ -1512,8 +1519,8 @@ async function renderSalesFullSchedule(content) {
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
-      const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : "Upcoming";
-      const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : "var(--sub)";
+      const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
+      const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)";
       body.appendChild(el("div", { class: "card row" }, [
         el("div", {}, [
           el("div", { style: "font-weight:500", text: job.car }),
@@ -1975,13 +1982,19 @@ function serviceColumnFor(baseService) {
   return "PPF";
 }
 // A cancelled job should be unmistakable at a glance, everywhere it shows up — not just
-// slightly dimmer than an active one. Returns the style string for the whole card and a
-// small "CANCELLED" badge element to drop in next to the car name.
+// slightly dimmer than an active one. Unconfirmed is a real, different status though —
+// the customer hasn't confirmed they're still coming, not that they've definitely
+// cancelled — so it gets its own distinct amber flag instead of the same red strikethrough.
 function cancelledTreatment(status) {
   const isCancelled = status === "cancelled";
+  const isUnconfirmed = status === "unconfirmed";
   return {
-    cardStyle: isCancelled ? "opacity:0.6;text-decoration:line-through" : "",
-    badge: isCancelled ? el("span", { style: "text-decoration:none;color:var(--red);font-size:10px;font-weight:700;margin-left:6px;letter-spacing:0.04em", text: "CANCELLED" }) : null,
+    cardStyle: isCancelled ? "opacity:0.6;text-decoration:line-through" : isUnconfirmed ? "border-left:3px solid var(--amber)" : "",
+    badge: isCancelled
+      ? el("span", { style: "text-decoration:none;color:var(--red);font-size:10px;font-weight:700;margin-left:6px;letter-spacing:0.04em", text: "CANCELLED" })
+      : isUnconfirmed
+      ? el("span", { style: "text-decoration:none;color:var(--amber);font-size:10px;font-weight:700;margin-left:6px;letter-spacing:0.04em", text: "UNCONFIRMED" })
+      : null,
   };
 }
 
