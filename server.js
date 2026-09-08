@@ -21,7 +21,7 @@ const SHOP_LOCATION_LABEL = process.env.SHOP_LOCATION_LABEL || "West Berlin, NJ"
 // ---------- tiny JSON "database" ----------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const fresh = { employees: [], managers: [], salesReps: [], sales: [], attendance: [], auditLog: [], cashEntries: [], ownerPinHash: null };
+    const fresh = { employees: [], managers: [], salesReps: [], sales: [], attendance: [], auditLog: [], cashEntries: [], calendarServiceMap: {}, ownerPinHash: null };
     fs.writeFileSync(DB_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
@@ -31,6 +31,7 @@ function loadDB() {
   if (!db.attendance) db.attendance = [];
   if (!db.auditLog) db.auditLog = [];
   if (!db.cashEntries) db.cashEntries = [];
+  if (!db.calendarServiceMap) db.calendarServiceMap = {};
   return db;
 }
 function saveDB(db) {
@@ -308,7 +309,7 @@ function resolveSalesRepAttribution(db, salesRepName, appointmentTitle) {
   return result;
 }
 
-function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt }) {
+function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
   const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
@@ -351,6 +352,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
   sale.baseService = baseService || sale.baseService || "";
   sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
+  sale.calendarId = calendarId || sale.calendarId || null;
   sale.syncedFromGHL = true;
   if (!sale.status) sale.status = "pending";
   if (sale.completed === undefined) sale.completed = false;
@@ -768,6 +770,21 @@ app.post("/api/webhook/ghl/cancel", (req, res) => {
   res.json({ ok: true, found: true, saleId: sale.id });
 });
 
+// Unconfirmed — a real, distinct appointment status in GHL, separate from Cancelled. This
+// means the customer hasn't confirmed they're still coming, not that they've definitely
+// cancelled — worth flagging for follow-up, but not treated as dead the way a cancellation is.
+app.post("/api/webhook/ghl/unconfirm", (req, res) => {
+  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const { ghlOpportunityId } = ghlPayload(req.body);
+  if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  const sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  if (!sale) return res.json({ ok: true, found: false });
+  sale.status = "unconfirmed";
+  saveDB(db);
+  res.json({ ok: true, found: true, saleId: sale.id });
+});
+
 // Deletion — a genuinely different outcome from cancellation. If the appointment itself
 // gets deleted in GHL (not just marked cancelled), the job disappears from the tracker
 // entirely rather than sticking around labeled "Cancelled." Matched by ghlOpportunityId,
@@ -1117,6 +1134,69 @@ app.post("/api/manager/cleanup-auto-fix", requireManager, (req, res) => {
 
   if (!dryRun) saveDB(db);
   res.json({ ok: true, dryRun, totalJobsChecked: jobs.length, ...results });
+});
+
+// Bulk-mark several jobs as Online Booking at once — for the real scenario where a
+// backlog of genuine website self-bookings all sit flagged as "missing a rep" simply
+// because nobody typed initials into a title nobody filled out themselves.
+app.post("/api/manager/cleanup-mark-online", requireManager, (req, res) => {
+  const db = loadDB();
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: "No jobs selected." });
+  let fixed = 0;
+  ids.forEach((id) => {
+    const sale = db.sales.find((s) => s.id === id);
+    if (!sale) return;
+    logAudit(db, req, sale, "Sales rep", sale.salesRepName, "Online Booking");
+    sale.isOnlineBooking = true;
+    sale.salesRepId = null; sale.salesRepName = "Online Booking"; sale.isWalkIn = false;
+    sale.walkInClosedByType = null; sale.walkInClosedById = null; sale.walkInClosedByName = null;
+    fixed++;
+  });
+  saveDB(db);
+  res.json({ ok: true, fixed });
+});
+
+// Which GHL calendar means which service — a far more reliable signal than the title text,
+// since a genuine online booking's title is often just the customer's name with nothing to
+// guess a service from at all. The calendar itself is unambiguous.
+app.get("/api/manager/calendar-service-map", requireManager, (req, res) => {
+  const db = loadDB();
+  // Every distinct calendarId already seen in the data, with one real example so the owner
+  // can recognize which is which without needing to go look it up in GHL.
+  const seen = {};
+  db.sales.filter((s) => s.calendarId).forEach((s) => {
+    if (!seen[s.calendarId]) seen[s.calendarId] = { calendarId: s.calendarId, exampleCar: s.car, exampleService: s.baseService || "" };
+  });
+  res.json({ map: db.calendarServiceMap || {}, seenCalendars: Object.values(seen) });
+});
+
+app.post("/api/manager/calendar-service-map", requireManager, (req, res) => {
+  const db = loadDB();
+  const { calendarId, service } = req.body;
+  if (!calendarId || !service) return res.status(400).json({ error: "calendarId and service are required." });
+  if (!db.calendarServiceMap) db.calendarServiceMap = {};
+  db.calendarServiceMap[calendarId] = service;
+  saveDB(db);
+  res.json({ ok: true, map: db.calendarServiceMap });
+});
+
+// Re-checks every job still missing a service against the calendar mapping above — for
+// jobs that already have a calendarId stored but no title-text keyword to guess from.
+app.post("/api/manager/cleanup-fix-by-calendar", requireManager, (req, res) => {
+  const db = loadDB();
+  const dryRun = !!req.body.dryRun;
+  const map = db.calendarServiceMap || {};
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && !s.baseService && s.calendarId && map[s.calendarId]);
+  const preview = jobs.map((s) => ({ id: s.id, car: s.car, calendarId: s.calendarId, serviceFix: map[s.calendarId] }));
+  if (!dryRun) {
+    jobs.forEach((s) => {
+      logAudit(db, req, s, "Service", s.baseService, map[s.calendarId]);
+      s.baseService = map[s.calendarId];
+    });
+    saveDB(db);
+  }
+  res.json({ ok: true, dryRun, fixed: jobs.length, preview });
 });
 
 app.get("/api/manager/jobs", requireManager, (req, res) => {
@@ -2043,11 +2123,17 @@ app.post("/api/owner/ghl-bulk-import", requireOwner, async (req, res) => {
       // whenever this import happened to run. Without this, every bulk-imported job's
       // business-hours classification was silently based on the import's run time.
       const realClosedAt = opp.lastStatusChangeAt || opp.createdAt || null;
+      // Which calendar this came through is a far more reliable signal than the title text
+      // for what service this actually is — a genuine online booking's title is often just
+      // the customer's name, with no service keyword to guess from at all, but the calendar
+      // itself is unambiguous.
+      const calendarService = (db.calendarServiceMap || {})[appt.calendarId];
       const record = {
         ghlOpportunityId: opp.id, contactId: opp.contactId,
         car: appt.title || "", date: appt.startTime, basePrice: opp.monetaryValue,
         customerName: contact.name || "", customerPhone: contact.phone || "", customerEmail: contact.email || "",
-        baseService: guessServiceFromTitle(appt.title), closedAt: realClosedAt,
+        baseService: calendarService || guessServiceFromTitle(appt.title), closedAt: realClosedAt,
+        calendarId: appt.calendarId || null,
       };
       if (dryRun) preview.push(record);
       else { upsertSaleFromGHL(db, record); results.imported++; }
