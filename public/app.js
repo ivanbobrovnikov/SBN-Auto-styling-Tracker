@@ -310,6 +310,7 @@ async function renderSchedule(content) {
       ));
       const upsellForm = renderUpsellForm(job.id, () => load());
       const photoGrid = renderPhotoGrid(job, () => load());
+      const notesSection = renderNotesSection(job, () => load());
       const { cardStyle, badge } = cancelledTreatment(job.status);
       const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
       cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card", style: cardStyle }, [
@@ -324,6 +325,7 @@ async function renderSchedule(content) {
         ]),
         el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [upsellList, upsellForm]),
         photoGrid,
+        notesSection,
       ]));
     });
   }
@@ -340,6 +342,30 @@ function isVideoFile(filename) {
 // Before/after walk-around clip - shared by Manager Job Status and Tech Schedule, so a
 // tech can record it from either place. One clip per stage, video or photo, instead of a
 // dozen separate stills.
+// Shared note log - tech, manager, and owner can all see and add to it. Same reusable
+// pattern as the photo grid, so it's identical wherever it shows up.
+function renderNotesSection(job, onDone) {
+  const notesList = el("div", { style: "margin-bottom:8px" }, (job.notes || []).map((n) => el("div", { class: "row", style: "font-size:12.5px;margin-bottom:6px;align-items:flex-start" }, [
+    el("div", {}, [
+      el("div", { text: n.text }),
+      el("div", { class: "muted", style: "font-size:10.5px", text: `${n.authorName} · ${formatDateTime(n.timestamp)}` }),
+    ]),
+    el("button", { class: "icon-danger", style: "font-size:10px;padding:2px 6px", onclick: async () => { await api(`/api/sales/${job.id}/notes/${n.id}`, { method: "DELETE" }); onDone(); }, text: "✕" }),
+  ])));
+  const noteInput = el("input", { placeholder: "Add a note...", style: "flex:1" });
+  const addBtn = el("button", { class: "ghost", onclick: async () => {
+    if (!noteInput.value.trim()) return;
+    await api(`/api/sales/${job.id}/notes`, { method: "POST", body: JSON.stringify({ text: noteInput.value }) });
+    noteInput.value = "";
+    onDone();
+  }, text: "Add" });
+  return el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:8px" }, [
+    el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px;font-weight:600;letter-spacing:0.03em", text: "NOTES" }),
+    notesList,
+    el("div", { style: "display:flex;gap:6px" }, [noteInput, addBtn]),
+  ]);
+}
+
 function renderPhotoGrid(job, onDone) {
   function stageSection(stage, label) {
     const photos = (job.photos && job.photos[stage]) || {};
@@ -1327,6 +1353,13 @@ async function renderOwnerSales(content) {
         photoToggleBtn.textContent = showing ? "📷 Photos" : "📷 Hide";
       }, text: "📷 Photos" });
 
+      const notesToggleWrap = el("div", { style: "display:none" });
+      const notesToggleBtn = el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => {
+        const showing = notesToggleWrap.style.display !== "none";
+        notesToggleWrap.style.display = showing ? "none" : "block";
+        notesToggleBtn.textContent = showing ? "📝 Notes" : "📝 Hide";
+      }, text: `📝 Notes${(s.notes || []).length ? ` (${s.notes.length})` : ""}` });
+
       const editToggleWrap = el("div", { style: "display:none;margin-top:8px" });
       const editToggleBtn = el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => {
         const showing = editToggleWrap.style.display !== "none";
@@ -1380,16 +1413,18 @@ async function renderOwnerSales(content) {
           el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px;font-weight:600;margin-top:2px`, text: cancelled ? "—" : `Total: ${money(s.total)}` }),
           s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : "Unpaid" }),
           el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end" }, [
-            photoToggleBtn, editToggleBtn,
+            photoToggleBtn, notesToggleBtn, editToggleBtn,
             el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => navigator.clipboard.writeText(s.id), text: "Copy ID" }),
             el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${s.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
           ]),
         ]),
         ]),
         photoToggleWrap,
+        notesToggleWrap,
         editToggleWrap,
       ]));
       photoToggleWrap.appendChild(renderPhotoGrid(s, load));
+      notesToggleWrap.appendChild(renderNotesSection(s, load));
     });
   }
   content.appendChild(picker.el);
@@ -2314,6 +2349,7 @@ async function renderManagerJobs(content) {
           upsellForm,
         ]),
         renderPhotoGrid(job, () => load()),
+        renderNotesSection(job, () => load()),
       ]));
     });
   }
