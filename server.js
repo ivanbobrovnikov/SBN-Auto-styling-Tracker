@@ -508,6 +508,13 @@ function requireSales(req, res, next) {
   if (req.auth.role === "sales" || req.auth.role === "owner") return next();
   return res.status(401).json({ error: "Sales login required." });
 }
+// Any logged-in role at all - used specifically for shared things like notes, where a
+// sales rep needs the same access as everyone else without also opening up unrelated
+// things like upsells or photo uploads that they were never asked to have.
+function requireAnyStaff(req, res, next) {
+  if (["employee", "manager", "owner", "sales"].includes(req.auth.role)) return next();
+  return res.status(401).json({ error: "Login required." });
+}
 
 // ---------- session / login ----------
 app.get("/api/session", (req, res) => {
@@ -1344,11 +1351,15 @@ function noteAuthorInfo(req, db) {
     const mgr = db.managers.find((m) => m.id === req.auth.id);
     return `${mgr ? mgr.name : "Removed manager"} (manager)`;
   }
+  if (req.auth.role === "sales") {
+    const rep = db.salesReps.find((r) => r.id === req.auth.id);
+    return `${rep ? rep.name : "Removed rep"} (sales)`;
+  }
   const emp = db.employees.find((e) => e.id === req.auth.id);
   return emp ? emp.name : "Removed employee";
 }
 
-app.post("/api/sales/:id/notes", requireEmployee, (req, res) => {
+app.post("/api/sales/:id/notes", requireAnyStaff, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
@@ -1360,7 +1371,7 @@ app.post("/api/sales/:id/notes", requireEmployee, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete("/api/sales/:id/notes/:noteId", requireEmployee, (req, res) => {
+app.delete("/api/sales/:id/notes/:noteId", requireAnyStaff, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
@@ -1555,7 +1566,7 @@ app.get("/api/my/sales-schedule", requireSales, (req, res) => {
     .filter((s) => s.salesRepId === repId && inRange(s.date, start, end))
     .map((s) => ({
       id: s.id, date: s.date, car: s.car, customerName: s.customerName, baseService: s.baseService,
-      basePrice: s.basePrice, status: s.status || "pending",
+      basePrice: s.basePrice, status: s.status || "pending", notes: s.notes || [],
       // No price/status editing here — this is a read-only view of what THEY sold and whether it showed.
     }));
   res.json(jobs);
@@ -1570,7 +1581,7 @@ app.get("/api/sales/full-schedule", requireSales, (req, res) => {
   const jobs = db.sales.filter((s) => inRange(s.date, start, end)).map((s) => ({
     id: s.id, date: s.date, car: s.car, baseService: s.baseService,
     employeeNames: s.employeeNames || "Unassigned",
-    status: s.status || "pending", completed: !!s.completed,
+    status: s.status || "pending", completed: !!s.completed, notes: s.notes || [],
   }));
   res.json(jobs);
 });
