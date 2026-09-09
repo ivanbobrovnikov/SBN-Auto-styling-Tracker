@@ -1323,7 +1323,7 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
 });
 
 // ---------- upsells ----------
-app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
+app.post("/api/sales/:id/upsells", requireAnyStaff, (req, res) => {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
@@ -1332,9 +1332,16 @@ app.post("/api/sales/:id/upsells", requireEmployee, (req, res) => {
   const { name, price } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: "Upsell name is required." });
   sale.upsells = sale.upsells || [];
-  const upsell = { id: newId(), name: name.trim(), price: parseFloat(price) || 0, employeeId: null, managerId: null };
+  const upsell = { id: newId(), name: name.trim(), price: parseFloat(price) || 0, employeeId: null, managerId: null, salesRepId: null };
   if (req.auth.role === "employee") upsell.employeeId = req.auth.id;
   else if (req.auth.role === "manager") upsell.managerId = req.auth.id;
+  else if (req.auth.role === "sales") {
+    // A rep upselling over the phone - an online booking with no assigned rep, or a
+    // callback on an existing customer to add something on before they arrive.
+    const rep = db.salesReps.find((r) => r.id === req.auth.id);
+    upsell.salesRepId = req.auth.id;
+    upsell.salesRepName = rep ? rep.name : null;
+  }
   else if (req.body.employeeId) upsell.employeeId = req.body.employeeId;
   else if (req.body.managerId) upsell.managerId = req.body.managerId;
   sale.upsells.push(upsell);
@@ -1567,6 +1574,7 @@ app.get("/api/my/sales-schedule", requireSales, (req, res) => {
     .map((s) => ({
       id: s.id, date: s.date, car: s.car, customerName: s.customerName, baseService: s.baseService,
       basePrice: s.basePrice, status: s.status || "pending", notes: s.notes || [],
+      upsells: resolveUpsellNames(s.upsells || [], db),
       // No price/status editing here — this is a read-only view of what THEY sold and whether it showed.
     }));
   res.json(jobs);
@@ -1582,6 +1590,7 @@ app.get("/api/sales/full-schedule", requireSales, (req, res) => {
     id: s.id, date: s.date, car: s.car, baseService: s.baseService,
     employeeNames: s.employeeNames || "Unassigned",
     status: s.status || "pending", completed: !!s.completed, notes: s.notes || [],
+    upsells: resolveUpsellNames(s.upsells || [], db),
   }));
   res.json(jobs);
 });
