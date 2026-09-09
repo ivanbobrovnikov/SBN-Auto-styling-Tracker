@@ -15,6 +15,11 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 async function api(path, opts = {}) {
+  // Almost every action in this app triggers a reload that rebuilds part of the page right
+  // after — replacing that much DOM out from under the browser is what's causing the
+  // scroll-jump-and-back glitch. Capturing the scroll position here and restoring it right
+  // after the next paint settles is what stops it.
+  const scrollY = window.scrollY;
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -22,6 +27,9 @@ async function api(path, opts = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
+  }));
   return data;
 }
 function money(n) { return "$" + (Math.round((n || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
