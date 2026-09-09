@@ -1507,6 +1507,10 @@ async function renderSalesSchedule(content) {
     const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
     const { cardStyle, badge } = cancelledTreatment(job.status);
     const notesSection = renderNotesSection(job, () => searchMode ? runSearch() : load());
+    const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) =>
+      el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })
+    ));
+    const upsellForm = renderUpsellForm(job.id, () => searchMode ? runSearch() : load());
     return el("div", { class: "card", style: cardStyle }, [
       el("div", { class: "row", style: "margin-bottom:8px" }, [
         el("div", {}, [
@@ -1518,6 +1522,7 @@ async function renderSalesSchedule(content) {
           el("div", { style: `color:${job.status === "arrived" ? "var(--green)" : job.status === "no_show" || job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)"};font-size:12px;font-weight:600`, text: statusLabel }),
         ]),
       ]),
+      el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px" }, [upsellList, upsellForm]),
       notesSection,
     ]);
   }
@@ -1576,6 +1581,10 @@ async function renderSalesFullSchedule(content) {
       const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
       const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)";
       const { cardStyle, badge } = cancelledTreatment(job.status);
+      const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) =>
+        el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })
+      ));
+      const upsellForm = renderUpsellForm(job.id, () => load());
       cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card", style: cardStyle }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", {}, [
@@ -1587,6 +1596,7 @@ async function renderSalesFullSchedule(content) {
             job.completed ? el("div", { class: "muted", style: "font-size:11px", text: "Service complete" }) : null,
           ]),
         ]),
+        el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px" }, [upsellList, upsellForm]),
         renderNotesSection(job, () => load()),
       ]));
     });
