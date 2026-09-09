@@ -299,16 +299,16 @@ async function renderEmployeeTabContent(content) {
 // Who worked the car (employeeNames) is a manager-entered record now, shown for context only.
 // No base price or total sale $ shown here — that stays owner/manager-only.
 async function renderSchedule(content) {
-  const body = el("div");
+  const { cols, wrap, clearAll } = makeServiceColumns();
+  const emptyMsg = el("div", { class: "muted", style: "display:none", text: "Nothing booked on this day." });
   const nav = renderDayNav((params) => load(params));
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/my/jobs?${qs}`);
-    body.innerHTML = "";
-    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
-    const { cols, wrap } = makeServiceColumns();
-    body.appendChild(wrap);
+    clearAll();
+    emptyMsg.style.display = jobs.length === 0 ? "" : "none";
+    if (jobs.length === 0) return;
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) =>
         el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })
@@ -335,7 +335,8 @@ async function renderSchedule(content) {
     });
   }
   content.appendChild(nav.el);
-  content.appendChild(body);
+  content.appendChild(wrap);
+  content.appendChild(emptyMsg);
   await load();
 }
 
@@ -1287,6 +1288,7 @@ async function renderServicedCars(content) {
 
 async function renderOwnerSales(content) {
   const body = el("div");
+  const dayColsSetup = makeServiceColumns(); // built once - keeps whatever tab you had selected across every reload
   const picker = renderPeriodPicker((params) => load(params), "day");
   const employees = await api("/api/employees");
   const managersList = await api("/api/managers");
@@ -1295,21 +1297,27 @@ async function renderOwnerSales(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const sales = await api(`/api/owner/sales?${qs}`);
-    body.innerHTML = "";
-    if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
 
-    if (p.period === "week") { body.appendChild(renderWeekGrid(sales)); return; }
-    if (p.period === "month") { body.appendChild(renderMonthGrid(sales, p.month)); return; }
-    if (p.period === "year") { body.appendChild(renderYearGrid(sales, p.date.slice(0, 4))); return; }
-
-    // Day view specifically gets split into service columns; a multi-day list (like Pay
-    // period) stays a flat chronological agenda, since columns don't make sense across days.
-    let dayCols = null, mountTarget = body;
-    if (p.period === "day") {
-      const { cols, wrap } = makeServiceColumns();
-      dayCols = cols;
-      body.appendChild(wrap);
+    if (p.period !== "day") {
+      dayColsSetup.wrap.style.display = "none";
+      body.style.display = "";
+      body.innerHTML = "";
+      if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
+      if (p.period === "week") { body.appendChild(renderWeekGrid(sales)); return; }
+      if (p.period === "month") { body.appendChild(renderMonthGrid(sales, p.month)); return; }
+      if (p.period === "year") { body.appendChild(renderYearGrid(sales, p.date.slice(0, 4))); return; }
+      // pay period and anything else falls through to the flat agenda list below, using body as the mount target
+    } else {
+      // Day view specifically gets split into service columns; clearing just the cards
+      // (not rebuilding the tab bar) is what actually keeps your selected filter in place.
+      body.innerHTML = "";
+      body.style.display = sales.length === 0 ? "" : "none";
+      dayColsSetup.clearAll();
+      dayColsSetup.wrap.style.display = sales.length === 0 ? "none" : "";
+      if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
     }
+    const dayCols = p.period === "day" ? dayColsSetup.cols : null;
+    const mountTarget = body;
 
     sales.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((s) => {
       const cancelled = s.status === "cancelled";
@@ -1439,6 +1447,7 @@ async function renderOwnerSales(content) {
     });
   }
   content.appendChild(picker.el);
+  content.appendChild(dayColsSetup.wrap);
   content.appendChild(body);
   await load();
 }
@@ -1499,6 +1508,7 @@ async function renderOwnerTeam(content) {
 // ---------------- Sales rep: read-only bookings, no way to touch status ----------------
 async function renderSalesSchedule(content) {
   const body = el("div");
+  const { cols, wrap, clearAll } = makeServiceColumns();
   const nav = renderDayNav((params) => load(params));
   const searchInput = el("input", { placeholder: "Search by car or customer name...", style: "max-width:320px" });
   let searchMode = false;
@@ -1529,6 +1539,8 @@ async function renderSalesSchedule(content) {
 
   async function runSearch() {
     const q = searchInput.value.trim().toLowerCase();
+    wrap.style.display = "none";
+    body.style.display = "";
     body.innerHTML = "";
     if (!q) { searchMode = false; nav.el.style.display = ""; return load(); }
     searchMode = true;
@@ -1552,14 +1564,16 @@ async function renderSalesSchedule(content) {
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/my/sales-schedule?${qs}`);
     body.innerHTML = "";
-    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No bookings on this day." })); return; }
-    const { cols, wrap } = makeServiceColumns();
-    body.appendChild(wrap);
+    clearAll();
+    if (jobs.length === 0) { wrap.style.display = "none"; body.style.display = ""; body.appendChild(el("div", { class: "muted", text: "No bookings on this day." })); return; }
+    body.style.display = "none";
+    wrap.style.display = "";
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => cols[serviceColumnFor(job.baseService)].appendChild(renderJobCard(job)));
   }
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Status here is set by your manager — this is a read-only view of what you booked and whether it showed." }));
   content.appendChild(el("div", { class: "field", style: "margin-bottom:10px" }, [el("label", { text: "Search all your bookings" }), searchInput]));
   content.appendChild(nav.el);
+  content.appendChild(wrap);
   content.appendChild(body);
   await load();
 }
@@ -1567,16 +1581,16 @@ async function renderSalesSchedule(content) {
 // Full shop schedule for sales reps — every job, not just their own bookings. No price
 // shown (same privacy rule as employees), but arrival/completion status is visible.
 async function renderSalesFullSchedule(content) {
-  const body = el("div");
+  const { cols, wrap, clearAll } = makeServiceColumns();
+  const emptyMsg = el("div", { class: "muted", style: "display:none", text: "Nothing booked on this day." });
   const nav = renderDayNav((params) => load(params));
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/sales/full-schedule?${qs}`);
-    body.innerHTML = "";
-    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
-    const { cols, wrap } = makeServiceColumns();
-    body.appendChild(wrap);
+    clearAll();
+    emptyMsg.style.display = jobs.length === 0 ? "" : "none";
+    if (jobs.length === 0) return;
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
       const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)";
@@ -1603,7 +1617,8 @@ async function renderSalesFullSchedule(content) {
   }
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Every car on the schedule, not just yours. Status is set by your manager." }));
   content.appendChild(nav.el);
-  content.appendChild(body);
+  content.appendChild(wrap);
+  content.appendChild(emptyMsg);
   await load();
 }
 
@@ -2131,22 +2146,27 @@ function cancelledTreatment(status) {
 }
 
 function makeServiceColumns() {
-  const cols = {
-    "Window Tint": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "WINDOW TINT" })]),
-    "Ceramic Coating": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "CERAMIC COATING" })]),
-    "PPF": el("div", { style: "flex:1;min-width:280px" }, [el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: "PPF / NEEDS SERVICE SET" })]),
-  };
-  const colsWrap = el("div", { style: "display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start" }, Object.values(cols));
+  const cardLists = {}; // returned to callers - append job cards here; safe to clear without losing the header
+  const outerBoxes = {}; // the full column including its header - used only for show/hide filtering
+  [["Window Tint", "WINDOW TINT"], ["Ceramic Coating", "CERAMIC COATING"], ["PPF", "PPF / NEEDS SERVICE SET"]].forEach(([key, label]) => {
+    const cardList = el("div", {});
+    outerBoxes[key] = el("div", { style: "flex:1;min-width:280px" }, [
+      el("div", { class: "muted", style: "margin-bottom:8px;font-weight:600;text-align:center;letter-spacing:0.04em", text: label }),
+      cardList,
+    ]);
+    cardLists[key] = cardList;
+  });
+  const colsWrap = el("div", { style: "display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start" }, Object.values(outerBoxes));
 
   // On a phone, three columns stacked full-width one after another is still effectively
   // one long scroll — this lets you filter down to just one service at a time instead.
   const tabs = ["All", "Window Tint", "Ceramic Coating", "PPF"];
   const tabBar = el("div", { style: "display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap" });
   function applyFilter(active) {
-    Object.entries(cols).forEach(([name, colEl]) => {
+    Object.entries(outerBoxes).forEach(([name, boxEl]) => {
       const show = active === "All" || active === name;
-      colEl.style.display = show ? "" : "none";
-      colEl.style.minWidth = active === "All" ? "280px" : "0";
+      boxEl.style.display = show ? "" : "none";
+      boxEl.style.minWidth = active === "All" ? "280px" : "0";
     });
   }
   tabs.forEach((t) => {
@@ -2159,11 +2179,16 @@ function makeServiceColumns() {
   });
 
   const wrap = el("div", {}, [tabBar, colsWrap]);
-  return { cols, wrap };
+  // Clears just the cards for a reload, keeping the tab bar and whichever filter was
+  // selected completely untouched — this is the actual fix for "selecting something
+  // sends me back to All."
+  const clearAll = () => Object.values(cardLists).forEach((c) => { c.innerHTML = ""; });
+  return { cols: cardLists, wrap, clearAll };
 }
 
 async function renderManagerJobs(content) {
-  const body = el("div");
+  const { cols, wrap, clearAll } = makeServiceColumns();
+  const emptyMsg = el("div", { class: "muted", style: "display:none", text: "No jobs on this day." });
   const employees = await api("/api/manager/employees");
   const managersList = await api("/api/manager/managers-list");
   const salesRepsList = await api("/api/manager/salesreps-list");
@@ -2172,10 +2197,9 @@ async function renderManagerJobs(content) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/manager/jobs?${qs}`);
-    body.innerHTML = "";
-    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs on this day." })); return; }
-    const { cols, wrap } = makeServiceColumns();
-    body.appendChild(wrap);
+    clearAll();
+    emptyMsg.style.display = jobs.length === 0 ? "" : "none";
+    if (jobs.length === 0) return;
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const statusBtn = (value, label) => {
         const active = job.status === value;
@@ -2387,7 +2411,8 @@ async function renderManagerJobs(content) {
     });
   }
   content.appendChild(nav.el);
-  content.appendChild(body);
+  content.appendChild(wrap);
+  content.appendChild(emptyMsg);
   await load();
 }
 
@@ -2597,6 +2622,22 @@ async function renderTestTool(content) {
         }, text: "Test 5: Resolve user ID to name" }),
       ]);
     })(),
+  ]));
+
+  const titleSyncResult = el("div", { style: "margin-top:10px" });
+  content.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "muted", style: "margin-bottom:8px", text: "AUTO TITLE SYNC — runs automatically every 30 minutes on its own, checking every upcoming job (next 3 weeks) directly against GHL and auto-correcting the title if it's changed. Run it manually here to test or check right now." }),
+    el("button", { class: "primary", onclick: async () => {
+      titleSyncResult.innerHTML = "";
+      titleSyncResult.appendChild(el("div", { class: "muted", text: "Running..." }));
+      const r = await api("/api/owner/title-sync-now", { method: "POST" });
+      titleSyncResult.innerHTML = "";
+      if (r.skipped) { titleSyncResult.appendChild(el("div", { class: "muted", text: r.reason })); return; }
+      titleSyncResult.appendChild(el("div", { class: "card" }, [
+        el("div", { style: "font-size:12.5px", text: `Checked ${r.checked} of ${r.candidateCount} upcoming job(s), corrected ${r.updated} title(s).` }),
+      ]));
+    }, text: "Run title sync now" }),
+    titleSyncResult,
   ]));
 
   const importStageId = el("input", { placeholder: "Booked stage ID (from Test 2)", style: "max-width:280px" });
