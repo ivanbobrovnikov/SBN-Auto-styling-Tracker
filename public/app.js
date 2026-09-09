@@ -1,5 +1,10 @@
 const el = (tag, attrs = {}, children = []) => {
   const e = document.createElement(tag);
+  // Every button defaults to type="button" unless explicitly overridden. Without this, a
+  // plain <button> defaults to type="submit" — which some mobile browsers treat as an
+  // implicit form action even with no real <form> on the page, causing exactly the
+  // "jumps back to the start" behavior when tapping something.
+  if (tag === "button" && !("type" in attrs)) e.setAttribute("type", "button");
   Object.entries(attrs).forEach(([k, v]) => {
     if (k === "text") e.textContent = v;
     else if (k === "html") e.innerHTML = v;
@@ -1376,7 +1381,13 @@ async function renderOwnerSales(content) {
           ...salesRepsList.map((r) => el("option", { value: r.id, text: r.name, ...(s.salesRepId === r.id ? { selected: "true" } : {}) })),
           el("option", { value: "__online__", text: "Online Booking (website, no rep)", ...(s.isOnlineBooking ? { selected: "true" } : {}) }),
         ]);
+        const carInput = el("input", { value: s.car || "", style: "max-width:220px" });
         editToggleWrap.appendChild(el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
+          el("div", { class: "muted", style: "font-size:11px;margin-bottom:4px", text: "Car / Title — GHL doesn't tell us if this gets edited after booking" }),
+          el("div", { style: "display:flex;gap:6px;align-items:center;margin-bottom:10px" }, [
+            carInput,
+            el("button", { class: "ghost", onclick: async () => { if (!carInput.value.trim()) return; await api(`/api/manager/jobs/${s.id}`, { method: "PATCH", body: JSON.stringify({ car: carInput.value }) }); load(); }, text: "Save" }),
+          ]),
           el("div", { class: "muted", style: "font-size:11px;margin-bottom:4px", text: "Date / time" }),
           el("div", { style: "display:flex;gap:6px;align-items:center;margin-bottom:10px" }, [
             dtInput,
@@ -1492,18 +1503,22 @@ async function renderSalesSchedule(content) {
   const searchInput = el("input", { placeholder: "Search by car or customer name...", style: "max-width:320px" });
   let searchMode = false;
 
-  function renderJobRow(job) {
+  function renderJobCard(job) {
     const statusLabel = job.status === "arrived" ? "Showed" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
-    const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)";
-    return el("div", { class: "card row" }, [
-      el("div", {}, [
-        el("div", { style: "font-weight:500", text: job.car }),
-        el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.customerName || ""} · ${job.baseService || ""}` }),
+    const { cardStyle, badge } = cancelledTreatment(job.status);
+    const notesSection = renderNotesSection(job, () => searchMode ? runSearch() : load());
+    return el("div", { class: "card", style: cardStyle }, [
+      el("div", { class: "row", style: "margin-bottom:8px" }, [
+        el("div", {}, [
+          el("div", { style: "font-weight:500" }, [el("span", { text: job.car }), badge]),
+          el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.customerName || ""} · ${job.baseService || ""}` }),
+        ]),
+        el("div", { style: "text-align:right" }, [
+          el("div", { class: "mono", style: "color:var(--amber)", text: money(job.basePrice) }),
+          el("div", { style: `color:${job.status === "arrived" ? "var(--green)" : job.status === "no_show" || job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)"};font-size:12px;font-weight:600`, text: statusLabel }),
+        ]),
       ]),
-      el("div", { style: "text-align:right" }, [
-        el("div", { class: "mono", style: "color:var(--amber)", text: money(job.basePrice) }),
-        el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
-      ]),
+      notesSection,
     ]);
   }
 
@@ -1522,7 +1537,7 @@ async function renderSalesSchedule(content) {
     }
     const matches = allJobs.filter((j) => (j.car || "").toLowerCase().includes(q) || (j.customerName || "").toLowerCase().includes(q));
     if (matches.length === 0) { body.appendChild(el("div", { class: "muted", text: "No matching bookings found." })); return; }
-    matches.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => body.appendChild(renderJobRow(job)));
+    matches.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((job) => body.appendChild(renderJobCard(job)));
   }
   searchInput.addEventListener("input", () => { clearTimeout(searchInput._t); searchInput._t = setTimeout(runSearch, 300); });
 
@@ -1533,7 +1548,9 @@ async function renderSalesSchedule(content) {
     const jobs = await api(`/api/my/sales-schedule?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "No bookings on this day." })); return; }
-    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => body.appendChild(renderJobRow(job)));
+    const { cols, wrap } = makeServiceColumns();
+    body.appendChild(wrap);
+    jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => cols[serviceColumnFor(job.baseService)].appendChild(renderJobCard(job)));
   }
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Status here is set by your manager — this is a read-only view of what you booked and whether it showed." }));
   content.appendChild(el("div", { class: "field", style: "margin-bottom:10px" }, [el("label", { text: "Search all your bookings" }), searchInput]));
@@ -1553,18 +1570,24 @@ async function renderSalesFullSchedule(content) {
     const jobs = await api(`/api/sales/full-schedule?${qs}`);
     body.innerHTML = "";
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing booked on this day." })); return; }
+    const { cols, wrap } = makeServiceColumns();
+    body.appendChild(wrap);
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const statusLabel = job.status === "arrived" ? "Arrived" : job.status === "no_show" ? "No-show" : job.status === "cancelled" ? "Cancelled" : job.status === "unconfirmed" ? "Unconfirmed" : "Upcoming";
       const statusColor = job.status === "arrived" ? "var(--green)" : job.status === "no_show" ? "var(--red)" : job.status === "cancelled" ? "var(--red)" : job.status === "unconfirmed" ? "var(--amber)" : "var(--sub)";
-      body.appendChild(el("div", { class: "card row" }, [
-        el("div", {}, [
-          el("div", { style: "font-weight:500", text: job.car }),
-          el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || ""} · ${job.employeeNames}` }),
+      const { cardStyle, badge } = cancelledTreatment(job.status);
+      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card", style: cardStyle }, [
+        el("div", { class: "row", style: "margin-bottom:8px" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500" }, [el("span", { text: job.car }), badge]),
+            el("div", { class: "muted", text: `${formatDateTime(job.date)} · ${job.baseService || ""} · ${job.employeeNames}` }),
+          ]),
+          el("div", { style: "text-align:right" }, [
+            el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
+            job.completed ? el("div", { class: "muted", style: "font-size:11px", text: "Service complete" }) : null,
+          ]),
         ]),
-        el("div", { style: "text-align:right" }, [
-          el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
-          job.completed ? el("div", { class: "muted", style: "font-size:11px", text: "Service complete" }) : null,
-        ]),
+        renderNotesSection(job, () => load()),
       ]));
     });
   }
