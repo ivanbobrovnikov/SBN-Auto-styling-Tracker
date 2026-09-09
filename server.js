@@ -933,7 +933,7 @@ function actorInfo(req, db) {
 app.post("/api/manager/cash-entries", requireManager, (req, res) => {
   const db = loadDB();
   const { type, amount, category, note, isOnline } = req.body;
-  if (!["cashIn", "cashOut", "cardExpense"].includes(type)) return res.status(400).json({ error: "Invalid entry type." });
+  if (!["cashIn", "cashOut", "cardExpense", "bankDeposit"].includes(type)) return res.status(400).json({ error: "Invalid entry type." });
   const amt = parseFloat(amount);
   if (!amt || amt <= 0) return res.status(400).json({ error: "A real amount is required." });
   const actor = actorInfo(req, db);
@@ -1018,14 +1018,20 @@ app.get("/api/owner/cash-entries", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const entries = db.cashEntries.filter((e) => e.timestamp >= start && e.timestamp <= end);
+  // "Cash in" specifically means cash collected from customers - the money that actually
+  // enters the drawer. Depositing that cash into the bank is a separate, later event, and
+  // reduces cash on hand the same way an expense would, but gets tracked as its own real
+  // number rather than lumped in with generic spending.
   const totalCashIn = entries.filter((e) => e.type === "cashIn").reduce((a, e) => a + e.amount, 0);
   const totalCashOut = entries.filter((e) => e.type === "cashOut").reduce((a, e) => a + e.amount, 0);
   const totalCardExpense = entries.filter((e) => e.type === "cardExpense").reduce((a, e) => a + e.amount, 0);
+  const totalBankDeposits = entries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + e.amount, 0);
   const byCategory = {};
-  entries.filter((e) => e.type !== "cashIn").forEach((e) => { byCategory[e.category] = (byCategory[e.category] || 0) + e.amount; });
+  entries.filter((e) => e.type !== "cashIn" && e.type !== "bankDeposit").forEach((e) => { byCategory[e.category] = (byCategory[e.category] || 0) + e.amount; });
   res.json({
     entries: entries.slice(0, 200),
-    totalCashIn, totalCashOut, totalCardExpense, netCash: totalCashIn - totalCashOut,
+    totalCashIn, totalCashOut, totalCardExpense, totalBankDeposits,
+    netCash: totalCashIn - totalCashOut - totalBankDeposits,
     byCategory: Object.entries(byCategory).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total),
   });
 });
@@ -2020,6 +2026,52 @@ app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
 const GHL_API_TOKEN = process.env.GHL_API_TOKEN || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
 
+// GHL never fires any event for a plain title edit after booking — there's no signal to
+// listen for, so instead of waiting for one, this periodically asks GHL directly using
+// the same API connection the bulk import uses. Runs on upcoming jobs only, within a
+// reasonable near-term window, so it stays a light, bounded check rather than scanning
+// your entire history every time.
+async function runTitleSync() {
+  if (!GHL_API_TOKEN || !GHL_LOCATION_ID) return { skipped: true, reason: "GHL API not configured on this deployment." };
+  const db = loadDB();
+  const now = new Date();
+  const horizon = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000); // next 3 weeks
+  const candidates = db.sales.filter((s) =>
+    s.contactId && !["arrived", "no_show", "cancelled"].includes(s.status) &&
+    !isNaN(new Date(s.date).getTime()) && new Date(s.date) >= now && new Date(s.date) <= horizon
+  );
+  let checked = 0, updated = 0;
+  for (const sale of candidates) {
+    try {
+      const apptUrl = `https://services.leadconnectorhq.com/contacts/${sale.contactId}/appointments`;
+      const apptRes = await fetch(apptUrl, { headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" } });
+      const apptBody = await apptRes.json().catch(() => null);
+      const events = (apptBody && apptBody.events) || [];
+      if (events.length === 0) continue;
+      const appt = events.slice().sort((a, b) => (a.dateAdded < b.dateAdded ? 1 : -1))[0];
+      checked++;
+      if (appt.title && appt.title.trim() && appt.title.trim() !== sale.car) {
+        const before = sale.car;
+        sale.car = appt.title.trim();
+        if (!db.auditLog) db.auditLog = [];
+        db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
+        db.auditLog = db.auditLog.slice(0, 1000);
+        updated++;
+      }
+      await new Promise((r) => setTimeout(r, 200)); // same pacing as the bulk import - stays well under GHL's rate limits
+    } catch (e) {
+      // one bad lookup shouldn't stop the whole run - just skip it and keep going
+    }
+  }
+  if (updated > 0) saveDB(db);
+  return { skipped: false, candidateCount: candidates.length, checked, updated };
+}
+
+app.post("/api/owner/title-sync-now", requireOwner, async (req, res) => {
+  const result = await runTitleSync();
+  res.json({ ok: true, ...result });
+});
+
 async function ghlTestCall(db, label, url) {
   if (!db.debugLog) db.debugLog = [];
   if (!GHL_API_TOKEN || !GHL_LOCATION_ID) {
@@ -2407,6 +2459,10 @@ const server = app.listen(PORT, () => {
   // then every hour after that — no manual clicking required.
   setTimeout(runCloudBackup, 15 * 1000);
   setInterval(runCloudBackup, 60 * 60 * 1000);
+  // Same idea for title sync — GHL never tells us when a title gets edited, so this asks
+  // directly, on its own, every 30 minutes, no manual click required.
+  setTimeout(runTitleSync, 30 * 1000);
+  setInterval(runTitleSync, 30 * 60 * 1000);
 });
 // A walk-around video can take a while to upload on a slow shop wifi or mobile connection —
 // Node's default request timeout is too tight for that, so this gives uploads real room.
