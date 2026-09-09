@@ -47,8 +47,12 @@ function nextOrTodayTuesday(fromDateStr) {
 // land on a Tuesday that doesn't align with that cadence (e.g. Sept 1, which is a real
 // Tuesday but only 7 days after the anchor, not 14) — this stepper makes that impossible.
 const PAY_PERIOD_ANCHOR = "2026-08-25";
-function nearestValidPayPeriodEnd(referenceDateStr) {
-  const anchor = new Date(PAY_PERIOD_ANCHOR + "T00:00:00Z");
+// Sales reps run a genuinely different cadence — Thursday morning through the following
+// Wednesday night, one calendar day offset from the tech/manager cycle above. Same 14-day
+// length, just shifted, so this gets its own anchor rather than reusing the one above.
+const SALES_PAY_PERIOD_ANCHOR = "2026-08-26";
+function nearestValidPayPeriodEnd(referenceDateStr, anchorOverride) {
+  const anchor = new Date((anchorOverride || PAY_PERIOD_ANCHOR) + "T00:00:00Z");
   const ref = new Date(referenceDateStr + "T00:00:00Z");
   let n = Math.max(1, Math.ceil((ref - anchor) / (1000 * 60 * 60 * 24 * 14)));
   let end = new Date(anchor);
@@ -57,7 +61,7 @@ function nearestValidPayPeriodEnd(referenceDateStr) {
   return end.toISOString().slice(0, 10);
 }
 
-function renderPeriodPicker(onChange, defaultPeriod = "month") {
+function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) {
   let period = defaultPeriod;
   const today = new Date().toISOString().slice(0, 10);
   const vis = (key) => (period === key ? "" : "display:none");
@@ -65,7 +69,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month") {
   const weekInput = el("input", { type: "date", value: today, style: vis("week") });
   const monthInput = el("input", { type: "month", value: today.slice(0, 7), style: vis("month") });
   const yearInput = el("input", { type: "number", value: String(new Date().getFullYear()), style: vis("year") + ";max-width:100px" });
-  let payPeriodEnd = nearestValidPayPeriodEnd(today);
+  let payPeriodEnd = nearestValidPayPeriodEnd(today, payPeriodAnchor);
   const payPeriodLabel = el("div", { class: "muted", style: `font-size:11.5px;${vis("payperiod")}` });
   const payPeriodStepper = el("div", { style: `display:flex;gap:8px;align-items:center;${vis("payperiod")}` });
 
@@ -615,42 +619,55 @@ async function renderOwnerPayroll(content) {
       body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "MANAGERS — EACH PERSON'S OWN UPSELLS" }));
       d.managers.forEach((m) => body.appendChild(personCard(m, `${m.upsellCount} upsell${m.upsellCount !== 1 ? "s" : ""} sold`)));
     }
+  }
 
-    if (d.salesReps && d.salesReps.length > 0) {
-      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "SALES REPS — COMMISSION ON SHOWED SALES" }));
-      d.salesReps.forEach((r) => {
-        body.appendChild(el("div", { class: "card" }, [
-          el("div", { class: "row", style: "margin-bottom:2px" }, [
-            el("div", { class: "oswald", style: "font-size:15px", text: r.name }),
-            el("div", { class: "mono", style: "color:var(--amber);font-size:16px", text: money(r.showedValue) }),
-          ]),
-          el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `${r.totalBooked} booked · ${r.showedCount} showed (no-shows earn nothing)` }),
-          r.noShowCount > 0
-            ? el("div", { class: "muted", style: `font-size:11.5px;margin-bottom:10px;color:${r.noShowRate >= 20 ? "var(--red)" : "var(--sub)"}`, text: `${r.noShowCount} no-show${r.noShowCount !== 1 ? "s" : ""} — ${Math.round(r.noShowRate)}% no-show rate` })
-            : el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: "0 no-shows" }),
-          r.commissionRate > 0
-            ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
-                el("span", { class: "muted", style: "font-size:12.5px", text: `Commission owed (${r.commissionRate}% of showed value)` }),
-                el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(r.commission) }),
-              ])
-            : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No commission rate set for this person." }),
-          (r.duplicateWarnings || []).length > 0
-            ? el("div", { style: "margin-top:10px;padding:10px;border:1px solid var(--red);border-radius:var(--radius);background:var(--fill-danger, rgba(242,88,95,0.08))" }, [
-                el("div", { style: "font-size:12px;font-weight:600;color:var(--red);margin-bottom:6px", text: `⚠ ${r.duplicateWarnings.length} possible duplicate job(s) — same real customer appears more than once, both counted toward the commission above` }),
-                ...r.duplicateWarnings.map((w) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:2px" }, [
-                  el("span", {}, [el("span", { text: w.car }), el("span", { class: "muted", text: ` · ${formatDateTime(w.date)}` })]),
-                  el("span", { class: "mono", style: "color:var(--red)", text: `+${money(w.commissionAmount)}` }),
-                ])),
-                el("div", { class: "muted", style: "font-size:10.5px;margin-top:6px", text: "Check Test Tool → \"Check for duplicate jobs\" to review and remove the extra one." }),
-              ])
-            : null,
-        ]));
-      });
-    }
+  // Sales reps run a different pay period entirely (Thursday through the following
+  // Wednesday, not the Tuesday-to-Tuesday cycle above) — so this is a fully separate
+  // section with its own stepper, not sharing the picker above at all.
+  const salesRepBody = el("div");
+  const salesRepPicker = renderPeriodPicker((params) => loadSalesReps(params), "payperiod", SALES_PAY_PERIOD_ANCHOR);
+  async function loadSalesReps(params) {
+    const p = params || salesRepPicker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const d = await api(`/api/owner/payroll?${qs}`);
+    salesRepBody.innerHTML = "";
+    if (!d.salesReps || d.salesReps.length === 0) { salesRepBody.appendChild(el("div", { class: "muted", text: "No sales reps added yet." })); return; }
+    d.salesReps.forEach((r) => {
+      salesRepBody.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row", style: "margin-bottom:2px" }, [
+          el("div", { class: "oswald", style: "font-size:15px", text: r.name }),
+          el("div", { class: "mono", style: "color:var(--amber);font-size:16px", text: money(r.showedValue) }),
+        ]),
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `${r.totalBooked} booked · ${r.showedCount} showed (no-shows earn nothing)` }),
+        r.noShowCount > 0
+          ? el("div", { class: "muted", style: `font-size:11.5px;margin-bottom:10px;color:${r.noShowRate >= 20 ? "var(--red)" : "var(--sub)"}`, text: `${r.noShowCount} no-show${r.noShowCount !== 1 ? "s" : ""} — ${Math.round(r.noShowRate)}% no-show rate` })
+          : el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: "0 no-shows" }),
+        r.commissionRate > 0
+          ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
+              el("span", { class: "muted", style: "font-size:12.5px", text: `Commission owed (${r.commissionRate}% of showed value)` }),
+              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(r.commission) }),
+            ])
+          : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No commission rate set for this person." }),
+        (r.duplicateWarnings || []).length > 0
+          ? el("div", { style: "margin-top:10px;padding:10px;border:1px solid var(--red);border-radius:var(--radius);background:var(--fill-danger, rgba(242,88,95,0.08))" }, [
+              el("div", { style: "font-size:12px;font-weight:600;color:var(--red);margin-bottom:6px", text: `⚠ ${r.duplicateWarnings.length} possible duplicate job(s) — same real customer appears more than once, both counted toward the commission above` }),
+              ...r.duplicateWarnings.map((w) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:2px" }, [
+                el("span", {}, [el("span", { text: w.car }), el("span", { class: "muted", text: ` · ${formatDateTime(w.date)}` })]),
+                el("span", { class: "mono", style: "color:var(--red)", text: `+${money(w.commissionAmount)}` }),
+              ])),
+              el("div", { class: "muted", style: "font-size:10.5px;margin-top:6px", text: "Check Test Tool → \"Check for duplicate jobs\" to review and remove the extra one." }),
+            ])
+          : null,
+      ]));
+    });
   }
   content.appendChild(picker.el);
   content.appendChild(body);
+  content.appendChild(el("div", { class: "muted", style: "margin:20px 0 8px;font-size:11.5px;letter-spacing:0.04em;border-top:0.5px solid var(--border);padding-top:16px", text: "SALES REPS — SEPARATE PAY PERIOD (THU–WED)" }));
+  content.appendChild(salesRepPicker.el);
+  content.appendChild(salesRepBody);
   await load();
+  await loadSalesReps();
 }
 
 function openPrintableReport(title, s, periodLabel) {
@@ -1003,6 +1020,13 @@ function renderCashEntryForm(onSaved) {
   });
 
   const typeBtns = {};
+  function updateFieldVisibility() {
+    const isDeposit = selectedType === "bankDeposit";
+    categoryField.style.display = isDeposit ? "none" : "";
+    onlineField.style.display = isDeposit ? "none" : "";
+    noteLabel.textContent = isDeposit ? "Reference / notes (optional)" : "What was it for";
+    receiptBtn.textContent = isDeposit ? "Attach bank deposit receipt" : "Attach receipt";
+  }
   function typeBtn(value, label) {
     const btn = el("button", {
       class: "tab-btn" + (value === selectedType ? " active" : ""),
@@ -1011,6 +1035,7 @@ function renderCashEntryForm(onSaved) {
         selectedType = value;
         Object.values(typeBtns).forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
+        updateFieldVisibility();
       },
       text: label,
     });
@@ -1018,17 +1043,23 @@ function renderCashEntryForm(onSaved) {
     return btn;
   }
 
+  const categoryField = el("div", { class: "field" }, [el("label", { text: "Category" }), categorySelect]);
+  const onlineField = el("div", { style: "display:flex;align-items:center;gap:8px;margin:8px 0" }, [onlineCheck, el("span", { style: "font-size:13px", text: "Bought online" })]);
+  const receiptBtn = el("button", { class: "ghost", onclick: () => receiptInput.click(), text: "Attach receipt" });
+  const noteLabel = el("label", { text: "What was it for" });
+  updateFieldVisibility();
+
   return el("div", { class: "card" }, [
     el("div", { style: "font-weight:500;margin-bottom:10px", text: "Log an expense" }),
-    el("div", { style: "display:flex;gap:8px;margin-bottom:12px" }, [
-      typeBtn("cashOut", "Cash out"), typeBtn("cardExpense", "Card expense"), typeBtn("cashIn", "Cash in"),
+    el("div", { style: "display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap" }, [
+      typeBtn("cashOut", "Cash out"), typeBtn("cardExpense", "Card expense"), typeBtn("cashIn", "Cash in"), typeBtn("bankDeposit", "Bank Deposit"),
     ]),
     el("div", { class: "field" }, [el("label", { text: "Amount" }), amountInput]),
-    el("div", { class: "field" }, [el("label", { text: "Category" }), categorySelect]),
-    el("div", { class: "field" }, [el("label", { text: "What was it for" }), noteInput]),
-    el("div", { style: "display:flex;align-items:center;gap:8px;margin:8px 0" }, [onlineCheck, el("span", { style: "font-size:13px", text: "Bought online" })]),
+    categoryField,
+    el("div", { class: "field" }, [noteLabel, noteInput]),
+    onlineField,
     el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:12px" }, [
-      el("button", { class: "ghost", onclick: () => receiptInput.click(), text: "Attach receipt" }),
+      receiptBtn,
       receiptLabel, receiptInput,
     ]),
     el("button", { class: "primary", onclick: async () => {
@@ -1056,7 +1087,7 @@ async function renderCashLog(content) {
     listEl.appendChild(el("div", { class: "muted", style: "margin-bottom:8px", text: "YOUR RECENT ENTRIES" }));
     if (mine.length === 0) { listEl.appendChild(el("div", { class: "muted", text: "Nothing logged yet." })); return; }
     mine.forEach((e) => {
-      const typeLabel = e.type === "cashIn" ? "Cash in" : e.type === "cashOut" ? "Cash out" : "Card expense";
+      const typeLabel = e.type === "cashIn" ? "Cash in" : e.type === "cashOut" ? "Cash out" : e.type === "bankDeposit" ? "Bank Deposit" : "Card expense";
       const typeColor = e.type === "cashIn" ? "var(--green)" : "var(--red)";
       listEl.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row" }, [
@@ -1093,10 +1124,11 @@ async function renderOwnerCash(content) {
     const d = await api(`/api/owner/cash-entries?${qs}`);
     body.innerHTML = "";
     body.appendChild(el("div", { class: "metric-grid" }, [
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash in" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.totalCashIn) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash in (from customers)" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.totalCashIn) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash out" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCashOut) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Card expenses" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCardExpense) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Net cash" }), el("div", { class: "metric-value mono", style: `color:${d.netCash >= 0 ? "var(--green)" : "var(--red)"}`, text: money(d.netCash) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Bank deposits" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(d.totalBankDeposits) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Net cash on hand" }), el("div", { class: "metric-value mono", style: `color:${d.netCash >= 0 ? "var(--green)" : "var(--red)"}`, text: money(d.netCash) })]),
     ]));
     if (d.byCategory.length) {
       body.appendChild(el("div", { class: "card" }, [
@@ -1109,7 +1141,7 @@ async function renderOwnerCash(content) {
     body.appendChild(el("div", { class: "muted", style: "margin:14px 0 8px", text: "ALL ENTRIES" }));
     if (d.entries.length === 0) body.appendChild(el("div", { class: "muted", text: "Nothing logged in this period." }));
     d.entries.forEach((e) => {
-      const typeLabel = e.type === "cashIn" ? "Cash in" : e.type === "cashOut" ? "Cash out" : "Card expense";
+      const typeLabel = e.type === "cashIn" ? "Cash in" : e.type === "cashOut" ? "Cash out" : e.type === "bankDeposit" ? "Bank Deposit" : "Card expense";
       const typeColor = e.type === "cashIn" ? "var(--green)" : "var(--red)";
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row" }, [
