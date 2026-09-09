@@ -321,8 +321,30 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     else if (n) unmatched.push(n);
   });
   const attribution = resolveSalesRepAttribution(db, salesRepName, car);
-  const isNew = !db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  let isNew = !sale;
+  if (!sale && contactId) {
+    // A reschedule in GHL can generate a brand-new Appointment ID for what is logically the
+    // same booking — matching strictly by that ID would treat it as an unrelated new job.
+    // Falling back to "same customer, still unresolved" catches this safely: a genuinely
+    // different repeat visit would already be arrived/no_show/cancelled by the time a new
+    // one gets booked, so this can't accidentally merge two separate real appointments.
+    const existingUnresolved = db.sales.find((s) => s.contactId === contactId && !["arrived", "no_show", "cancelled"].includes(s.status));
+    if (existingUnresolved) {
+      sale = existingUnresolved;
+      isNew = false;
+      const oldOppId = sale.ghlOpportunityId;
+      sale.ghlOpportunityId = ghlOpportunityId; // future events for this booking now match directly
+      if (oldOppId !== ghlOpportunityId) {
+        if (!db.auditLog) db.auditLog = [];
+        db.auditLog.unshift({
+          id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (reschedule)",
+          saleId: sale.id, car: sale.car, field: "GHL Opportunity ID", oldValue: oldOppId, newValue: ghlOpportunityId,
+        });
+        db.auditLog = db.auditLog.slice(0, 1000);
+      }
+    }
+  }
   if (!sale) {
     sale = { id: newId(), ghlOpportunityId, upsells: [], status: "pending", completed: false, paid: false };
     db.sales.push(sale);
