@@ -1016,7 +1016,7 @@ function renderYearGrid(sales, yearStr) {
 // Shared entry-logging form - used by both the manager's Cash Log and the owner's Cash &
 // Expenses page, so logging works identically for everyone regardless of role.
 function renderCashEntryForm(onSaved) {
-  const CATEGORIES = ["Supplies", "Utilities", "Marketing", "Payroll Advance", "Other"];
+  const CATEGORIES = ["Customer Payment", "Supplies", "Tools", "Misc", "Other"];
   let selectedType = "cashOut";
   const amountInput = el("input", { type: "number", placeholder: "0.00", style: "max-width:140px" });
   const categorySelect = el("select", {}, CATEGORIES.map((c) => el("option", { value: c, text: c })));
