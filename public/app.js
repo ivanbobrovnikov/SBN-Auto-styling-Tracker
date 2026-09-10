@@ -17,9 +17,13 @@ const el = (tag, attrs = {}, children = []) => {
 async function api(path, opts = {}) {
   // Almost every action in this app triggers a reload that rebuilds part of the page right
   // after — replacing that much DOM out from under the browser is what's causing the
-  // scroll-jump-and-back glitch. Capturing the scroll position here and restoring it right
-  // after the next paint settles is what stops it.
+  // scroll-jump-and-back glitch. Typing into a field also opens the mobile keyboard, and
+  // submitting closes it — that's a separate, slower scroll adjustment that a single quick
+  // restore can miss entirely, since the keyboard's own closing animation can still be
+  // running well after the DOM has already settled. Restoring at several points, from
+  // immediate through a few hundred milliseconds out, catches both causes.
   const scrollY = window.scrollY;
+  const restore = () => { if (window.scrollY !== scrollY) window.scrollTo(0, scrollY); };
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -27,9 +31,8 @@ async function api(path, opts = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Something went wrong.");
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
-  }));
+  requestAnimationFrame(() => requestAnimationFrame(restore));
+  [100, 250, 400, 600].forEach((ms) => setTimeout(restore, ms));
   return data;
 }
 function money(n) { return "$" + (Math.round((n || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -2300,6 +2303,8 @@ async function renderManagerJobs(content) {
       });
 
       const upsellList = el("div", { style: "margin-bottom:6px" }, (job.upsells || []).map((u) => {
+        const nameInput = el("input", { value: u.name, style: "max-width:120px;font-size:12px" });
+        const priceInput = el("input", { type: "number", value: u.price, style: "max-width:65px;font-size:12px" });
         const creditSelect = el("select", {
           style: "max-width:170px;font-size:11px;margin-left:6px;background:var(--panel);border:0.5px solid var(--border);border-radius:6px;color:var(--sub);padding:2px 4px",
           onchange: async (e) => {
@@ -2313,9 +2318,17 @@ async function renderManagerJobs(content) {
           ...managersList.map((m) => el("option", { value: `manager::${m.id}`, text: `Manager: ${m.name}`, ...(u.managerId === m.id ? { selected: "true" } : {}) })),
           ...salesRepsList.map((r) => el("option", { value: `salesrep::${r.id}`, text: `Rep: ${r.name}`, ...(u.salesRepId === r.id ? { selected: "true" } : {}) })),
         ]);
-        return el("div", { style: "display:inline-flex;align-items:center;margin-bottom:4px;margin-right:8px" }, [
-          el("span", { class: "pill", style: "margin:0", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` }),
-          creditSelect,
+        return el("div", { style: "display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:6px;background:var(--panel);border-radius:7px;padding:4px 6px" }, [
+          nameInput, priceInput, creditSelect,
+          el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: async () => {
+            await api(`/api/sales/${job.id}/upsells/${u.id}`, { method: "PATCH", body: JSON.stringify({ name: nameInput.value, price: priceInput.value }) });
+            load();
+          }, text: "Save" }),
+          el("button", { class: "icon-danger", style: "font-size:10px;padding:3px 7px", onclick: async () => {
+            if (!confirm("Delete this upsell?")) return;
+            await api(`/api/sales/${job.id}/upsells/${u.id}`, { method: "DELETE" });
+            load();
+          }, text: "✕" }),
         ]);
       }));
       const upsellForm = renderUpsellForm(job.id, () => load());
