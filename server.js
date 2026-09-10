@@ -944,7 +944,7 @@ app.get("/api/manager/salesreps-list", requireManager, (req, res) => {
 // Managers log entries but only ever see their OWN log — never shop-wide totals. Full
 // visibility and editing across everyone belongs to the owner only. This is a deliberate
 // boundary, not an oversight: managers track what they spend, they don't see the till.
-const CASH_CATEGORIES = ["Supplies", "Utilities", "Marketing", "Payroll Advance", "Other"];
+const CASH_CATEGORIES = ["Customer Payment", "Supplies", "Tools", "Misc", "Other"];
 
 function actorInfo(req, db) {
   if (req.auth.role === "owner") return { type: "owner", id: "owner", name: "Owner" };
