@@ -326,10 +326,15 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   if (!sale && contactId) {
     // A reschedule in GHL can generate a brand-new Appointment ID for what is logically the
     // same booking — matching strictly by that ID would treat it as an unrelated new job.
-    // Falling back to "same customer, still unresolved" catches this safely: a genuinely
-    // different repeat visit would already be arrived/no_show/cancelled by the time a new
-    // one gets booked, so this can't accidentally merge two separate real appointments.
-    const existingUnresolved = db.sales.find((s) => s.contactId === contactId && !["arrived", "no_show", "cancelled"].includes(s.status));
+    // But the same customer can genuinely book more than one car at once, so matching by
+    // contact alone isn't safe — that could silently merge two real, separate jobs into
+    // one, which is worse than a duplicate since one of them would just vanish. Requiring
+    // the car/title text to also match is what actually distinguishes "this exact booking
+    // got rescheduled" from "this customer booked a second, different car."
+    const normalize = (s) => String(s || "").trim().toLowerCase();
+    const existingUnresolved = db.sales.find((s) =>
+      s.contactId === contactId && !["arrived", "no_show", "cancelled"].includes(s.status) && normalize(s.car) === normalize(car)
+    );
     if (existingUnresolved) {
       sale = existingUnresolved;
       isNew = false;
@@ -1115,6 +1120,19 @@ app.get("/api/owner/attendance-summary", requireOwner, (req, res) => {
 
 // Finds every job missing a base price or a sales rep, regardless of when it happened —
 // this is the cleanup tool for catching up jobs that came in before a fix was live.
+// Shown up but not yet paid — the exact gap between "Shown up" and "Total revenue" on the
+// dashboard, surfaced directly instead of making someone notice the two numbers don't
+// match and go hunting for why. No date restriction, same as Cleanup, since this is meant
+// to catch anything that's fallen through the cracks regardless of when it happened.
+app.get("/api/manager/unpaid-arrived", requireManager, (req, res) => {
+  const db = loadDB();
+  const jobs = db.sales.filter((s) => s.status === "arrived" && !s.paid);
+  res.json(jobs.map((s) => ({
+    id: s.id, date: s.date, car: s.car, customerName: s.customerName, customerPhone: s.customerPhone,
+    baseService: s.baseService, basePrice: s.basePrice || 0, total: saleTotal(s), employeeNames: s.employeeNames || "Unassigned",
+  })).sort((a, b) => (a.date < b.date ? 1 : -1)));
+});
+
 app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   const db = loadDB();
   const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
