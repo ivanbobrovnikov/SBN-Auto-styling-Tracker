@@ -247,10 +247,10 @@ const TAB_ICONS = {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
-    allTabs = [["manager-jobs", "Job status"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"]];
+    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"]];
     primaryKeys = ["manager-jobs", "owner-attendance", "owner-search", "manager-performance"];
   } else if (session.role === "sales") {
     allTabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
@@ -504,6 +504,7 @@ async function renderManagerTabContent(content) {
   if (currentTab === "owner-cleanup") return renderCleanup(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "manager-cash") return renderCashLog(content);
+  if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
   if (currentTab === "manager-performance") return renderManagerPerformance(content);
   return renderManagerJobs(content);
 }
@@ -520,6 +521,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-audit") return renderCommissionAudit(content);
   if (currentTab === "owner-edit-history") return renderEditHistory(content);
   if (currentTab === "owner-cash") return renderOwnerCash(content);
+  if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
@@ -654,9 +656,12 @@ async function renderOwnerPayroll(content) {
           ? el("div", { class: "muted", style: `font-size:11.5px;margin-bottom:10px;color:${r.noShowRate >= 20 ? "var(--red)" : "var(--sub)"}`, text: `${r.noShowCount} no-show${r.noShowCount !== 1 ? "s" : ""} — ${Math.round(r.noShowRate)}% no-show rate` })
           : el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: "0 no-shows" }),
         r.commissionRate > 0
-          ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
-              el("span", { class: "muted", style: "font-size:12.5px", text: `Commission owed (${r.commissionRate}% of showed value)` }),
-              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(r.commission) }),
+          ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
+              el("div", { class: "row" }, [
+                el("span", { class: "muted", style: "font-size:12.5px", text: "Commission owed" }),
+                el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(r.commission) }),
+              ]),
+              el("div", { class: "muted", style: "font-size:10.5px;margin-top:2px", text: `${r.duringHoursCount} in-hours sale${r.duringHoursCount !== 1 ? "s" : ""} @ ${r.commissionRate}% + ${r.afterHoursCount} after-hours sale${r.afterHoursCount !== 1 ? "s" : ""} @ ${r.afterHoursCommissionRate}% — calculated per sale, not a flat rate` }),
             ])
           : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No commission rate set for this person." }),
         (r.duplicateWarnings || []).length > 0
@@ -855,6 +860,21 @@ function openPrintableReport(title, s, periodLabel) {
       ]),
       el("div", { class: "muted", style: "font-size:11px;margin-top:8px", text: "\"Shown up\" counts the moment a car arrives, even before it's paid. \"Total revenue\" above is decided purely by payment — cash, card, or both — regardless of whether the service has been marked complete yet." }),
     ]));
+
+    const unpaidArrived = await api("/api/manager/unpaid-arrived");
+    const unpaidTotal = unpaidArrived.reduce((a, j) => a + (j.total || 0), 0);
+    if (unpaidArrived.length > 0) {
+      body.appendChild(el("div", {
+        class: "card", style: "cursor:pointer;border-color:var(--amber)",
+        onclick: () => { currentTab = "owner-unpaid"; render(); },
+      }, [
+        el("div", { class: "row" }, [
+          el("div", { class: "muted", text: `⚠ ${unpaidArrived.length} job${unpaidArrived.length !== 1 ? "s" : ""} showed up but haven't been marked paid — this is the gap you're seeing between Shown Up and Total Revenue` }),
+          el("div", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(unpaidTotal) }),
+        ]),
+        el("div", { class: "muted", style: "font-size:10.5px;margin-top:4px", text: "Tap to view and mark paid" }),
+      ]));
+    }
   }
   content.appendChild(picker.el);
   content.appendChild(actions);
@@ -1087,6 +1107,46 @@ function renderCashEntryForm(onSaved) {
       onSaved();
     }, text: "Save entry" }),
   ]);
+}
+
+// The exact gap between "Shown up" and "Total revenue" on the dashboard, made visible
+// directly instead of making someone notice the two numbers don't match and go hunting.
+// Every job here showed up but was never marked paid — a quick mark-paid button resolves
+// it right from this list.
+async function renderUnpaidArrived(content) {
+  const body = el("div");
+  const summary = el("div", { class: "card" });
+  async function load() {
+    const jobs = await api("/api/manager/unpaid-arrived");
+    body.innerHTML = "";
+    const totalAtStake = jobs.reduce((a, j) => a + (j.total || 0), 0);
+    summary.innerHTML = "";
+    summary.appendChild(el("div", { class: "row" }, [
+      el("span", { class: "muted", style: "font-size:13px", text: `${jobs.length} job${jobs.length !== 1 ? "s" : ""} showed up but haven't been marked paid` }),
+      el("span", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(totalAtStake) }),
+    ]));
+    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing outstanding — every arrived job is marked paid." })); return; }
+    jobs.forEach((j) => {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row", style: "margin-bottom:8px" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: j.car }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: `${formatDateTime(j.date)}${j.customerName ? " · " + j.customerName : ""}${j.customerPhone ? " · " + j.customerPhone : ""}` }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: `${j.baseService || "no service set"} · ${j.employeeNames}` }),
+          ]),
+          el("div", { class: "mono", style: "color:var(--amber);font-size:16px;font-weight:600", text: money(j.total) }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;justify-content:flex-end" }, [
+          el("button", { class: "primary", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ paidCash: true }) }); load(); }, text: "Mark paid — Cash" }),
+          el("button", { class: "primary", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ paidCard: true }) }); load(); }, text: "Mark paid — Card" }),
+        ]),
+      ]));
+    });
+  }
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Every job that showed up but hasn't been marked paid yet — this is exactly why \"Shown up\" and \"Total revenue\" won't always match on the dashboard." }));
+  content.appendChild(summary);
+  content.appendChild(body);
+  await load();
 }
 
 async function renderCashLog(content) {
