@@ -1058,7 +1058,10 @@ app.get("/api/owner/cash-entries", requireOwner, (req, res) => {
   res.json({
     entries: entries.slice(0, 200),
     totalCashIn, totalCashOut, totalCardExpense, totalBankDeposits,
-    netCash: totalCashIn - totalCashOut - totalBankDeposits,
+    // Floored at zero - if a deposit gets logged before any cash-in has actually been
+    // tracked yet (e.g. just starting to use this feature), the raw subtraction would go
+    // negative, which isn't a real number, just an artifact of where tracking started.
+    netCash: Math.max(0, totalCashIn - totalCashOut - totalBankDeposits),
     byCategory: Object.entries(byCategory).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total),
   });
 });
