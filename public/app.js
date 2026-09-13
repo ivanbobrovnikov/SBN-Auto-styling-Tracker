@@ -491,6 +491,21 @@ async function renderPerformance(content) {
           : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px", text: "No walk-in commission rate set for you yet." }),
       ]));
     }
+    if (stats.payType) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` }),
+        el("div", { class: "row" }, [
+          el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : `${stats.basePay.hoursCounted.toFixed(1)} hours worked` }),
+          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.basePay.amount) }),
+        ]),
+      ]));
+    }
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "row" }, [
+        el("span", { style: "font-weight:600;font-size:14px", text: "Total owed to you" }),
+        el("span", { class: "mono", style: "color:var(--amber);font-weight:700;font-size:18px", text: money(stats.totalPay) }),
+      ]),
+    ]));
   }
   content.appendChild(picker.el);
   content.appendChild(body);
@@ -610,6 +625,22 @@ async function renderOwnerPayroll(content) {
             el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.walkInCommission) }),
           ])
         : null,
+      p.payType
+        ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
+            el("div", { class: "row" }, [
+              el("span", { class: "muted", style: "font-size:12.5px", text: p.payType === "salary" ? `Base pay (salary, $${p.salaryPerPeriod}/period)` : `Base pay (hourly, $${p.hourlyRate}/hr)` }),
+              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.basePay.amount) }),
+            ]),
+            el("div", { class: "muted", style: "font-size:10.5px;margin-top:2px", text: p.payType === "salary"
+              ? `${p.basePay.daysPresent} full day(s), ${p.basePay.daysHalf} half day(s), ${p.basePay.daysAbsent} absent`
+              : `${p.basePay.hoursCounted.toFixed(1)} hours worked`
+            }),
+          ])
+        : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px", text: "No base pay type set (Employees/Managers tab)." }),
+      el("div", { class: "row", style: "border-top:1px solid var(--border);padding-top:8px;margin-top:8px" }, [
+        el("span", { style: "font-weight:600;font-size:13px", text: "Total owed" }),
+        el("span", { class: "mono", style: "color:var(--amber);font-weight:700;font-size:16px", text: money(p.totalPay) }),
+      ]),
     ]);
   }
 
@@ -1317,8 +1348,30 @@ async function renderCommissionAudit(content) {
     const qs = new URLSearchParams(p).toString();
     const rows = await api(`/api/owner/commission-audit?${qs}`);
     body.innerHTML = "";
+
+    // Closing activity — how much got closed in this period, regardless of what day the
+    // appointment itself is scheduled for. A deal closed today for an appointment two
+    // weeks out shows up here, even though it won't show up in the list below at all
+    // (that list tracks appointments happening in this period, a different question).
+    const activity = await api(`/api/owner/closing-activity?${qs}`);
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:8px", text: "CLOSING ACTIVITY — deals actually closed in this period, regardless of when the appointment is scheduled for" }),
+      el("div", { class: "metric-grid" }, [
+        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total closes" }), el("div", { class: "metric-value mono", text: activity.totalCloses })]),
+        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Projected commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(activity.totalProjectedCommission) })]),
+      ]),
+      activity.perRep.length > 0
+        ? el("div", { style: "margin-top:8px" }, activity.perRep.map((r) => el("div", { class: "row", style: "font-size:12.5px;margin-bottom:4px" }, [
+            el("span", { text: `${r.name} — ${r.closeCount} close${r.closeCount !== 1 ? "s" : ""} (${r.arrivedCount} arrived, ${r.pendingCount} pending, ${r.noShowCount} no-show)` }),
+            el("span", { class: "mono", style: "color:var(--green)", text: money(r.projectedCommission) }),
+          ])))
+        : null,
+      el("div", { class: "muted", style: "font-size:10.5px;margin-top:6px", text: "\"Projected\" assumes the deal holds — actual commission still only pays out once the customer shows, tracked below and on Payroll." }),
+    ]));
+
     if (rows.length === 0) { body.appendChild(el("div", { class: "muted", text: "No sales rep-attributed appointments in this period." })); return; }
     const totalCommission = rows.reduce((a, r) => a + r.commissionAmount, 0);
+    body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "APPOINTMENTS SCHEDULED IN THIS PERIOD" }));
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Appointments" }), el("div", { class: "metric-value mono", text: rows.length })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(totalCommission) })]),
@@ -1573,19 +1626,44 @@ async function renderOwnerTeam(content) {
       walkInRate.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ walkInCommissionRate: walkInRate.value }) }));
       const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
-      list.appendChild(el("div", { class: "card row" }, [
-        el("div", { style: "flex:1;font-weight:500", text: e.name }),
-        el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
-        el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
-        newPinInput,
-        el("button", { class: "ghost", onclick: async () => {
-          if (!newPinInput.value.trim()) return;
-          await api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ pin: newPinInput.value.trim() }) });
-          newPinInput.value = ""; resetNotice.textContent = "PIN reset ✓"; resetNotice.style.color = "var(--green)";
-          setTimeout(() => { resetNotice.textContent = ""; }, 2500);
-        }, text: "Reset PIN" }),
-        resetNotice,
-        el("button", { class: "icon-danger", onclick: async () => { await api(`/api/employees/${e.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+
+      const payTypeSelect = el("select", { style: "max-width:110px" }, [
+        el("option", { value: "", text: "Not set", ...(!e.payType ? { selected: "true" } : {}) }),
+        el("option", { value: "salary", text: "Salary", ...(e.payType === "salary" ? { selected: "true" } : {}) }),
+        el("option", { value: "hourly", text: "Hourly", ...(e.payType === "hourly" ? { selected: "true" } : {}) }),
+      ]);
+      const salaryInput = el("input", { type: "number", placeholder: "$ per period", value: e.salaryPerPeriod || "", style: `max-width:110px;${e.payType === "salary" ? "" : "display:none"}` });
+      const hourlyInput = el("input", { type: "number", placeholder: "$ per hour", value: e.hourlyRate || "", style: `max-width:90px;${e.payType === "hourly" ? "" : "display:none"}` });
+      payTypeSelect.addEventListener("change", async () => {
+        salaryInput.style.display = payTypeSelect.value === "salary" ? "" : "none";
+        hourlyInput.style.display = payTypeSelect.value === "hourly" ? "" : "none";
+        await api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ payType: payTypeSelect.value || null }) });
+      });
+      salaryInput.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ salaryPerPeriod: salaryInput.value }) }));
+      hourlyInput.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ hourlyRate: hourlyInput.value }) }));
+
+      list.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row", style: "margin-bottom:8px" }, [
+          el("div", { style: "flex:1;font-weight:500", text: e.name }),
+          el("button", { class: "icon-danger", onclick: async () => { await api(`/api/employees/${e.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
+          el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
+          el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
+          el("span", { class: "muted", style: "font-size:11.5px", text: "Base pay:" }), payTypeSelect, salaryInput, hourlyInput,
+        ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
+          newPinInput,
+          el("button", { class: "ghost", onclick: async () => {
+            if (!newPinInput.value.trim()) return;
+            await api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ pin: newPinInput.value.trim() }) });
+            newPinInput.value = ""; resetNotice.textContent = "PIN reset ✓"; resetNotice.style.color = "var(--green)";
+            setTimeout(() => { resetNotice.textContent = ""; }, 2500);
+          }, text: "Reset PIN" }),
+          resetNotice,
+        ]),
       ]));
     });
   }
@@ -2180,6 +2258,21 @@ async function renderManagerPerformance(content) {
           : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px", text: "No walk-in commission rate set for you yet." }),
       ]));
     }
+    if (stats.payType) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` }),
+        el("div", { class: "row" }, [
+          el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : `${stats.basePay.hoursCounted.toFixed(1)} hours worked` }),
+          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.basePay.amount) }),
+        ]),
+      ]));
+    }
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "row" }, [
+        el("span", { style: "font-weight:600;font-size:14px", text: "Total owed to you" }),
+        el("span", { class: "mono", style: "color:var(--amber);font-weight:700;font-size:18px", text: money(stats.totalPay) }),
+      ]),
+    ]));
     body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "CARS YOU UPSOLD THIS PERIOD" }));
     if (!stats.jobs || stats.jobs.length === 0) {
       body.appendChild(el("div", { class: "muted", text: "No upsells logged by you in this period." }));
@@ -2549,19 +2642,44 @@ async function renderOwnerManagers(content) {
       walkInRate.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ walkInCommissionRate: walkInRate.value }) }));
       const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
-      list.appendChild(el("div", { class: "card row" }, [
-        el("div", { style: "flex:1;font-weight:500", text: m.name }),
-        el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
-        el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
-        newPinInput,
-        el("button", { class: "ghost", onclick: async () => {
-          if (!newPinInput.value.trim()) return;
-          await api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ pin: newPinInput.value.trim() }) });
-          newPinInput.value = ""; resetNotice.textContent = "PIN reset ✓"; resetNotice.style.color = "var(--green)";
-          setTimeout(() => { resetNotice.textContent = ""; }, 2500);
-        }, text: "Reset PIN" }),
-        resetNotice,
-        el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+
+      const payTypeSelect = el("select", { style: "max-width:110px" }, [
+        el("option", { value: "", text: "Not set", ...(!m.payType ? { selected: "true" } : {}) }),
+        el("option", { value: "salary", text: "Salary", ...(m.payType === "salary" ? { selected: "true" } : {}) }),
+        el("option", { value: "hourly", text: "Hourly", ...(m.payType === "hourly" ? { selected: "true" } : {}) }),
+      ]);
+      const salaryInput = el("input", { type: "number", placeholder: "$ per period", value: m.salaryPerPeriod || "", style: `max-width:110px;${m.payType === "salary" ? "" : "display:none"}` });
+      const hourlyInput = el("input", { type: "number", placeholder: "$ per hour", value: m.hourlyRate || "", style: `max-width:90px;${m.payType === "hourly" ? "" : "display:none"}` });
+      payTypeSelect.addEventListener("change", async () => {
+        salaryInput.style.display = payTypeSelect.value === "salary" ? "" : "none";
+        hourlyInput.style.display = payTypeSelect.value === "hourly" ? "" : "none";
+        await api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ payType: payTypeSelect.value || null }) });
+      });
+      salaryInput.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ salaryPerPeriod: salaryInput.value }) }));
+      hourlyInput.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ hourlyRate: hourlyInput.value }) }));
+
+      list.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row", style: "margin-bottom:8px" }, [
+          el("div", { style: "flex:1;font-weight:500", text: m.name }),
+          el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
+          el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
+          el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
+          el("span", { class: "muted", style: "font-size:11.5px", text: "Base pay:" }), payTypeSelect, salaryInput, hourlyInput,
+        ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
+          newPinInput,
+          el("button", { class: "ghost", onclick: async () => {
+            if (!newPinInput.value.trim()) return;
+            await api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ pin: newPinInput.value.trim() }) });
+            newPinInput.value = ""; resetNotice.textContent = "PIN reset ✓"; resetNotice.style.color = "var(--green)";
+            setTimeout(() => { resetNotice.textContent = ""; }, 2500);
+          }, text: "Reset PIN" }),
+          resetNotice,
+        ]),
       ]));
     });
   }
