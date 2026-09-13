@@ -606,17 +606,24 @@ app.post("/api/logout", (req, res) => {
 // ---------- employees (owner or manager can manage; employee can read own record) ----------
 app.get("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
-  res.json(db.employees.map((e) => ({ id: e.id, name: e.name, commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0 })));
+  res.json(db.employees.map((e) => ({
+    id: e.id, name: e.name, commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0,
+    payType: e.payType || null, salaryPerPeriod: e.salaryPerPeriod || 0, hourlyRate: e.hourlyRate || 0,
+  })));
 });
 
 app.post("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
-  const { name, commissionRate, walkInCommissionRate, pin } = req.body;
+  const { name, commissionRate, walkInCommissionRate, pin, payType, salaryPerPeriod, hourlyRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
-  const emp = { id: newId(), name: name.trim(), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0, pinHash: hash(pin) };
+  const emp = {
+    id: newId(), name: name.trim(), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0, pinHash: hash(pin),
+    payType: payType === "salary" || payType === "hourly" ? payType : null,
+    salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0,
+  };
   db.employees.push(emp);
   saveDB(db);
-  res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate });
+  res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate, payType: emp.payType, salaryPerPeriod: emp.salaryPerPeriod, hourlyRate: emp.hourlyRate });
 });
 
 app.patch("/api/employees/:id", requireManager, (req, res) => {
@@ -626,6 +633,9 @@ app.patch("/api/employees/:id", requireManager, (req, res) => {
   if (req.body.name) emp.name = req.body.name.trim();
   if (req.body.commissionRate !== undefined) emp.commissionRate = parseFloat(req.body.commissionRate) || 0;
   if (req.body.walkInCommissionRate !== undefined) emp.walkInCommissionRate = parseFloat(req.body.walkInCommissionRate) || 0;
+  if (req.body.payType !== undefined) emp.payType = (req.body.payType === "salary" || req.body.payType === "hourly") ? req.body.payType : null;
+  if (req.body.salaryPerPeriod !== undefined) emp.salaryPerPeriod = parseFloat(req.body.salaryPerPeriod) || 0;
+  if (req.body.hourlyRate !== undefined) emp.hourlyRate = parseFloat(req.body.hourlyRate) || 0;
   if (req.body.pin) emp.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
@@ -641,17 +651,24 @@ app.delete("/api/employees/:id", requireManager, (req, res) => {
 // ---------- managers (owner only to manage) ----------
 app.get("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json(db.managers.map((m) => ({ id: m.id, name: m.name, commissionRate: m.commissionRate || 0, walkInCommissionRate: m.walkInCommissionRate || 0 })));
+  res.json(db.managers.map((m) => ({
+    id: m.id, name: m.name, commissionRate: m.commissionRate || 0, walkInCommissionRate: m.walkInCommissionRate || 0,
+    payType: m.payType || null, salaryPerPeriod: m.salaryPerPeriod || 0, hourlyRate: m.hourlyRate || 0,
+  })));
 });
 
 app.post("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, pin, commissionRate, walkInCommissionRate } = req.body;
+  const { name, pin, commissionRate, walkInCommissionRate, payType, salaryPerPeriod, hourlyRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
-  const mgr = { id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0 };
+  const mgr = {
+    id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0,
+    payType: payType === "salary" || payType === "hourly" ? payType : null,
+    salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0,
+  };
   db.managers.push(mgr);
   saveDB(db);
-  res.json({ id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate, walkInCommissionRate: mgr.walkInCommissionRate });
+  res.json({ id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate, walkInCommissionRate: mgr.walkInCommissionRate, payType: mgr.payType, salaryPerPeriod: mgr.salaryPerPeriod, hourlyRate: mgr.hourlyRate });
 });
 
 app.patch("/api/managers/:id", requireOwner, (req, res) => {
@@ -660,6 +677,9 @@ app.patch("/api/managers/:id", requireOwner, (req, res) => {
   if (!mgr) return res.status(404).json({ error: "Not found." });
   if (req.body.commissionRate !== undefined) mgr.commissionRate = parseFloat(req.body.commissionRate) || 0;
   if (req.body.walkInCommissionRate !== undefined) mgr.walkInCommissionRate = parseFloat(req.body.walkInCommissionRate) || 0;
+  if (req.body.payType !== undefined) mgr.payType = (req.body.payType === "salary" || req.body.payType === "hourly") ? req.body.payType : null;
+  if (req.body.salaryPerPeriod !== undefined) mgr.salaryPerPeriod = parseFloat(req.body.salaryPerPeriod) || 0;
+  if (req.body.hourlyRate !== undefined) mgr.hourlyRate = parseFloat(req.body.hourlyRate) || 0;
   if (req.body.pin) mgr.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
@@ -1545,11 +1565,16 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
 
+  const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === employeeId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
+  const basePay = emp ? calculateBasePay(emp, myAttendance) : { amount: 0, configured: false };
+
   res.json({
     cars, attachRate, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: emp ? emp.commissionRate : 0, commission,
     walkInCommissionRate: emp ? emp.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+    payType: emp ? emp.payType : null, salaryPerPeriod: emp ? emp.salaryPerPeriod || 0 : 0, hourlyRate: emp ? emp.hourlyRate || 0 : 0, basePay,
+    totalPay: commission + walkInCommission + basePay.amount,
   });
 });
 
@@ -1580,11 +1605,16 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
 
+  const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === managerId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
+  const basePay = mgr ? calculateBasePay(mgr, myAttendance) : { amount: 0, configured: false };
+
   res.json({
     cars, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: mgr ? mgr.commissionRate : 0, commission,
     walkInCommissionRate: mgr ? mgr.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+    payType: mgr ? mgr.payType : null, salaryPerPeriod: mgr ? mgr.salaryPerPeriod || 0 : 0, hourlyRate: mgr ? mgr.hourlyRate || 0 : 0, basePay,
+    totalPay: commission + walkInCommission + basePay.amount,
     jobs: relevant.map((s) => ({
       id: s.id, date: s.date, car: s.car, customerName: s.customerName,
       upsells: myUpsells(s).map((u) => ({ name: u.name, price: u.price })),
@@ -1666,6 +1696,39 @@ app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
     };
   }).sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1));
   res.json(rows);
+});
+
+// Closing activity — how much a sales rep actually CLOSED on a given day or week,
+// regardless of what day the appointment is scheduled for. This is a genuinely different
+// question than the audit above (which tracks appointments happening within a date range,
+// and only counts commission once the customer actually shows). A deal closed today might
+// be scheduled two weeks out — this measures the calling activity itself, showing what
+// that activity is worth in projected commission if it holds, not what's been earned yet.
+app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const relevant = db.sales.filter((s) => s.salesRepId && s.status !== "cancelled" && inRange(s.closedAt || s.date, start, end));
+  const byRep = {};
+  relevant.forEach((s) => {
+    const rep = db.salesReps.find((r) => r.id === s.salesRepId);
+    const repName = rep ? rep.name : "Removed rep";
+    if (!byRep[repName]) byRep[repName] = { name: repName, closeCount: 0, projectedCommission: 0, totalValue: 0, arrivedCount: 0, pendingCount: 0, noShowCount: 0 };
+    const duringHours = isDuringBusinessHours(s.closedAt || s.date);
+    const rate = rep ? (duringHours ? (rep.commissionRate || 0) : (rep.afterHoursCommissionRate || 0)) : 0;
+    byRep[repName].closeCount += 1;
+    byRep[repName].totalValue += parseFloat(s.basePrice) || 0;
+    byRep[repName].projectedCommission += (parseFloat(s.basePrice) || 0) * (rate / 100);
+    if (s.status === "arrived") byRep[repName].arrivedCount += 1;
+    else if (s.status === "no_show") byRep[repName].noShowCount += 1;
+    else byRep[repName].pendingCount += 1;
+  });
+  const perRep = Object.values(byRep).sort((a, b) => b.closeCount - a.closeCount);
+  res.json({
+    totalCloses: relevant.length,
+    totalProjectedCommission: perRep.reduce((a, r) => a + r.projectedCommission, 0),
+    totalValue: perRep.reduce((a, r) => a + r.totalValue, 0),
+    perRep,
+  });
 });
 
 app.get("/api/my/sales-performance", requireSales, (req, res) => {
@@ -1769,6 +1832,56 @@ app.get("/api/owner/serviced-cars", requireOwner, (req, res) => {
 
 // Payroll view — every person's own upsells grouped together (for paying commission),
 // plus the shop-wide combined total for comparison. Owner-only.
+// Base pay — salary or hourly, reduced for absences and half days. A full pay period
+// is assumed to be 12 workdays (Mon-Sat x 2 weeks), so a salaried person's daily rate is
+// their period salary divided by 12. An hourly person without specific start/end times
+// entered for a given day (just a normal day, nothing unusual) is assumed to have worked
+// a standard 9-hour day, matching this shop's actual business hours (8am-6pm minus a
+// lunch hour) - real times entered for that day always override this assumption.
+const FULL_PERIOD_WORKDAYS = 12;
+const DEFAULT_HOURLY_DAY_HOURS = 9;
+function timeStringToHours(t) {
+  if (!t) return null;
+  const parts = String(t).split(":");
+  const h = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+  if (isNaN(h) || isNaN(m)) return null;
+  return h + m / 60;
+}
+// "End of day Eastern" converted to UTC can land in the next UTC calendar day (e.g.
+// 11:59:59pm Eastern is already past 3am UTC the next day) — slicing that ISO string
+// directly would silently pull in one extra day at the end of every attendance range.
+// Pulling back a safe margin before slicing corrects it to the actual intended last day.
+function endDateStringFor(endIso) {
+  return new Date(new Date(endIso).getTime() - 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+function calculateBasePay(person, attendanceRecords) {
+  if (!person.payType) return { amount: 0, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hoursCounted: 0, dailyRate: 0, configured: false };
+  if (person.payType === "salary") {
+    const dailyRate = (person.salaryPerPeriod || 0) / FULL_PERIOD_WORKDAYS;
+    let amount = 0, daysPresent = 0, daysHalf = 0, daysAbsent = 0;
+    attendanceRecords.forEach((a) => {
+      if (a.status === "present") { amount += dailyRate; daysPresent++; }
+      else if (a.status === "half_day") { amount += dailyRate / 2; daysHalf++; }
+      else if (a.status === "absent") { daysAbsent++; }
+    });
+    return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted: 0, dailyRate, configured: true };
+  }
+  // hourly
+  let amount = 0, hoursCounted = 0, daysPresent = 0, daysHalf = 0, daysAbsent = 0;
+  attendanceRecords.forEach((a) => {
+    if (a.status === "absent") { daysAbsent++; return; }
+    if (!a.status) return;
+    const startH = timeStringToHours(a.startTime), endH = timeStringToHours(a.endTime);
+    let hours;
+    if (startH !== null && endH !== null && endH > startH) hours = endH - startH;
+    else hours = a.status === "half_day" ? DEFAULT_HOURLY_DAY_HOURS / 2 : DEFAULT_HOURLY_DAY_HOURS;
+    amount += hours * (person.hourlyRate || 0);
+    hoursCounted += hours;
+    if (a.status === "half_day") daysHalf++; else daysPresent++;
+  });
+  return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted, dailyRate: 0, configured: true };
+}
+
 app.get("/api/owner/payroll", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
@@ -1804,7 +1917,14 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const walkInClosedCount = myWalkIns.length;
     const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
     const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
-    return { id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual, walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission };
+    const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === emp.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
+    const basePay = calculateBasePay(emp, myAttendance);
+    return {
+      id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
+      walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+      payType: emp.payType || null, salaryPerPeriod: emp.salaryPerPeriod || 0, hourlyRate: emp.hourlyRate || 0, basePay,
+      totalPay: commission + walkInCommission + basePay.amount,
+    };
   });
   const managers = db.managers.map((mgr) => {
     const b = personBreakdown("managerId", mgr.id);
@@ -1813,7 +1933,14 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const walkInClosedCount = myWalkIns.length;
     const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
     const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
-    return { id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual, walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission };
+    const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === mgr.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
+    const basePay = calculateBasePay(mgr, myAttendance);
+    return {
+      id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
+      walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+      payType: mgr.payType || null, salaryPerPeriod: mgr.salaryPerPeriod || 0, hourlyRate: mgr.hourlyRate || 0, basePay,
+      totalPay: commission + walkInCommission + basePay.amount,
+    };
   });
   // Sales reps are a different pay structure entirely — commission on the base sale, only
   // when the manager marked it arrived. Not tied to upsells at all.
