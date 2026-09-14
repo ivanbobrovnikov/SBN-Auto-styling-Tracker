@@ -1712,17 +1712,26 @@ app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
   relevant.forEach((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
     const repName = rep ? rep.name : "Removed rep";
-    if (!byRep[repName]) byRep[repName] = { name: repName, closeCount: 0, projectedCommission: 0, totalValue: 0, arrivedCount: 0, pendingCount: 0, noShowCount: 0 };
+    if (!byRep[repName]) byRep[repName] = { name: repName, closeCount: 0, projectedCommission: 0, totalValue: 0, arrivedCount: 0, pendingCount: 0, noShowCount: 0, closes: [] };
     const duringHours = isDuringBusinessHours(s.closedAt || s.date);
     const rate = rep ? (duringHours ? (rep.commissionRate || 0) : (rep.afterHoursCommissionRate || 0)) : 0;
+    const basePrice = parseFloat(s.basePrice) || 0;
+    const projectedAmount = basePrice * (rate / 100);
     byRep[repName].closeCount += 1;
-    byRep[repName].totalValue += parseFloat(s.basePrice) || 0;
-    byRep[repName].projectedCommission += (parseFloat(s.basePrice) || 0) * (rate / 100);
+    byRep[repName].totalValue += basePrice;
+    byRep[repName].projectedCommission += projectedAmount;
     if (s.status === "arrived") byRep[repName].arrivedCount += 1;
     else if (s.status === "no_show") byRep[repName].noShowCount += 1;
     else byRep[repName].pendingCount += 1;
+    // Individual close detail - so a $0 value is immediately visible and traceable back
+    // to a specific job that just needs its price filled in via Cleanup.
+    byRep[repName].closes.push({
+      saleId: s.id, car: s.car, customerName: s.customerName, date: s.date,
+      basePrice, projectedCommission: projectedAmount, status: s.status || "pending", missingPrice: !s.basePrice,
+    });
   });
   const perRep = Object.values(byRep).sort((a, b) => b.closeCount - a.closeCount);
+  perRep.forEach((r) => r.closes.sort((a, b) => (a.date < b.date ? 1 : -1)));
   res.json({
     totalCloses: relevant.length,
     totalProjectedCommission: perRep.reduce((a, r) => a + r.projectedCommission, 0),
