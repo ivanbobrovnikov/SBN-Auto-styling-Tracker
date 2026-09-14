@@ -1075,13 +1075,23 @@ app.get("/api/owner/cash-entries", requireOwner, (req, res) => {
   const totalBankDeposits = entries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + e.amount, 0);
   const byCategory = {};
   entries.filter((e) => e.type !== "cashIn" && e.type !== "bankDeposit").forEach((e) => { byCategory[e.category] = (byCategory[e.category] || 0) + e.amount; });
+  // Net Cash on Hand is a running balance - what's actually sitting in the drawer right
+  // now - not a per-period metric. It's calculated from every entry ever logged, completely
+  // independent of whatever Day/Week/Month/Year is selected above. A big one-time catch-up
+  // deposit logged in one month shouldn't keep suppressing this number in every month after,
+  // the way it would if this were scoped to the same period as everything else on this page.
+  const allEntries = db.cashEntries;
+  const allTimeCashIn = allEntries.filter((e) => e.type === "cashIn").reduce((a, e) => a + e.amount, 0);
+  const allTimeCashOut = allEntries.filter((e) => e.type === "cashOut").reduce((a, e) => a + e.amount, 0);
+  const allTimeBankDeposits = allEntries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + e.amount, 0);
   res.json({
     entries: entries.slice(0, 200),
     totalCashIn, totalCashOut, totalCardExpense, totalBankDeposits,
-    // Floored at zero - if a deposit gets logged before any cash-in has actually been
-    // tracked yet (e.g. just starting to use this feature), the raw subtraction would go
-    // negative, which isn't a real number, just an artifact of where tracking started.
-    netCash: Math.max(0, totalCashIn - totalCashOut - totalBankDeposits),
+    // Floored at zero - if deposits ever exceed everything tracked as coming in (e.g. a
+    // catch-up deposit for cash that predates using this feature at all), the raw
+    // subtraction would go negative, which isn't a real number, just an artifact of where
+    // tracking started.
+    netCash: Math.max(0, allTimeCashIn - allTimeCashOut - allTimeBankDeposits),
     byCategory: Object.entries(byCategory).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total),
   });
 });
