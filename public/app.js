@@ -1361,10 +1361,33 @@ async function renderCommissionAudit(content) {
         el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Projected commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(activity.totalProjectedCommission) })]),
       ]),
       activity.perRep.length > 0
-        ? el("div", { style: "margin-top:8px" }, activity.perRep.map((r) => el("div", { class: "row", style: "font-size:12.5px;margin-bottom:4px" }, [
-            el("span", { text: `${r.name} — ${r.closeCount} close${r.closeCount !== 1 ? "s" : ""} (${r.arrivedCount} arrived, ${r.pendingCount} pending, ${r.noShowCount} no-show)` }),
-            el("span", { class: "mono", style: "color:var(--green)", text: money(r.projectedCommission) }),
-          ])))
+        ? el("div", { style: "margin-top:8px" }, activity.perRep.map((r) => {
+            const closesWrap = el("div", { style: "display:none;margin-top:6px;padding-left:8px;border-left:2px solid var(--border)" }, r.closes.map((c) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:4px" }, [
+              el("div", {}, [
+                el("div", { text: c.car || "(no car)" }),
+                el("div", { class: "muted", style: "font-size:10.5px", text: `${formatDateTime(c.date)}${c.customerName ? " · " + c.customerName : ""}` }),
+              ]),
+              el("div", { style: "text-align:right" }, [
+                c.missingPrice
+                  ? el("div", { class: "mono", style: "color:var(--red);font-weight:600", text: "$0 — fix in Cleanup" })
+                  : el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
+                el("div", { class: "muted", style: "font-size:10px", text: c.status === "arrived" ? "Arrived" : c.status === "no_show" ? "No-show" : "Pending" }),
+              ]),
+            ])));
+            const toggleBtn = el("button", {
+              class: "ghost", style: "width:100%;text-align:left;font-size:12.5px;margin-bottom:2px", onclick: () => {
+                const showing = closesWrap.style.display !== "none";
+                closesWrap.style.display = showing ? "none" : "block";
+                toggleBtn.textContent = "";
+                toggleBtn.appendChild(el("span", { text: showing ? "▸ " : "▾ " }));
+                toggleBtn.appendChild(el("span", { text: `${r.name} — ${r.closeCount} close${r.closeCount !== 1 ? "s" : ""} (${r.arrivedCount} arrived, ${r.pendingCount} pending, ${r.noShowCount} no-show)` }));
+              },
+            }, [el("span", { text: "▸ " }), el("span", { text: `${r.name} — ${r.closeCount} close${r.closeCount !== 1 ? "s" : ""} (${r.arrivedCount} arrived, ${r.pendingCount} pending, ${r.noShowCount} no-show)` })]);
+            return el("div", { style: "margin-bottom:6px" }, [
+              el("div", { class: "row" }, [toggleBtn, el("span", { class: "mono", style: "color:var(--green)", text: money(r.projectedCommission) })]),
+              closesWrap,
+            ]);
+          }))
         : null,
       el("div", { class: "muted", style: "font-size:10.5px;margin-top:6px", text: "\"Projected\" assumes the deal holds — actual commission still only pays out once the customer shows, tracked below and on Payroll." }),
     ]));
