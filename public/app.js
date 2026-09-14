@@ -1358,6 +1358,7 @@ async function renderCommissionAudit(content) {
       el("div", { class: "muted", style: "margin-bottom:8px", text: "CLOSING ACTIVITY — deals actually closed in this period, regardless of when the appointment is scheduled for" }),
       el("div", { class: "metric-grid" }, [
         el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total closes" }), el("div", { class: "metric-value mono", text: activity.totalCloses })]),
+        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total value closed" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(activity.totalValue) })]),
         el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Projected commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(activity.totalProjectedCommission) })]),
       ]),
       activity.perRep.length > 0
@@ -1384,7 +1385,13 @@ async function renderCommissionAudit(content) {
               },
             }, [el("span", { text: "▸ " }), el("span", { text: `${r.name} — ${r.closeCount} close${r.closeCount !== 1 ? "s" : ""} (${r.arrivedCount} arrived, ${r.pendingCount} pending, ${r.noShowCount} no-show)` })]);
             return el("div", { style: "margin-bottom:6px" }, [
-              el("div", { class: "row" }, [toggleBtn, el("span", { class: "mono", style: "color:var(--green)", text: money(r.projectedCommission) })]),
+              el("div", { class: "row" }, [
+                toggleBtn,
+                el("div", { style: "text-align:right;white-space:nowrap" }, [
+                  el("div", { class: "mono", style: "color:var(--amber);font-size:11.5px", text: `Value: ${money(r.totalValue)}` }),
+                  el("div", { class: "mono", style: "color:var(--green);font-size:11.5px", text: `Comm: ${money(r.projectedCommission)}` }),
+                ]),
+              ]),
               closesWrap,
             ]);
           }))
