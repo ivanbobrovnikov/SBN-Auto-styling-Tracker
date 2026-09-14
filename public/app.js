@@ -365,6 +365,24 @@ function isVideoFile(filename) {
 // dozen separate stills.
 // Shared note log - tech, manager, and owner can all see and add to it. Same reusable
 // pattern as the photo grid, so it's identical wherever it shows up.
+// Full-screen in-app image viewer with a real close button — used for receipts and
+// anything else that just needs "show this picture," without navigating away to a raw
+// image URL, which some mobile browsers (especially a site added to the home screen)
+// leave you stuck on with no visible way back.
+function showImageModal(url, title) {
+  const overlay = el("div", {
+    style: "position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px",
+    onclick: (e) => { if (e.target === overlay) document.body.removeChild(overlay); },
+  }, [
+    el("div", { style: "width:100%;max-width:500px;display:flex;justify-content:space-between;align-items:center;margin-bottom:12px" }, [
+      el("div", { style: "color:#fff;font-size:14px;font-weight:500", text: title || "Receipt" }),
+      el("button", { class: "primary", style: "padding:8px 16px", onclick: () => document.body.removeChild(overlay), text: "✕ Close" }),
+    ]),
+    el("img", { src: url, style: "max-width:100%;max-height:80vh;border-radius:8px;object-fit:contain" }),
+  ]);
+  document.body.appendChild(overlay);
+}
+
 function renderNotesSection(job, onDone) {
   const notesList = el("div", { style: "margin-bottom:8px" }, (job.notes || []).map((n) => el("div", { class: "row", style: "font-size:12.5px;margin-bottom:6px;align-items:flex-start" }, [
     el("div", {}, [
@@ -406,7 +424,7 @@ function renderPhotoGrid(job, onDone) {
       ]);
     } else {
       const statusLabel = el("div", { style: "font-size:10px", text: "Tap to record or upload" });
-      const fileInput = el("input", { type: "file", accept: "video/*,image/*", capture: "environment", style: "display:none" });
+      const fileInput = el("input", { type: "file", accept: "video/*,image/*", style: "display:none" });
       const tile = el("div", {
         style: "width:130px;height:95px;border:1px dashed var(--border);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);gap:4px",
         onclick: () => fileInput.click(),
@@ -1204,7 +1222,7 @@ async function renderCashLog(content) {
           ]),
         ]),
         el("div", { style: "display:flex;gap:8px;margin-top:6px;justify-content:flex-end" }, [
-          e.receiptPhoto ? el("a", { href: `/api/photos/${e.receiptPhoto}`, target: "_blank", class: "ghost", style: "font-size:10px;padding:3px 7px;text-decoration:none", text: "View receipt" }) : null,
+          e.receiptPhoto ? el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => showImageModal(`/api/photos/${e.receiptPhoto}`, "Receipt"), text: "View receipt" }) : null,
           el("button", { class: "icon-danger", style: "font-size:10px;padding:3px 7px", onclick: async () => { await api(`/api/manager/cash-entries/${e.id}`, { method: "DELETE" }); loadMine(); }, text: "Delete" }),
         ]),
       ]));
@@ -1258,7 +1276,7 @@ async function renderOwnerCash(content) {
           ]),
         ]),
         el("div", { style: "display:flex;gap:8px;margin-top:6px;justify-content:flex-end" }, [
-          e.receiptPhoto ? el("a", { href: `/api/photos/${e.receiptPhoto}`, target: "_blank", class: "ghost", style: "font-size:10px;padding:3px 7px;text-decoration:none", text: "View receipt" }) : null,
+          e.receiptPhoto ? el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => showImageModal(`/api/photos/${e.receiptPhoto}`, "Receipt"), text: "View receipt" }) : null,
           el("button", { class: "icon-danger", style: "font-size:10px;padding:3px 7px", onclick: async () => { await api(`/api/manager/cash-entries/${e.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
         ]),
       ]));
