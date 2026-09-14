@@ -1736,7 +1736,7 @@ app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
     // Individual close detail - so a $0 value is immediately visible and traceable back
     // to a specific job that just needs its price filled in via Cleanup.
     byRep[repName].closes.push({
-      saleId: s.id, car: s.car, customerName: s.customerName, date: s.date,
+      saleId: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date,
       basePrice, projectedCommission: projectedAmount, status: s.status || "pending", missingPrice: !s.basePrice,
     });
   });
