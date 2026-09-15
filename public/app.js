@@ -1384,7 +1384,8 @@ async function renderCommissionAudit(content) {
             const closesWrap = el("div", { style: "display:none;margin-top:6px;padding-left:8px;border-left:2px solid var(--border)" }, r.closes.map((c) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:4px" }, [
               el("div", {}, [
                 el("div", { text: c.car || "(no car)" }),
-                el("div", { class: "muted", style: "font-size:10.5px", text: `${formatDateTime(c.date)}${c.customerName ? " · " + c.customerName : ""}` }),
+                el("div", { class: "muted", style: "font-size:10.5px", text: `Scheduled: ${formatDateTime(c.date)}` }),
+                el("div", { class: "muted", style: "font-size:10.5px", text: `Closed: ${formatDateTime(c.closedAt)}${c.customerName ? " · " + c.customerName : ""}` }),
               ]),
               el("div", { style: "text-align:right" }, [
                 c.missingPrice
