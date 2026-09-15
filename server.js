@@ -66,6 +66,7 @@ function logAudit(db, req, sale, field, oldValue, newValue) {
 // to same customer name + same calendar day when contactId is missing.
 function findDuplicateSaleIds(sales) {
   const flagged = new Set();
+  const normalize = (s) => String(s || "").trim().toLowerCase();
   const byContact = {};
   const byNameDay = {};
   sales.forEach((s) => {
@@ -75,8 +76,16 @@ function findDuplicateSaleIds(sales) {
       (byNameDay[key] = byNameDay[key] || []).push(s);
     }
   });
-  Object.values(byContact).forEach((group) => { if (group.length > 1) group.forEach((s) => flagged.add(s.id)); });
-  Object.values(byNameDay).forEach((group) => { if (group.length > 1) group.forEach((s) => flagged.add(s.id)); });
+  // Grouping by customer alone isn't safe — the same person can genuinely book more than
+  // one car. Within each customer's group, only flag the ones that ALSO share the same
+  // car/title text as an actual duplicate; a second, different car is a real separate job.
+  function flagRealDuplicatesWithin(group) {
+    const byCar = {};
+    group.forEach((s) => { (byCar[normalize(s.car)] = byCar[normalize(s.car)] || []).push(s); });
+    Object.values(byCar).forEach((carGroup) => { if (carGroup.length > 1) carGroup.forEach((s) => flagged.add(s.id)); });
+  }
+  Object.values(byContact).forEach(flagRealDuplicatesWithin);
+  Object.values(byNameDay).forEach(flagRealDuplicatesWithin);
   return flagged;
 }
 function monthKey(dateStr) {
@@ -1334,6 +1343,16 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
     if (normalized) {
       logAudit(db, req, sale, "Date/Time", sale.date, normalized);
       sale.date = normalized;
+    }
+  }
+  // Manual correction for when the deal was actually closed — this directly decides which
+  // commission rate applies (in-hours vs after-hours), so a wrong value here has real
+  // dollar consequences. Same Eastern-aware parsing as the appointment date/time above.
+  if (req.body.closedAt !== undefined && req.body.closedAt) {
+    const normalized = normalizeDate(req.body.closedAt);
+    if (normalized) {
+      logAudit(db, req, sale, "Closed At", sale.closedAt, normalized);
+      sale.closedAt = normalized;
     }
   }
   if (req.body.status !== undefined) sale.status = req.body.status;
