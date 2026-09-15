@@ -1434,12 +1434,22 @@ async function renderCommissionAudit(content) {
       repRows.sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1)).forEach((r) => {
         const statusLabel = r.status === "arrived" ? "Arrived" : r.status === "no_show" ? "No-show" : "Upcoming";
         const statusColor = r.status === "arrived" ? "var(--green)" : r.status === "no_show" ? "var(--red)" : "var(--sub)";
+        const d2 = new Date(r.closedAtRaw);
+        const pad = (n) => String(n).padStart(2, "0");
+        const localValue = isNaN(d2.getTime()) ? "" : `${d2.getFullYear()}-${pad(d2.getMonth() + 1)}-${pad(d2.getDate())}T${pad(d2.getHours())}:${pad(d2.getMinutes())}`;
+        const closedAtInput = el("input", { type: "datetime-local", value: localValue, style: "max-width:190px;font-size:11px" });
+        const saveClosedAtBtn = el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: async () => {
+          if (!closedAtInput.value) return;
+          await api(`/api/manager/jobs/${r.saleId}`, { method: "PATCH", body: JSON.stringify({ closedAt: closedAtInput.value }) });
+          load();
+        }, text: "Save" });
         body.appendChild(el("div", { class: "card" }, [
           el("div", { class: "row" }, [
             el("div", {}, [
               el("div", { style: "font-weight:500", text: r.car }),
               el("div", { class: "muted", style: "font-size:12.5px", text: r.customerName || "" }),
               el("div", { class: "muted", style: "font-size:11.5px", text: `Closed: ${r.closedAtEastern} — ${r.duringHours ? "in-hours" : "after-hours"} (${r.rateApplied}%)` }),
+              el("div", { style: "display:flex;gap:6px;align-items:center;margin-top:4px" }, [closedAtInput, saveClosedAtBtn]),
             ]),
             el("div", { style: "text-align:right" }, [
               el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
