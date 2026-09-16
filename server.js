@@ -1709,7 +1709,10 @@ app.get("/api/sales/full-schedule", requireSales, (req, res) => {
 app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const relevant = db.sales.filter((s) => s.salesRepId && inRange(s.date, start, end) && s.status !== "cancelled");
+  // Must match Payroll's own filtering exactly (excludingCancelled + the revenue start
+  // date cutoff) - otherwise these two pages can silently disagree on the same numbers,
+  // specifically when a revenue start date has been set to exclude old pre-tracking jobs.
+  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(s.date, start, end)), db);
   const rows = relevant.map((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
     const closedAtRaw = s.closedAt || s.date;
@@ -1717,7 +1720,12 @@ app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
     const easternLabel = isNaN(closedDate.getTime()) ? "unknown" : closedDate.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "long", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     const duringHours = isDuringBusinessHours(closedAtRaw);
     const rateApplied = duringHours ? (rep ? rep.commissionRate || 0 : 0) : (rep ? rep.afterHoursCommissionRate || 0 : 0);
-    const commissionAmount = s.status === "arrived" && rep ? salesRepCommissionForSale(rep, s).amount : 0;
+    // Projected, not actual — this section answers "if every appointment currently
+    // scheduled in this period shows up as planned, what's the commission total," which is
+    // a genuinely different question from Payroll's number (actual commission owed, only
+    // counting jobs that have actually arrived so far). A no-show or reschedule will change
+    // this from what actually gets paid out - that's expected, not a bug.
+    const commissionAmount = rep ? (parseFloat(s.basePrice) || 0) * (rateApplied / 100) : 0;
     return {
       saleId: s.id, car: s.car, customerName: s.customerName, basePrice: parseFloat(s.basePrice) || 0,
       salesRepName: rep ? rep.name : "Removed rep", status: s.status || "pending",
@@ -1736,7 +1744,7 @@ app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
 app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const relevant = db.sales.filter((s) => s.salesRepId && s.status !== "cancelled" && inRange(s.closedAt || s.date, start, end));
+  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(s.closedAt || s.date, start, end)), db);
   const byRep = {};
   relevant.forEach((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
