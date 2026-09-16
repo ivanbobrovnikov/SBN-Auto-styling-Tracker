@@ -1317,7 +1317,7 @@ async function renderEditHistory(content) {
 
 async function renderCommissionAudit(content) {
   const body = el("div");
-  const picker = renderPeriodPicker((params) => load(params), "payperiod");
+  const picker = renderPeriodPicker((params) => load(params), "payperiod", SALES_PAY_PERIOD_ANCHOR);
 
   // Repair tool for historical data imported before the closedAt fix existed.
   const repairStageId = el("input", { placeholder: "Booked stage ID (from Test 2 in Test Tool)", style: "max-width:280px" });
@@ -1864,7 +1864,7 @@ async function renderSalesFullSchedule(content) {
 
 async function renderSalesPerformance(content) {
   const body = el("div");
-  const picker = renderPeriodPicker((params) => load(params), "payperiod");
+  const picker = renderPeriodPicker((params) => load(params), "payperiod", SALES_PAY_PERIOD_ANCHOR);
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
