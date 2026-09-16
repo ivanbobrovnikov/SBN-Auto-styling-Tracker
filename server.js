@@ -126,7 +126,14 @@ function dateRangeFor(query) {
   const period = query.period || "month";
   const ref = query.date ? new Date(query.date) : new Date();
   let start, end;
-  if (period === "day") {
+  if (period === "custom") {
+    // A genuinely arbitrary owner-picked range - any start date through any end date,
+    // inclusive of both, same Eastern-day boundaries as every other period here.
+    const startDateStr = query.startDate || new Date().toISOString().slice(0, 10);
+    const endDateStr = query.endDate || startDateStr;
+    start = startOfDayEastern(startDateStr);
+    end = endOfDayEastern(endDateStr);
+  } else if (period === "day") {
     const d = query.date || new Date().toISOString().slice(0, 10);
     start = startOfDayEastern(d);
     end = endOfDayEastern(d);
@@ -1175,6 +1182,26 @@ app.get("/api/manager/unpaid-arrived", requireManager, (req, res) => {
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
+// Appointments scheduled for today or any day before it that were never marked with any
+// real outcome at all - not arrived, not no-show, not cancelled, not completed. This
+// almost always means someone forgot to click anything after the appointment happened,
+// not that the appointment genuinely hasn't occurred yet. Deliberately excludes anything
+// scheduled for a future day, since those correctly haven't happened yet and shouldn't be
+// flagged as a problem.
+app.get("/api/manager/unmarked-appointments", requireManager, (req, res) => {
+  const db = loadDB();
+  const todayEastern = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const cutoff = endOfDayEastern(todayEastern);
+  const jobs = db.sales.filter((s) =>
+    s.date <= cutoff && !["arrived", "no_show", "cancelled"].includes(s.status) && !s.completed
+  );
+  res.json(jobs.map((s) => ({
+    id: s.id, date: s.date, car: s.car, customerName: s.customerName, customerPhone: s.customerPhone,
+    baseService: s.baseService, basePrice: s.basePrice || 0, employeeNames: s.employeeNames || "Unassigned",
+    status: s.status || "pending",
+  })).sort((a, b) => (a.date < b.date ? 1 : -1)));
+});
+
 app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   const db = loadDB();
   const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
@@ -1873,6 +1900,15 @@ app.get("/api/owner/serviced-cars", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const sales = db.sales.filter((s) => inRange(s.date, start, end) && s.completed && s.status !== "cancelled");
+  res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db) })));
+});
+
+// A genuinely separate question from Serviced Cars - a car can arrive without the work
+// being finished yet, so this counts by arrival, not completion.
+app.get("/api/owner/cars-arrived", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const sales = db.sales.filter((s) => inRange(s.date, start, end) && s.status === "arrived");
   res.json(sales.map((s) => ({ ...s, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db) })));
 });
 
