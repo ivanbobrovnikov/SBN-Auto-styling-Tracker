@@ -1420,17 +1420,18 @@ async function renderCommissionAudit(content) {
 
     if (rows.length === 0) { body.appendChild(el("div", { class: "muted", text: "No sales rep-attributed appointments in this period." })); return; }
     const totalCommission = rows.reduce((a, r) => a + r.commissionAmount, 0);
-    body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "APPOINTMENTS SCHEDULED IN THIS PERIOD" }));
+    body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "APPOINTMENTS SCHEDULED — PROJECTED COMMISSION IF EVERYONE SHOWS" }));
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Appointments" }), el("div", { class: "metric-value mono", text: rows.length })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(totalCommission) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total projected commission" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(totalCommission) })]),
     ]));
+    body.appendChild(el("div", { class: "muted", style: "font-size:10.5px;margin-bottom:8px", text: "Assumes every appointment below shows up as scheduled — a no-show or reschedule will change this from what actually gets paid. Payroll always reflects the real, current total based on who has actually arrived." }));
     // Grouped by sales rep, each with its own subtotal, sorted chronologically within the group.
     const grouped = {};
     rows.forEach((r) => { (grouped[r.salesRepName] = grouped[r.salesRepName] || []).push(r); });
     Object.entries(grouped).sort((a, b) => a[0].localeCompare(b[0])).forEach(([repName, repRows]) => {
       const repCommission = repRows.reduce((a, r) => a + r.commissionAmount, 0);
-      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 6px;font-size:12px;font-weight:600;letter-spacing:0.03em", text: `${repName.toUpperCase()} — ${repRows.length} appointment${repRows.length !== 1 ? "s" : ""}, ${money(repCommission)} commission` }));
+      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 6px;font-size:12px;font-weight:600;letter-spacing:0.03em", text: `${repName.toUpperCase()} — ${repRows.length} appointment${repRows.length !== 1 ? "s" : ""}, ${money(repCommission)} projected` }));
       repRows.sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1)).forEach((r) => {
         const statusLabel = r.status === "arrived" ? "Arrived" : r.status === "no_show" ? "No-show" : "Upcoming";
         const statusColor = r.status === "arrived" ? "var(--green)" : r.status === "no_show" ? "var(--red)" : "var(--sub)";
@@ -1454,7 +1455,7 @@ async function renderCommissionAudit(content) {
             el("div", { style: "text-align:right" }, [
               el("div", { style: `color:${statusColor};font-size:12px;font-weight:600`, text: statusLabel }),
               el("div", { class: "mono", style: "color:var(--amber);font-size:14px", text: money(r.basePrice) }),
-              r.status === "arrived" ? el("div", { class: "mono", style: "color:var(--green);font-size:12px", text: `+${money(r.commissionAmount)}` }) : null,
+              el("div", { class: "mono", style: "color:var(--green);font-size:12px", text: `+${money(r.commissionAmount)} projected` }),
             ]),
           ]),
         ]));
