@@ -83,6 +83,12 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
   let payPeriodEnd = nearestValidPayPeriodEnd(today, payPeriodAnchor);
   const payPeriodLabel = el("div", { class: "muted", style: `font-size:11.5px;${vis("payperiod")}` });
   const payPeriodStepper = el("div", { style: `display:flex;gap:8px;align-items:center;${vis("payperiod")}` });
+  const customStartInput = el("input", { type: "date", value: today, style: "max-width:150px" });
+  const customEndInput = el("input", { type: "date", value: today, style: "max-width:150px" });
+  const customWrap = el("div", { style: `display:flex;gap:8px;align-items:center;flex-wrap:wrap;${vis("custom")}` }, [
+    el("span", { class: "muted", style: "font-size:12px", text: "From" }), customStartInput,
+    el("span", { class: "muted", style: "font-size:12px", text: "to" }), customEndInput,
+  ]);
 
   function shiftPayPeriod(deltaDays) {
     const d = new Date(payPeriodEnd + "T00:00:00Z");
@@ -113,6 +119,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
     if (period === "week") return { period, date: weekInput.value };
     if (period === "year") return { period, date: `${yearInput.value}-01-01` };
     if (period === "payperiod") return { period, date: payPeriodEnd };
+    if (period === "custom") return { period, startDate: customStartInput.value, endDate: customEndInput.value };
     return { period: "month", month: monthInput.value };
   }
   function fire() { onChange(currentParams()); }
@@ -122,7 +129,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
   payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => shiftPayPeriod(14), text: "Next ▶" }));
 
   const periodTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" });
-  [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["payperiod", "Pay period"]].forEach(([p, label]) => {
+  [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["payperiod", "Pay period"], ["custom", "Custom"]].forEach(([p, label]) => {
     const btn = el("button", {
       class: "tab-btn" + (p === period ? " active" : ""),
       text: label,
@@ -136,21 +143,23 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
       yearInput.style.display = p === "year" ? "" : "none";
       payPeriodStepper.style.display = p === "payperiod" ? "flex" : "none";
       payPeriodLabel.style.display = p === "payperiod" ? "" : "none";
+      customWrap.style.display = p === "custom" ? "flex" : "none";
       if (p === "payperiod") updatePayPeriodLabel();
       btn.classList.add("active");
-      fire();
+      if (p !== "custom") fire(); // custom waits for both dates - fired by its own inputs below instead
     });
     periodTabs.appendChild(btn);
   });
 
   [dayInput, weekInput, monthInput, yearInput].forEach((inp) => inp.addEventListener("change", fire));
+  [customStartInput, customEndInput].forEach((inp) => inp.addEventListener("change", () => { if (period === "custom") fire(); }));
   if (period === "payperiod") updatePayPeriodLabel();
 
   const wrap = el("div", { class: "field", style: "max-width:320px" }, [
     el("label", { text: "Time period" }),
     periodTabs,
     dayInput, weekInput, monthInput, yearInput, payPeriodStepper,
-    payPeriodLabel,
+    payPeriodLabel, customWrap,
   ]);
   return { el: wrap, getParams: currentParams };
 }
@@ -247,7 +256,7 @@ const TAB_ICONS = {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
     allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"]];
@@ -551,6 +560,7 @@ async function renderSalesTabContent(content) {
 async function renderOwnerTabContent(content) {
   if (currentTab === "owner-sales") return renderOwnerSales(content);
   if (currentTab === "owner-serviced") return renderServicedCars(content);
+  if (currentTab === "owner-arrived") return renderCarsArrived(content);
   if (currentTab === "owner-audit") return renderCommissionAudit(content);
   if (currentTab === "owner-edit-history") return renderEditHistory(content);
   if (currentTab === "owner-cash") return renderOwnerCash(content);
@@ -1163,20 +1173,22 @@ function renderCashEntryForm(onSaved) {
 // Every job here showed up but was never marked paid — a quick mark-paid button resolves
 // it right from this list.
 async function renderUnpaidArrived(content) {
-  const body = el("div");
+  const unpaidBody = el("div");
+  const unmarkedBody = el("div", { style: "display:none" });
   const summary = el("div", { class: "card" });
-  async function load() {
+
+  async function loadUnpaid() {
     const jobs = await api("/api/manager/unpaid-arrived");
-    body.innerHTML = "";
+    unpaidBody.innerHTML = "";
     const totalAtStake = jobs.reduce((a, j) => a + (j.total || 0), 0);
     summary.innerHTML = "";
     summary.appendChild(el("div", { class: "row" }, [
       el("span", { class: "muted", style: "font-size:13px", text: `${jobs.length} job${jobs.length !== 1 ? "s" : ""} showed up but haven't been marked paid` }),
       el("span", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(totalAtStake) }),
     ]));
-    if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing outstanding — every arrived job is marked paid." })); return; }
+    if (jobs.length === 0) { unpaidBody.appendChild(el("div", { class: "muted", text: "Nothing outstanding — every arrived job is marked paid." })); return; }
     jobs.forEach((j) => {
-      body.appendChild(el("div", { class: "card" }, [
+      unpaidBody.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: j.car }),
@@ -1186,16 +1198,61 @@ async function renderUnpaidArrived(content) {
           el("div", { class: "mono", style: "color:var(--amber);font-size:16px;font-weight:600", text: money(j.total) }),
         ]),
         el("div", { style: "display:flex;gap:8px;justify-content:flex-end" }, [
-          el("button", { class: "primary", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ paidCash: true }) }); load(); }, text: "Mark paid — Cash" }),
-          el("button", { class: "primary", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ paidCard: true }) }); load(); }, text: "Mark paid — Card" }),
+          el("button", { class: "primary", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ paidCash: true }) }); loadUnpaid(); }, text: "Mark paid — Cash" }),
+          el("button", { class: "primary", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ paidCard: true }) }); loadUnpaid(); }, text: "Mark paid — Card" }),
         ]),
       ]));
     });
   }
+
+  // A genuinely different problem - appointments from today or any day before that were
+  // never marked with ANY outcome at all, almost always meaning someone forgot to record
+  // what happened. Deliberately excludes future bookings, which correctly haven't
+  // happened yet and shouldn't be flagged.
+  async function loadUnmarked() {
+    const jobs = await api("/api/manager/unmarked-appointments");
+    unmarkedBody.innerHTML = "";
+    if (jobs.length === 0) { unmarkedBody.appendChild(el("div", { class: "muted", text: "Nothing unmarked — every past appointment has a real outcome recorded." })); return; }
+    unmarkedBody.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: `${jobs.length} appointment${jobs.length !== 1 ? "s" : ""} from today or earlier with no recorded outcome — not arrived, no-show, cancelled, or completed.` }));
+    jobs.forEach((j) => {
+      unmarkedBody.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row", style: "margin-bottom:8px" }, [
+          el("div", {}, [
+            el("div", { style: "font-weight:500", text: j.car }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: `${formatDateTime(j.date)}${j.customerName ? " · " + j.customerName : ""}${j.customerPhone ? " · " + j.customerPhone : ""}` }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: `${j.baseService || "no service set"} · ${j.employeeNames}` }),
+          ]),
+          el("div", { class: "mono", style: "color:var(--amber);font-size:16px;font-weight:600", text: money(j.basePrice) }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap" }, [
+          el("button", { class: "primary", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ status: "arrived" }) }); loadUnmarked(); }, text: "Mark Arrived" }),
+          el("button", { class: "ghost", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ status: "no_show" }) }); loadUnmarked(); }, text: "Mark No-show" }),
+          el("button", { class: "ghost", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) }); loadUnmarked(); }, text: "Mark Cancelled" }),
+        ]),
+      ]));
+    });
+  }
+
+  const tabBar = el("div", { style: "display:flex;gap:6px;margin-bottom:14px" });
+  const unpaidTab = el("button", { class: "tab-btn active", onclick: () => {
+    unpaidTab.classList.add("active"); unmarkedTab.classList.remove("active");
+    unpaidBody.style.display = ""; unmarkedBody.style.display = "none";
+    summary.style.display = "";
+  }, text: "Unpaid Arrivals" });
+  const unmarkedTab = el("button", { class: "tab-btn", onclick: () => {
+    unmarkedTab.classList.add("active"); unpaidTab.classList.remove("active");
+    unmarkedBody.style.display = ""; unpaidBody.style.display = "none";
+    summary.style.display = "none";
+  }, text: "Needs Status (Today & Before)" });
+  tabBar.appendChild(unpaidTab); tabBar.appendChild(unmarkedTab);
+
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: "Every job that showed up but hasn't been marked paid yet — this is exactly why \"Shown up\" and \"Total revenue\" won't always match on the dashboard." }));
+  content.appendChild(tabBar);
   content.appendChild(summary);
-  content.appendChild(body);
-  await load();
+  content.appendChild(unpaidBody);
+  content.appendChild(unmarkedBody);
+  await loadUnpaid();
+  await loadUnmarked();
 }
 
 async function renderCashLog(content) {
@@ -1470,6 +1527,7 @@ async function renderCommissionAudit(content) {
 async function renderServicedCars(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "day");
+
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
@@ -1481,20 +1539,78 @@ async function renderServicedCars(content) {
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars serviced" }), el("div", { class: "metric-value mono", text: sales.length })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Combined value" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(totalValue) })]),
     ]));
-    sales.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((s) => {
-      body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "row" }, [
-          el("div", {}, [
-            el("div", { style: "font-weight:500", text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
-            el("div", { class: "muted", text: `${formatDateTime(s.date)}${s.customerName ? " · " + s.customerName : ""}` }),
-            el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
+
+    // Grouped by sales rep - walk-ins and online bookings get their own group too, so
+    // nothing gets silently dropped from the breakdown.
+    const grouped = {};
+    sales.forEach((s) => {
+      const key = s.salesRepName || (s.isWalkIn ? "Walk-in (no rep)" : s.isOnlineBooking ? "Online Booking" : "Unassigned");
+      (grouped[key] = grouped[key] || []).push(s);
+    });
+    Object.entries(grouped).sort((a, b) => b[1].length - a[1].length).forEach(([repName, repSales]) => {
+      const repValue = repSales.reduce((a, s) => a + s.total, 0);
+      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 6px;font-size:12px;font-weight:600;letter-spacing:0.03em", text: `${repName.toUpperCase()} — ${repSales.length} car${repSales.length !== 1 ? "s" : ""}, ${money(repValue)}` }));
+      repSales.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((s) => {
+        body.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "row" }, [
+            el("div", {}, [
+              el("div", { style: "font-weight:500", text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
+              el("div", { class: "muted", text: `${formatDateTime(s.date)}${s.customerName ? " · " + s.customerName : ""}` }),
+              el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
+            ]),
+            el("div", { style: "text-align:right" }, [
+              el("div", { class: "mono", style: "color:var(--amber);font-size:16px;font-weight:600", text: money(s.total) }),
+              s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px;color:var(--red)", text: "Unpaid" }),
+            ]),
           ]),
-          el("div", { style: "text-align:right" }, [
-            el("div", { class: "mono", style: "color:var(--amber);font-size:16px;font-weight:600", text: money(s.total) }),
-            s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px;color:var(--red)", text: "Unpaid" }),
+        ]));
+      });
+    });
+  }
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
+}
+
+// A genuinely separate question from Serviced Cars - a car can arrive without the work
+// being finished yet. Same layout, different underlying meaning.
+async function renderCarsArrived(content) {
+  const body = el("div");
+  const picker = renderPeriodPicker((params) => load(params), "day");
+  async function load(params) {
+    const p = params || picker.getParams();
+    const qs = new URLSearchParams(p).toString();
+    const sales = await api(`/api/owner/cars-arrived?${qs}`);
+    body.innerHTML = "";
+    if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No cars arrived in this period." })); return; }
+    const totalValue = sales.reduce((a, s) => a + s.total, 0);
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars arrived" }), el("div", { class: "metric-value mono", text: sales.length })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Combined value" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(totalValue) })]),
+    ]));
+    const grouped = {};
+    sales.forEach((s) => {
+      const key = s.salesRepName || (s.isWalkIn ? "Walk-in (no rep)" : s.isOnlineBooking ? "Online Booking" : "Unassigned");
+      (grouped[key] = grouped[key] || []).push(s);
+    });
+    Object.entries(grouped).sort((a, b) => b[1].length - a[1].length).forEach(([repName, repSales]) => {
+      const repValue = repSales.reduce((a, s) => a + s.total, 0);
+      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 6px;font-size:12px;font-weight:600;letter-spacing:0.03em", text: `${repName.toUpperCase()} — ${repSales.length} car${repSales.length !== 1 ? "s" : ""}, ${money(repValue)}` }));
+      repSales.sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((s) => {
+        body.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "row" }, [
+            el("div", {}, [
+              el("div", { style: "font-weight:500", text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
+              el("div", { class: "muted", text: `${formatDateTime(s.date)}${s.customerName ? " · " + s.customerName : ""}` }),
+              el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}${s.completed ? " · Service complete" : " · Still in progress"}` }),
+            ]),
+            el("div", { style: "text-align:right" }, [
+              el("div", { class: "mono", style: "color:var(--amber);font-size:16px;font-weight:600", text: money(s.total) }),
+              s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px;color:var(--red)", text: "Unpaid" }),
+            ]),
           ]),
-        ]),
-      ]));
+        ]));
+      });
     });
   }
   content.appendChild(picker.el);
