@@ -2041,7 +2041,11 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
       if (c.duringHours) duringHoursCount += 1; else afterHoursCount += 1;
       if (duplicateSaleIds.has(s.id)) duplicateWarnings.push({ id: s.id, car: s.car, date: s.date, basePrice: s.basePrice, commissionAmount: c.amount });
     });
-    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission, noShowCount: noShow.length, noShowRate, duplicateWarnings };
+    // Individual arrived/no-show details - lets Payroll show a real drill-down instead of
+    // just the aggregate counts, so you can see exactly which cars are behind each number.
+    const arrivedDetails = showed.map((s) => ({ id: s.id, car: s.car, customerName: s.customerName, date: s.date, basePrice: parseFloat(s.basePrice) || 0, commissionAmount: salesRepCommissionForSale(rep, s).amount }));
+    const noShowDetails = noShow.map((s) => ({ id: s.id, car: s.car, customerName: s.customerName, date: s.date, basePrice: parseFloat(s.basePrice) || 0 }));
+    return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission, noShowCount: noShow.length, noShowRate, duplicateWarnings, arrivedDetails, noShowDetails };
   });
 
   res.json({ shopTotalUpsellRevenue, employees, managers, salesReps });
