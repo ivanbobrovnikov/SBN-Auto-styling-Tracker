@@ -712,8 +712,32 @@ async function renderOwnerPayroll(content) {
         ]),
         el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `${r.totalBooked} booked · ${r.showedCount} showed (no-shows earn nothing)` }),
         r.noShowCount > 0
-          ? el("div", { class: "muted", style: `font-size:11.5px;margin-bottom:10px;color:${r.noShowRate >= 20 ? "var(--red)" : "var(--sub)"}`, text: `${r.noShowCount} no-show${r.noShowCount !== 1 ? "s" : ""} — ${Math.round(r.noShowRate)}% no-show rate` })
-          : el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:10px", text: "0 no-shows" }),
+          ? el("div", { class: "muted", style: `font-size:11.5px;margin-bottom:6px;color:${r.noShowRate >= 20 ? "var(--red)" : "var(--sub)"}`, text: `${r.noShowCount} no-show${r.noShowCount !== 1 ? "s" : ""} — ${Math.round(r.noShowRate)}% no-show rate` })
+          : el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "0 no-shows" }),
+        (() => {
+          const detailWrap = el("div", { style: "display:none;margin-bottom:10px" });
+          if (r.arrivedDetails.length > 0) {
+            detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin-top:6px;margin-bottom:4px", text: "ARRIVED" }));
+            r.arrivedDetails.forEach((j) => detailWrap.appendChild(el("div", { class: "row", style: "font-size:11.5px;margin-bottom:3px" }, [
+              el("span", {}, [el("span", { text: j.car }), el("span", { class: "muted", text: ` · ${formatDateTime(j.date)}` })]),
+              el("span", { class: "mono", style: "color:var(--green)", text: `${money(j.basePrice)} → +${money(j.commissionAmount)}` }),
+            ])));
+          }
+          if (r.noShowDetails.length > 0) {
+            detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin-top:8px;margin-bottom:4px", text: "NO-SHOW" }));
+            r.noShowDetails.forEach((j) => detailWrap.appendChild(el("div", { class: "row", style: "font-size:11.5px;margin-bottom:3px" }, [
+              el("span", { style: "color:var(--red)" }, [el("span", { text: j.car }), el("span", { class: "muted", text: ` · ${formatDateTime(j.date)}` })]),
+              el("span", { class: "mono", style: "color:var(--red)", text: money(j.basePrice) }),
+            ])));
+          }
+          const toggleBtn = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:11.5px;margin-bottom:6px", onclick: () => {
+            const showing = detailWrap.style.display !== "none";
+            detailWrap.style.display = showing ? "none" : "block";
+            toggleBtn.textContent = showing ? "▸ See who arrived / no-showed" : "▾ Hide details";
+          }, text: (r.arrivedDetails.length + r.noShowDetails.length) > 0 ? "▸ See who arrived / no-showed" : "No resolved appointments yet" });
+          if ((r.arrivedDetails.length + r.noShowDetails.length) === 0) toggleBtn.disabled = true;
+          return el("div", {}, [toggleBtn, detailWrap]);
+        })(),
         r.commissionRate > 0
           ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [
               el("div", { class: "row" }, [
