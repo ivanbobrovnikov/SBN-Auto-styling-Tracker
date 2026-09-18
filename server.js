@@ -345,11 +345,18 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     // But the same customer can genuinely book more than one car at once, so matching by
     // contact alone isn't safe — that could silently merge two real, separate jobs into
     // one, which is worse than a duplicate since one of them would just vanish. Requiring
-    // the car/title text to also match is what actually distinguishes "this exact booking
-    // got rescheduled" from "this customer booked a second, different car."
+    // the car/title text to substantially match is what actually distinguishes "this exact
+    // booking got rescheduled" from "this customer booked a second, different car" — a
+    // substring check (not exact) tolerates GHL appending something like "- RESCHEDULED"
+    // or otherwise lightly reformatting the title without losing the real vehicle text.
     const normalize = (s) => String(s || "").trim().toLowerCase();
+    const carsLikelyMatch = (a, b) => {
+      const na = normalize(a), nb = normalize(b);
+      if (!na || !nb) return false;
+      return na === nb || na.includes(nb) || nb.includes(na);
+    };
     const existingUnresolved = db.sales.find((s) =>
-      s.contactId === contactId && !["arrived", "no_show", "cancelled"].includes(s.status) && normalize(s.car) === normalize(car)
+      s.contactId === contactId && !["arrived", "no_show", "cancelled"].includes(s.status) && carsLikelyMatch(s.car, car)
     );
     if (existingUnresolved) {
       sale = existingUnresolved;
