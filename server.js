@@ -2006,11 +2006,17 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const walkInClosedCount = myWalkIns.length;
     const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
     const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
+    // Individual walk-in details - same drill-down pattern already used for upsells and
+    // sales rep arrivals, so a tech's walk-in total isn't just an opaque aggregate.
+    const walkInDetails = myWalkIns.map((s) => ({
+      id: s.id, car: s.car, customerName: s.customerName, date: s.date, basePrice: parseFloat(s.basePrice) || 0,
+      status: s.status || "pending", paid: !!s.paid, commissionAmount: walkInCommissionForSale(emp, s),
+    }));
     const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === emp.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
     const basePay = calculateBasePay(emp, myAttendance);
     return {
       id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
-      walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+      walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInDetails,
       payType: emp.payType || null, salaryPerPeriod: emp.salaryPerPeriod || 0, hourlyRate: emp.hourlyRate || 0, basePay,
       totalPay: commission + walkInCommission + basePay.amount,
     };
@@ -2022,11 +2028,15 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const walkInClosedCount = myWalkIns.length;
     const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
     const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
+    const walkInDetails = myWalkIns.map((s) => ({
+      id: s.id, car: s.car, customerName: s.customerName, date: s.date, basePrice: parseFloat(s.basePrice) || 0,
+      status: s.status || "pending", paid: !!s.paid, commissionAmount: walkInCommissionForSale(mgr, s),
+    }));
     const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === mgr.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
     const basePay = calculateBasePay(mgr, myAttendance);
     return {
       id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
-      walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+      walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInDetails,
       payType: mgr.payType || null, salaryPerPeriod: mgr.salaryPerPeriod || 0, hourlyRate: mgr.hourlyRate || 0, basePay,
       totalPay: commission + walkInCommission + basePay.amount,
     };
