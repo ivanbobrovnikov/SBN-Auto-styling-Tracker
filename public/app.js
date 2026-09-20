@@ -648,9 +648,33 @@ async function renderOwnerPayroll(content) {
           ])
         : el("div", { class: "muted", style: "font-size:11.5px;border-top:0.5px solid var(--border);padding-top:8px", text: "No upsell commission rate set for this person." }),
       (p.walkInClosedCount > 0 || p.walkInCommissionRate > 0)
-        ? el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
-            el("span", { class: "muted", style: "font-size:12.5px", text: `Walk-in close commission (${p.walkInCommissionRate}%, ${p.walkInArrivedPaidCount} arrived+paid of ${p.walkInClosedCount} closed)` }),
-            el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.walkInCommission) }),
+        ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
+            el("div", { class: "row" }, [
+              el("span", { class: "muted", style: "font-size:12.5px", text: `Walk-in close commission (${p.walkInCommissionRate}%, ${p.walkInArrivedPaidCount} arrived+paid of ${p.walkInClosedCount} closed)` }),
+              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.walkInCommission) }),
+            ]),
+            (() => {
+              const walkInWrap = el("div", { style: "display:none;margin-top:6px" }, (p.walkInDetails || []).map((w) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:3px" }, [
+                el("div", {}, [
+                  el("div", { text: w.car }),
+                  el("div", { class: "muted", style: "font-size:10px", text: `${formatDateTime(w.date)}${w.customerName ? " · " + w.customerName : ""}` }),
+                ]),
+                el("div", { style: "text-align:right" }, [
+                  el("div", { class: "mono", style: "color:var(--amber)", text: money(w.basePrice) }),
+                  el("div", { style: `font-size:10px;color:${w.status === "arrived" && w.paid ? "var(--green)" : w.status === "no_show" ? "var(--red)" : "var(--sub)"}`, text: w.status === "arrived" ? (w.paid ? "Arrived, paid" : "Arrived, unpaid") : w.status === "no_show" ? "No-show" : "Pending" }),
+                  w.commissionAmount > 0 ? el("div", { class: "mono", style: "font-size:10px;color:var(--green)", text: `+${money(w.commissionAmount)}` }) : null,
+                ]),
+              ])));
+              const walkInToggle = el("button", {
+                class: "ghost", style: "width:100%;text-align:left;font-size:11.5px;margin-top:4px", onclick: () => {
+                  const showing = walkInWrap.style.display !== "none";
+                  walkInWrap.style.display = showing ? "none" : "block";
+                  walkInToggle.textContent = showing ? "▸ See walk-ins closed" : "▾ Hide walk-ins";
+                },
+              }, [el("span", { text: (p.walkInDetails || []).length > 0 ? "▸ See walk-ins closed" : "No walk-ins this period" })]);
+              if ((p.walkInDetails || []).length === 0) walkInToggle.disabled = true;
+              return el("div", {}, [walkInToggle, walkInWrap]);
+            })(),
           ])
         : null,
       p.payType
