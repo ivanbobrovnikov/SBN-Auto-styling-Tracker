@@ -15,15 +15,6 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 async function api(path, opts = {}) {
-  // Almost every action in this app triggers a reload that rebuilds part of the page right
-  // after — replacing that much DOM out from under the browser is what's causing the
-  // scroll-jump-and-back glitch. Typing into a field also opens the mobile keyboard, and
-  // submitting closes it — that's a separate, slower scroll adjustment that a single quick
-  // restore can miss entirely, since the keyboard's own closing animation can still be
-  // running well after the DOM has already settled. Restoring at several points, from
-  // immediate through a few hundred milliseconds out, catches both causes.
-  const scrollY = window.scrollY;
-  const restore = () => { if (window.scrollY !== scrollY) window.scrollTo(0, scrollY); };
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -31,8 +22,6 @@ async function api(path, opts = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Something went wrong.");
-  requestAnimationFrame(() => requestAnimationFrame(restore));
-  [100, 250, 400, 600].forEach((ms) => setTimeout(restore, ms));
   return data;
 }
 function money(n) { return "$" + (Math.round((n || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -2613,6 +2602,56 @@ async function renderManagerJobs(content) {
   const managersList = await api("/api/manager/managers-list");
   const salesRepsList = await api("/api/manager/salesreps-list");
   const nav = renderDayNav((params) => load(params));
+
+  // Manual add - for a real job that's in GHL/the schedule but never synced to the
+  // tracker for some reason. Not meant to replace the live sync, just a fallback so a
+  // missing job doesn't have to sit invisible until the underlying sync issue is found.
+  const addFormWrap = el("div", { style: "display:none" });
+  const addCustomerName = el("input", { placeholder: "Customer name" });
+  const addCar = el("input", { placeholder: "Car / title" });
+  const addDate = el("input", { type: "datetime-local" });
+  const addService = el("select", {}, [
+    el("option", { value: "", text: "Service..." }),
+    el("option", { value: "Window Tint", text: "Window Tint" }),
+    el("option", { value: "Ceramic Coating", text: "Ceramic Coating" }),
+    el("option", { value: "PPF", text: "PPF" }),
+  ]);
+  const addPrice = el("input", { type: "number", placeholder: "Base price" });
+  const addEmployeeChecks = employees.map((e) => {
+    const cb = el("input", { type: "checkbox", value: e.id });
+    return { id: e.id, name: e.name, cb, row: el("label", { style: "display:flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:4px" }, [cb, el("span", { text: e.name })]) };
+  });
+  const addNotice = el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px" });
+  const addToggleBtn = el("button", { class: "ghost", style: "margin-bottom:10px", onclick: () => {
+    const showing = addFormWrap.style.display !== "none";
+    addFormWrap.style.display = showing ? "none" : "block";
+    addToggleBtn.textContent = showing ? "+ Add a missing job" : "− Hide add-job form";
+  }, text: "+ Add a missing job" });
+  addFormWrap.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "muted", style: "margin-bottom:8px", text: "For a real job that's booked in GHL but never made it into the tracker — not a replacement for fixing the actual sync." }),
+    el("div", { class: "field" }, [el("label", { text: "Customer name" }), addCustomerName]),
+    el("div", { class: "field" }, [el("label", { text: "Car / title" }), addCar]),
+    el("div", { class: "field" }, [el("label", { text: "Date & time" }), addDate]),
+    el("div", { class: "field" }, [el("label", { text: "Service" }), addService]),
+    el("div", { class: "field" }, [el("label", { text: "Base price" }), addPrice]),
+    el("div", { style: "margin:8px 0" }, [el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "Worked by" }), ...addEmployeeChecks.map((c) => c.row)]),
+    el("button", { class: "primary", onclick: async () => {
+      const employeeIds = addEmployeeChecks.filter((c) => c.cb.checked).map((c) => c.id);
+      if (!addCar.value.trim() || employeeIds.length === 0) { addNotice.textContent = "Car and at least one tech are required."; addNotice.style.color = "var(--red)"; return; }
+      await api("/api/sales", { method: "POST", body: JSON.stringify({
+        customerName: addCustomerName.value, car: addCar.value, date: addDate.value || undefined,
+        baseService: addService.value, basePrice: addPrice.value, employeeIds,
+      }) });
+      addCustomerName.value = ""; addCar.value = ""; addDate.value = ""; addService.value = ""; addPrice.value = "";
+      addEmployeeChecks.forEach((c) => { c.cb.checked = false; });
+      addNotice.textContent = "Added ✓"; addNotice.style.color = "var(--green)";
+      addFormWrap.style.display = "none";
+      addToggleBtn.textContent = "+ Add a missing job";
+      load();
+    }, text: "Add job" }),
+    addNotice,
+  ]));
+
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
@@ -2764,6 +2803,20 @@ async function renderManagerJobs(content) {
             el("option", { value: "PPF", text: "PPF", ...(job.baseService === "PPF" ? { selected: "true" } : {}) }),
           ]),
         ]),
+        el("div", { style: "margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap" }, [
+          job.status !== "cancelled"
+            ? el("button", { class: "icon-danger", style: "font-size:11px;padding:4px 10px", onclick: async () => {
+                if (!confirm(`Cancel this appointment for ${job.car}? This can't be easily undone from here.`)) return;
+                await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) });
+                load();
+              }, text: "✕ Cancel appointment" })
+            : null,
+          el("button", { class: "icon-danger", style: "font-size:11px;padding:4px 10px", onclick: async () => {
+            if (!confirm(`Permanently DELETE this job (${job.car})? Only do this if it's genuinely not a real appointment - not in the CRM at all, a test entry, etc. This can't be undone.`)) return;
+            await api(`/api/sales/${job.id}`, { method: "DELETE" });
+            load();
+          }, text: "🗑 Delete job" }),
+        ]),
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
         el("div", { style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "DATE / TIME — for the rare case it needs a manual fix" }),
@@ -2840,6 +2893,8 @@ async function renderManagerJobs(content) {
       ]));
     });
   }
+  content.appendChild(addToggleBtn);
+  content.appendChild(addFormWrap);
   content.appendChild(nav.el);
   content.appendChild(wrap);
   content.appendChild(emptyMsg);
