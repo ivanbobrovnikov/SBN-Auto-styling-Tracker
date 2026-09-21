@@ -913,8 +913,8 @@ app.post("/api/owner/simulate-webhook", requireOwner, (req, res) => {
   res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
 });
 
-// ---------- manual fallback entry (owner only — for walk-ins or if GHL sync misses one) ----------
-app.post("/api/sales", requireOwner, (req, res) => {
+// ---------- manual fallback entry (owner or manager — for walk-ins or if GHL sync misses one) ----------
+app.post("/api/sales", requireManager, (req, res) => {
   const db = loadDB();
   const { date, customerName, car, employeeIds, baseService, basePrice } = req.body;
   if (!car || !employeeIds || !employeeIds.length) return res.status(400).json({ error: "Car and at least one employee are required." });
@@ -939,7 +939,7 @@ app.post("/api/sales", requireOwner, (req, res) => {
   res.json({ ok: true, id: sale.id });
 });
 
-app.delete("/api/sales/:id", requireOwner, (req, res) => {
+app.delete("/api/sales/:id", requireManager, (req, res) => {
   const db = loadDB();
   db.sales = db.sales.filter((s) => s.id !== req.params.id);
   saveDB(db);
