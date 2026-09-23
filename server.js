@@ -1894,8 +1894,9 @@ app.get("/api/manager/search", requireManager, (req, res) => {
       id: s.id, date: s.date, car: s.car, customerName: s.customerName,
       customerPhone: s.customerPhone, customerEmail: s.customerEmail,
       employeeNames: s.employeeNames, managerHelperNames: s.managerHelperNames || "", baseService: s.baseService,
-      total: saleTotal(s), status: s.status, completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
-      upsells: resolveUpsellNames(s.upsells, db),
+      basePrice: s.basePrice || 0, total: saleTotal(s), status: s.status, completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null,
+      salesRepName: s.salesRepName || null, isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
+      upsells: resolveUpsellNames(s.upsells, db), notes: s.notes || [], photos: s.photos || { before: {}, after: {} },
     }))
   );
 });
