@@ -1525,7 +1525,15 @@ async function renderCommissionAudit(content) {
     rows.forEach((r) => { (grouped[r.salesRepName] = grouped[r.salesRepName] || []).push(r); });
     Object.entries(grouped).sort((a, b) => a[0].localeCompare(b[0])).forEach(([repName, repRows]) => {
       const repCommission = repRows.reduce((a, r) => a + r.commissionAmount, 0);
-      body.appendChild(el("div", { class: "muted", style: "margin:16px 0 6px;font-size:12px;font-weight:600;letter-spacing:0.03em", text: `${repName.toUpperCase()} — ${repRows.length} appointment${repRows.length !== 1 ? "s" : ""}, ${money(repCommission)} projected` }));
+      const listWrap = el("div", { style: "display:none;margin-top:6px" });
+      const toggleBtn = el("button", {
+        class: "ghost", style: "width:100%;text-align:left;font-size:12px;font-weight:600;letter-spacing:0.03em;margin:16px 0 2px", onclick: () => {
+          const showing = listWrap.style.display !== "none";
+          listWrap.style.display = showing ? "none" : "block";
+          toggleBtn.textContent = `${showing ? "▸" : "▾"} ${repName.toUpperCase()} — ${repRows.length} appointment${repRows.length !== 1 ? "s" : ""}, ${money(repCommission)} projected`;
+        },
+      }, [el("span", { text: `▸ ${repName.toUpperCase()} — ${repRows.length} appointment${repRows.length !== 1 ? "s" : ""}, ${money(repCommission)} projected` })]);
+      body.appendChild(toggleBtn);
       repRows.sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1)).forEach((r) => {
         const statusLabel = r.status === "arrived" ? "Arrived" : r.status === "no_show" ? "No-show" : "Upcoming";
         const statusColor = r.status === "arrived" ? "var(--green)" : r.status === "no_show" ? "var(--red)" : "var(--sub)";
@@ -1538,7 +1546,7 @@ async function renderCommissionAudit(content) {
           await api(`/api/manager/jobs/${r.saleId}`, { method: "PATCH", body: JSON.stringify({ closedAt: closedAtInput.value }) });
           load();
         }, text: "Save" });
-        body.appendChild(el("div", { class: "card" }, [
+        listWrap.appendChild(el("div", { class: "card" }, [
           el("div", { class: "row" }, [
             el("div", {}, [
               el("div", { style: "font-weight:500", text: r.car }),
@@ -1554,6 +1562,7 @@ async function renderCommissionAudit(content) {
           ]),
         ]));
       });
+      body.appendChild(listWrap);
     });
   }
   content.appendChild(picker.el);
@@ -2411,7 +2420,29 @@ async function renderSearch(content) {
       const upsellPills = (s.upsells || []).length
         ? el("div", { style: "margin-top:6px" }, s.upsells.map((u) => el("span", { class: "pill", text: `${u.name} — ${money(u.price)} (${u.attributedToName})` })))
         : null;
-      results.appendChild(el("div", { class: "card" }, [
+
+      const detailWrap = el("div", { style: "display:none;margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px" });
+      function buildDetail() {
+        detailWrap.innerHTML = "";
+        const closerLabel = s.salesRepName ? `Sales rep: ${s.salesRepName}` : s.isWalkIn ? "Walk-in (no rep)" : s.isOnlineBooking ? "Online booking" : "Unassigned";
+        detailWrap.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:8px" }, [
+          el("div", { text: `Base price: ${money(s.basePrice)}` }),
+          el("div", { text: closerLabel }),
+          s.managerHelperNames ? el("div", { text: `Manager help: ${s.managerHelperNames}` }) : null,
+        ]));
+        detailWrap.appendChild(renderPhotoGrid(s, runSearch));
+        detailWrap.appendChild(renderNotesSection(s, runSearch));
+      }
+      buildDetail();
+
+      const card = el("div", {
+        class: "card", style: "cursor:pointer",
+        onclick: (e) => {
+          if (e.target.closest("button, input, select, textarea, a")) return; // don't toggle when interacting with something inside
+          const showing = detailWrap.style.display !== "none";
+          detailWrap.style.display = showing ? "none" : "block";
+        },
+      }, [
         el("div", { class: "row" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: s.car }),
@@ -2424,7 +2455,10 @@ async function renderSearch(content) {
           ]),
         ]),
         upsellPills,
-      ]));
+        el("div", { class: "muted", style: "font-size:10.5px;margin-top:6px", text: "Tap for full details, photos, and notes" }),
+        detailWrap,
+      ]);
+      results.appendChild(card);
     });
   }
   input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(runSearch, 300); });
