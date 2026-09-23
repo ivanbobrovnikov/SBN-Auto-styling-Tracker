@@ -919,9 +919,16 @@ app.post("/api/sales", requireManager, (req, res) => {
   const { date, customerName, car, employeeIds, baseService, basePrice } = req.body;
   if (!car || !employeeIds || !employeeIds.length) return res.status(400).json({ error: "Car and at least one employee are required." });
   const names = employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean);
+  // Every date in this app is compared as a raw ISO string (inRange does a plain >= / <=
+  // string comparison, not a real Date comparison) - so it MUST be normalized into the
+  // exact same full ISO-with-Z format everything else uses. A datetime-local input's raw
+  // value ("2026-09-16T14:00", no seconds, no timezone) stored as-is would silently fail
+  // to match Job Status or any calendar's date range, even though it looks fine anywhere
+  // that just displays the date rather than filtering by it (like Search).
+  const normalizedDate = date ? normalizeDate(date) : null;
   const sale = {
     id: newId(),
-    date: date || new Date().toISOString(),
+    date: normalizedDate || new Date().toISOString(),
     customerName: customerName || "",
     car,
     employeeIds,
