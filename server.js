@@ -32,6 +32,7 @@ function loadDB() {
   if (!db.auditLog) db.auditLog = [];
   if (!db.cashEntries) db.cashEntries = [];
   if (!db.calendarServiceMap) db.calendarServiceMap = {};
+  if (!db.tips) db.tips = [];
   return db;
 }
 function saveDB(db) {
@@ -1003,8 +1004,19 @@ const CASH_CATEGORIES = ["Customer Payment", "Supplies", "Tools", "Misc", "Other
 
 function actorInfo(req, db) {
   if (req.auth.role === "owner") return { type: "owner", id: "owner", name: "Owner" };
-  const mgr = db.managers.find((m) => m.id === req.auth.id);
-  return { type: "manager", id: req.auth.id, name: mgr ? mgr.name : "Removed manager" };
+  if (req.auth.role === "manager") {
+    const mgr = db.managers.find((m) => m.id === req.auth.id);
+    return { type: "manager", id: req.auth.id, name: mgr ? mgr.name : "Removed manager" };
+  }
+  if (req.auth.role === "employee") {
+    const emp = db.employees.find((e) => e.id === req.auth.id);
+    return { type: "employee", id: req.auth.id, name: emp ? emp.name : "Removed employee" };
+  }
+  if (req.auth.role === "sales") {
+    const rep = db.salesReps.find((r) => r.id === req.auth.id);
+    return { type: "sales", id: req.auth.id, name: rep ? rep.name : "Removed rep" };
+  }
+  return { type: "unknown", id: req.auth.id, name: "Unknown" };
 }
 
 app.post("/api/manager/cash-entries", requireManager, (req, res) => {
@@ -1335,6 +1347,34 @@ app.post("/api/manager/cleanup-fix-by-calendar", requireManager, (req, res) => {
   res.json({ ok: true, dryRun, fixed: jobs.length, preview });
 });
 
+// Tips - pick a job, amount auto-splits evenly among whoever's assigned to it.
+app.post("/api/manager/tips", requireAnyStaff, (req, res) => {
+  const db = loadDB();
+  const { saleId, amount } = req.body;
+  const sale = db.sales.find((s) => s.id === saleId);
+  const amt = parseFloat(amount);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  if (!amt || amt <= 0) return res.status(400).json({ error: "A real amount is required." });
+  const workers = saleEmployeeIds(sale);
+  if (workers.length === 0) return res.status(400).json({ error: "This job has no one assigned to it yet." });
+  const each = Math.round((amt / workers.length) * 100) / 100;
+  const split = workers.map((id) => {
+    const emp = db.employees.find((e) => e.id === id);
+    return { employeeId: id, name: emp ? emp.name : "Removed employee", amount: each };
+  });
+  const actor = actorInfo(req, db);
+  const tip = { id: newId(), saleId, car: sale.car, date: sale.date, amount: amt, split, loggedByName: actor.name, timestamp: new Date().toISOString() };
+  db.tips.push(tip);
+  saveDB(db);
+  res.json({ ok: true, tip });
+});
+
+app.get("/api/manager/tips", requireManager, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  res.json(db.tips.filter((t) => t.timestamp >= start && t.timestamp <= end).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)));
+});
+
 app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
@@ -1637,6 +1677,9 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
 
   const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === employeeId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
   const basePay = emp ? calculateBasePay(emp, myAttendance) : { amount: 0, configured: false };
+  const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.employeeId === employeeId));
+  const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.employeeId === employeeId).amount, 0);
+  const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.employeeId === employeeId).amount, splitCount: t.split.length }));
 
   res.json({
     cars, attachRate, upsellRevenue: upsellRev,
@@ -1644,7 +1687,8 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
     commissionRate: emp ? emp.commissionRate : 0, commission,
     walkInCommissionRate: emp ? emp.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
     payType: emp ? emp.payType : null, salaryPerPeriod: emp ? emp.salaryPerPeriod || 0 : 0, hourlyRate: emp ? emp.hourlyRate || 0 : 0, basePay,
-    totalPay: commission + walkInCommission + basePay.amount,
+    tipsTotal, tipDetails,
+    totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
   });
 });
 
@@ -2022,11 +2066,17 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     }));
     const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === emp.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
     const basePay = calculateBasePay(emp, myAttendance);
+    // Tips - matched to whichever pay period the JOB happened in, not when the tip was
+    // logged, so this stays consistent with how every other number on this page works.
+    const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.employeeId === emp.id));
+    const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.employeeId === emp.id).amount, 0);
+    const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.employeeId === emp.id).amount, splitCount: t.split.length }));
     return {
       id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
       walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInDetails,
       payType: emp.payType || null, salaryPerPeriod: emp.salaryPerPeriod || 0, hourlyRate: emp.hourlyRate || 0, basePay,
-      totalPay: commission + walkInCommission + basePay.amount,
+      tipsTotal, tipDetails,
+      totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
     };
   });
   const managers = db.managers.map((mgr) => {
