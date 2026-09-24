@@ -679,6 +679,10 @@ async function renderOwnerPayroll(content) {
       (p.walkInClosedCount > 0 || p.walkInCommissionRate > 0)
         ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
             el("div", { class: "row" }, [
+              el("span", { class: "muted", style: "font-size:12.5px", text: `Walk-in revenue (${p.walkInArrivedPaidCount} arrived+paid)` }),
+              el("span", { class: "mono", style: "color:var(--amber)", text: money(p.walkInRevenue) }),
+            ]),
+            el("div", { class: "row", style: "margin-top:2px" }, [
               el("span", { class: "muted", style: "font-size:12.5px", text: `Walk-in close commission (${p.walkInCommissionRate}%, ${p.walkInArrivedPaidCount} arrived+paid of ${p.walkInClosedCount} closed)` }),
               el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.walkInCommission) }),
             ]),
