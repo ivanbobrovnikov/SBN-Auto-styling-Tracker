@@ -314,11 +314,14 @@ async function renderEmployeeTabContent(content) {
 async function renderSchedule(content) {
   const { cols, wrap, clearAll } = makeServiceColumns();
   const emptyMsg = el("div", { class: "muted", style: "display:none", text: "Nothing booked on this day." });
+  const tipWidgetWrap = el("div", { style: "margin-bottom:14px" });
   const nav = renderDayNav((params) => load(params));
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/my/jobs?${qs}`);
+    tipWidgetWrap.innerHTML = "";
+    tipWidgetWrap.appendChild(renderTipWidget(jobs, () => load()));
     clearAll();
     emptyMsg.style.display = jobs.length === 0 ? "" : "none";
     if (jobs.length === 0) return;
@@ -347,6 +350,7 @@ async function renderSchedule(content) {
       ]));
     });
   }
+  content.appendChild(tipWidgetWrap);
   content.appendChild(nav.el);
   content.appendChild(wrap);
   content.appendChild(emptyMsg);
@@ -379,6 +383,42 @@ function showImageModal(url, title) {
     el("img", { src: url, style: "max-width:100%;max-height:80vh;border-radius:8px;object-fit:contain" }),
   ]);
   document.body.appendChild(overlay);
+}
+
+// Shared tip widget - pick a car from today's jobs, amount auto-splits evenly among
+// whoever's assigned to it (the server figures out who, this just sends saleId + amount).
+function renderTipWidget(jobs, onDone) {
+  const select = el("select", {}, [
+    el("option", { value: "", text: "Pick a car..." }),
+    ...jobs.map((j) => el("option", { value: j.id, text: `${j.car}${j.customerName ? " — " + j.customerName : ""}` })),
+  ]);
+  const whoLabel = el("div", { class: "muted", style: "font-size:11.5px;margin:6px 0" });
+  const amountInput = el("input", { type: "number", placeholder: "Tip amount", style: "max-width:140px" });
+  const notice = el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px" });
+  select.addEventListener("change", () => {
+    const job = jobs.find((j) => j.id === select.value);
+    whoLabel.textContent = job ? `Splits among: ${job.employeeNames || "Unassigned"}` : "";
+  });
+  const saveBtn = el("button", { class: "primary", onclick: async () => {
+    if (!select.value) { notice.textContent = "Pick a car first."; notice.style.color = "var(--red)"; return; }
+    if (!amountInput.value || parseFloat(amountInput.value) <= 0) { notice.textContent = "Enter a real amount."; notice.style.color = "var(--red)"; return; }
+    try {
+      const r = await api("/api/manager/tips", { method: "POST", body: JSON.stringify({ saleId: select.value, amount: amountInput.value }) });
+      notice.textContent = `Saved — split ${r.tip.split.length} way${r.tip.split.length !== 1 ? "s" : ""} ✓`;
+      notice.style.color = "var(--green)";
+      select.value = ""; amountInput.value = ""; whoLabel.textContent = "";
+      onDone();
+    } catch (e) {
+      notice.textContent = e.message || "Something went wrong.";
+      notice.style.color = "var(--red)";
+    }
+  }, text: "Save tip" });
+  return el("div", { class: "card" }, [
+    el("div", { style: "font-weight:500;margin-bottom:8px", text: "Log a tip" }),
+    select, whoLabel,
+    el("div", { style: "display:flex;gap:8px;align-items:center;margin-top:6px" }, [amountInput, saveBtn]),
+    notice,
+  ]);
 }
 
 function renderNotesSection(job, onDone) {
@@ -678,6 +718,20 @@ async function renderOwnerPayroll(content) {
             }),
           ])
         : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px", text: "No base pay type set (Employees/Managers tab)." }),
+      p.tipDetails !== undefined
+        ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
+            el("div", { class: "row" }, [
+              el("span", { class: "muted", style: "font-size:12.5px", text: `Tips (${p.tipDetails.length} car${p.tipDetails.length !== 1 ? "s" : ""})` }),
+              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.tipsTotal) }),
+            ]),
+            p.tipDetails.length > 0
+              ? el("div", { style: "margin-top:4px" }, p.tipDetails.map((t) => el("div", { class: "row", style: "font-size:11px;margin-bottom:2px" }, [
+                  el("span", { class: "muted", text: `${t.car} (split ${t.splitCount} way${t.splitCount !== 1 ? "s" : ""})` }),
+                  el("span", { class: "mono", text: money(t.yourShare) }),
+                ])))
+              : null,
+          ])
+        : null,
       el("div", { class: "row", style: "border-top:1px solid var(--border);padding-top:8px;margin-top:8px" }, [
         el("span", { style: "font-weight:600;font-size:13px", text: "Total owed" }),
         el("span", { class: "mono", style: "color:var(--amber);font-weight:700;font-size:16px", text: money(p.totalPay) }),
@@ -2686,10 +2740,13 @@ async function renderManagerJobs(content) {
     addNotice,
   ]));
 
+  const tipWidgetWrap = el("div", { style: "margin-bottom:14px" });
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/manager/jobs?${qs}`);
+    tipWidgetWrap.innerHTML = "";
+    tipWidgetWrap.appendChild(renderTipWidget(jobs, () => load()));
     clearAll();
     emptyMsg.style.display = jobs.length === 0 ? "" : "none";
     if (jobs.length === 0) return;
@@ -2927,6 +2984,7 @@ async function renderManagerJobs(content) {
       ]));
     });
   }
+  content.appendChild(tipWidgetWrap);
   content.appendChild(addToggleBtn);
   content.appendChild(addFormWrap);
   content.appendChild(nav.el);
