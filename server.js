@@ -1673,6 +1673,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "employee" && s.walkInClosedById === employeeId && inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
   const walkInClosedCount = myWalkIns.length;
   const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+  const walkInRevenue = myWalkIns.filter((s) => s.status === "arrived" && s.paid).reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
 
   const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === employeeId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
@@ -1685,7 +1686,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
     cars, attachRate, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: emp ? emp.commissionRate : 0, commission,
-    walkInCommissionRate: emp ? emp.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+    walkInCommissionRate: emp ? emp.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue,
     payType: emp ? emp.payType : null, salaryPerPeriod: emp ? emp.salaryPerPeriod || 0 : 0, hourlyRate: emp ? emp.hourlyRate || 0 : 0, basePay,
     tipsTotal, tipDetails,
     totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
@@ -1717,6 +1718,7 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const myWalkIns = db.sales.filter((s) => s.walkInClosedByType === "manager" && s.walkInClosedById === managerId && inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
   const walkInClosedCount = myWalkIns.length;
   const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+  const walkInRevenue = myWalkIns.filter((s) => s.status === "arrived" && s.paid).reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
 
   const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === managerId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
@@ -1726,7 +1728,7 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
     cars, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: mgr ? mgr.commissionRate : 0, commission,
-    walkInCommissionRate: mgr ? mgr.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission,
+    walkInCommissionRate: mgr ? mgr.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue,
     payType: mgr ? mgr.payType : null, salaryPerPeriod: mgr ? mgr.salaryPerPeriod || 0 : 0, hourlyRate: mgr ? mgr.hourlyRate || 0 : 0, basePay,
     totalPay: commission + walkInCommission + basePay.amount,
     jobs: relevant.map((s) => ({
@@ -2057,6 +2059,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const myWalkIns = sales.filter((s) => s.walkInClosedByType === "employee" && s.walkInClosedById === emp.id);
     const walkInClosedCount = myWalkIns.length;
     const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+  const walkInRevenue = myWalkIns.filter((s) => s.status === "arrived" && s.paid).reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
     const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
     // Individual walk-in details - same drill-down pattern already used for upsells and
     // sales rep arrivals, so a tech's walk-in total isn't just an opaque aggregate.
@@ -2073,7 +2076,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.employeeId === emp.id).amount, splitCount: t.split.length }));
     return {
       id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
-      walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInDetails,
+      walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue, walkInDetails,
       payType: emp.payType || null, salaryPerPeriod: emp.salaryPerPeriod || 0, hourlyRate: emp.hourlyRate || 0, basePay,
       tipsTotal, tipDetails,
       totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
@@ -2085,6 +2088,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const myWalkIns = sales.filter((s) => s.walkInClosedByType === "manager" && s.walkInClosedById === mgr.id);
     const walkInClosedCount = myWalkIns.length;
     const walkInArrivedPaidCount = myWalkIns.filter((s) => s.status === "arrived" && s.paid).length;
+  const walkInRevenue = myWalkIns.filter((s) => s.status === "arrived" && s.paid).reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
     const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
     const walkInDetails = myWalkIns.map((s) => ({
       id: s.id, car: s.car, customerName: s.customerName, date: s.date, basePrice: parseFloat(s.basePrice) || 0,
@@ -2094,7 +2098,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const basePay = calculateBasePay(mgr, myAttendance);
     return {
       id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
-      walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInDetails,
+      walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue, walkInDetails,
       payType: mgr.payType || null, salaryPerPeriod: mgr.salaryPerPeriod || 0, hourlyRate: mgr.hourlyRate || 0, basePay,
       totalPay: commission + walkInCommission + basePay.amount,
     };
