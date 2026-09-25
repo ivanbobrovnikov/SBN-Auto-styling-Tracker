@@ -154,7 +154,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
 }
 
 let session = { role: null };
-let currentTab = "jobs";
+let currentTab = localStorage.getItem("lastTab") || "jobs";
 
 async function boot() {
   session = await api("/api/session");
@@ -258,6 +258,14 @@ function renderBottomNav() {
     primaryKeys = allTabs.map((t) => t[0]);
   }
 
+  // A tab saved from a previous session might belong to a different role (someone else
+  // logged in on this same phone) - fall back to this role's default rather than land on
+  // something invalid or blank.
+  if (!allTabs.some((t) => t[0] === currentTab)) {
+    currentTab = allTabs[0][0];
+    localStorage.setItem("lastTab", currentTab);
+  }
+
   const primaryTabs = primaryKeys.map((k) => allTabs.find((t) => t[0] === k));
   const moreTabs = allTabs.filter((t) => !primaryKeys.includes(t[0]));
 
@@ -265,7 +273,7 @@ function renderBottomNav() {
   primaryTabs.forEach(([key, label]) => {
     bar.appendChild(el("button", {
       class: "bottom-tab" + (currentTab === key ? " active" : ""),
-      onclick: () => { currentTab = key; render(); },
+      onclick: () => { currentTab = key; localStorage.setItem("lastTab", currentTab); render(); },
     }, [
       el("div", { class: "tab-icon", text: TAB_ICONS[key] || "•" }),
       el("div", { text: label }),
@@ -293,7 +301,7 @@ function openMoreSheet(moreTabs) {
   const sheet = el("div", { class: "more-sheet" }, moreTabs.map(([key, label]) =>
     el("button", {
       class: "more-sheet-item" + (currentTab === key ? " active" : ""),
-      onclick: () => { currentTab = key; closeMoreSheet(); render(); },
+      onclick: () => { currentTab = key; localStorage.setItem("lastTab", currentTab); closeMoreSheet(); render(); },
       text: label,
     })
   ));
@@ -421,6 +429,17 @@ function renderTipWidget(jobs, onDone) {
   ]);
 }
 
+// Clears a container and holds its height stable while the caller repopulates it right
+// after — without this, the container briefly collapses to near-zero height the instant
+// it's emptied, and the browser's native scroll behavior snaps back to the top during
+// that gap. Call this right before rebuilding any list from scratch.
+function clearHeightLocked(container) {
+  const currentHeight = container.offsetHeight;
+  if (currentHeight > 0) container.style.minHeight = currentHeight + "px";
+  container.innerHTML = "";
+  requestAnimationFrame(() => requestAnimationFrame(() => { container.style.minHeight = ""; }));
+}
+
 function renderNotesSection(job, onDone) {
   const notesList = el("div", { style: "margin-bottom:8px" }, (job.notes || []).map((n) => el("div", { class: "row", style: "font-size:12.5px;margin-bottom:6px;align-items:flex-start" }, [
     el("div", {}, [
@@ -515,7 +534,7 @@ async function renderPerformance(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const stats = await api(`/api/my/performance?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Your upsell revenue" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(stats.upsellRevenue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars worked" }), el("div", { class: "metric-value mono", text: stats.cars })]),
@@ -747,7 +766,7 @@ async function renderOwnerPayroll(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const d = await api(`/api/owner/payroll?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
 
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Combined upsell revenue — everyone" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(d.shopTotalUpsellRevenue) })]),
@@ -773,7 +792,7 @@ async function renderOwnerPayroll(content) {
     const p = params || salesRepPicker.getParams();
     const qs = new URLSearchParams(p).toString();
     const d = await api(`/api/owner/payroll?${qs}`);
-    salesRepBody.innerHTML = "";
+    clearHeightLocked(salesRepBody);
     if (!d.salesReps || d.salesReps.length === 0) { salesRepBody.appendChild(el("div", { class: "muted", text: "No sales reps added yet." })); return; }
     d.salesReps.forEach((r) => {
       salesRepBody.appendChild(el("div", { class: "card" }, [
@@ -955,7 +974,7 @@ function openPrintableReport(title, s, periodLabel) {
     lastQs = qs;
     const s = await api(`/api/owner/summary?${qs}`);
     lastSummary = s;
-    body.innerHTML = "";
+    clearHeightLocked(body);
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total revenue" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(s.totalRevenue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total upsell revenue" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(s.totalUpsellRevenue) })]),
@@ -1020,7 +1039,7 @@ function openPrintableReport(title, s, periodLabel) {
     if (unpaidArrived.length > 0) {
       body.appendChild(el("div", {
         class: "card", style: "cursor:pointer;border-color:var(--amber)",
-        onclick: () => { currentTab = "owner-unpaid"; render(); },
+        onclick: () => { currentTab = "owner-unpaid"; localStorage.setItem("lastTab", currentTab); render(); },
       }, [
         el("div", { class: "row" }, [
           el("div", { class: "muted", text: `⚠ ${unpaidArrived.length} job${unpaidArrived.length !== 1 ? "s" : ""} showed up but haven't been marked paid — this is the gap you're seeing between Shown Up and Total Revenue` }),
@@ -1274,7 +1293,7 @@ async function renderUnpaidArrived(content) {
 
   async function loadUnpaid() {
     const jobs = await api("/api/manager/unpaid-arrived");
-    unpaidBody.innerHTML = "";
+    clearHeightLocked(unpaidBody);
     const totalAtStake = jobs.reduce((a, j) => a + (j.total || 0), 0);
     summary.innerHTML = "";
     summary.appendChild(el("div", { class: "row" }, [
@@ -1306,7 +1325,7 @@ async function renderUnpaidArrived(content) {
   // happened yet and shouldn't be flagged.
   async function loadUnmarked() {
     const jobs = await api("/api/manager/unmarked-appointments");
-    unmarkedBody.innerHTML = "";
+    clearHeightLocked(unmarkedBody);
     if (jobs.length === 0) { unmarkedBody.appendChild(el("div", { class: "muted", text: "Nothing unmarked — every past appointment has a real outcome recorded." })); return; }
     unmarkedBody.appendChild(el("div", { class: "muted", style: "margin-bottom:10px", text: `${jobs.length} appointment${jobs.length !== 1 ? "s" : ""} from today or earlier with no recorded outcome — not arrived, no-show, cancelled, or completed.` }));
     jobs.forEach((j) => {
@@ -1355,7 +1374,7 @@ async function renderCashLog(content) {
 
   async function loadMine() {
     const mine = await api("/api/my/cash-entries");
-    listEl.innerHTML = "";
+    clearHeightLocked(listEl);
     listEl.appendChild(el("div", { class: "muted", style: "margin-bottom:8px", text: "YOUR RECENT ENTRIES" }));
     if (mine.length === 0) { listEl.appendChild(el("div", { class: "muted", text: "Nothing logged yet." })); return; }
     mine.forEach((e) => {
@@ -1394,7 +1413,7 @@ async function renderOwnerCash(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const d = await api(`/api/owner/cash-entries?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash in (from customers)" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.totalCashIn) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash out" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCashOut) })]),
@@ -1444,7 +1463,7 @@ async function renderEditHistory(content) {
   const body = el("div");
   async function load() {
     const entries = await api("/api/owner/audit-log");
-    body.innerHTML = "";
+    clearHeightLocked(body);
     if (entries.length === 0) { body.appendChild(el("div", { class: "muted", text: "No edits recorded yet." })); return; }
     entries.forEach((e) => {
       body.appendChild(el("div", { class: "card" }, [
@@ -1517,7 +1536,7 @@ async function renderCommissionAudit(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const rows = await api(`/api/owner/commission-audit?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
 
     // Closing activity — how much got closed in this period, regardless of what day the
     // appointment itself is scheduled for. A deal closed today for an appointment two
@@ -1636,7 +1655,7 @@ async function renderServicedCars(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const sales = await api(`/api/owner/serviced-cars?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
     if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No cars completed in this period." })); return; }
     const totalValue = sales.reduce((a, s) => a + s.total, 0);
     body.appendChild(el("div", { class: "metric-grid" }, [
@@ -1685,7 +1704,7 @@ async function renderCarsArrived(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const sales = await api(`/api/owner/cars-arrived?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
     if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No cars arrived in this period." })); return; }
     const totalValue = sales.reduce((a, s) => a + s.total, 0);
     body.appendChild(el("div", { class: "metric-grid" }, [
@@ -1737,7 +1756,7 @@ async function renderOwnerSales(content) {
     if (p.period !== "day") {
       dayColsSetup.wrap.style.display = "none";
       body.style.display = "";
-      body.innerHTML = "";
+      clearHeightLocked(body);
       if (sales.length === 0) { body.appendChild(el("div", { class: "muted", text: "No jobs in this period." })); return; }
       if (p.period === "week") { body.appendChild(renderWeekGrid(sales)); return; }
       if (p.period === "month") { body.appendChild(renderMonthGrid(sales, p.month)); return; }
@@ -1746,7 +1765,7 @@ async function renderOwnerSales(content) {
     } else {
       // Day view specifically gets split into service columns; clearing just the cards
       // (not rebuilding the tab bar) is what actually keeps your selected filter in place.
-      body.innerHTML = "";
+      clearHeightLocked(body);
       body.style.display = sales.length === 0 ? "" : "none";
       dayColsSetup.clearAll();
       dayColsSetup.wrap.style.display = sales.length === 0 ? "none" : "";
@@ -1898,7 +1917,7 @@ async function renderOwnerTeam(content) {
 
   async function loadList() {
     const employees = await api("/api/employees");
-    list.innerHTML = "";
+    clearHeightLocked(list);
     employees.forEach((e) => {
       const rate = el("input", { type: "number", value: e.commissionRate, style: "max-width:70px" });
       rate.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
@@ -2002,7 +2021,7 @@ async function renderSalesSchedule(content) {
     const q = searchInput.value.trim().toLowerCase();
     wrap.style.display = "none";
     body.style.display = "";
-    body.innerHTML = "";
+    clearHeightLocked(body);
     if (!q) { searchMode = false; nav.el.style.display = ""; return load(); }
     searchMode = true;
     nav.el.style.display = "none";
@@ -2024,7 +2043,7 @@ async function renderSalesSchedule(content) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/my/sales-schedule?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
     clearAll();
     if (jobs.length === 0) { wrap.style.display = "none"; body.style.display = ""; body.appendChild(el("div", { class: "muted", text: "No bookings on this day." })); return; }
     body.style.display = "none";
@@ -2090,7 +2109,7 @@ async function renderSalesPerformance(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const stats = await api(`/api/my/sales-performance?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total booked" }), el("div", { class: "metric-value mono", text: stats.totalBooked })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Booked value" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(stats.totalBookedValue) })]),
@@ -2174,7 +2193,7 @@ async function renderOwnerSalesReps(content) {
 
   async function loadList() {
     const reps = await api("/api/salesreps");
-    list.innerHTML = "";
+    clearHeightLocked(list);
     if (reps.length === 0) list.appendChild(el("div", { class: "muted", text: "No sales reps added yet." }));
     reps.forEach((r) => {
       const initials = el("input", { value: r.initials || "", placeholder: "Initials", style: "max-width:70px" });
@@ -2228,7 +2247,7 @@ async function renderAttendance(content) {
   async function loadDay(params) {
     const date = (params || nav.getParams()).date;
     const people = await api(`/api/manager/attendance?date=${date}`);
-    dayBody.innerHTML = "";
+    clearHeightLocked(dayBody);
     if (people.length === 0) { dayBody.appendChild(el("div", { class: "muted", text: "No employees or managers added yet." })); return; }
     people.forEach((p) => {
       const statusBtn = (value, label, color) => {
@@ -2278,7 +2297,7 @@ async function renderAttendance(content) {
     const p = params || summaryPicker.getParams();
     const qs = new URLSearchParams(p).toString();
     const rows = await api(`/api/owner/attendance-summary?${qs}`);
-    summaryBody.innerHTML = "";
+    clearHeightLocked(summaryBody);
     if (rows.length === 0) { summaryBody.appendChild(el("div", { class: "muted", text: "No one added yet." })); return; }
     const table = el("table", {}, [
       el("tr", {}, [el("th", { text: "Name" }), el("th", { text: "Present" }), el("th", { text: "Half day" }), el("th", { text: "Absent" })]),
@@ -2395,7 +2414,7 @@ async function renderCleanup(content) {
 
   async function load() {
     const jobs = await api("/api/manager/needs-cleanup");
-    body.innerHTML = "";
+    clearHeightLocked(body);
     selectedForOnline.clear();
     updateBulkBar();
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing to clean up — every job has a price and a sales rep or walk-in assignment." })); return; }
@@ -2472,7 +2491,7 @@ async function renderSearch(content) {
     const q = input.value.trim();
     if (!q) { results.innerHTML = ""; return; }
     const rows = await api(`/api/manager/search?q=${encodeURIComponent(q)}`);
-    results.innerHTML = "";
+    clearHeightLocked(results);
     if (rows.length === 0) { results.appendChild(el("div", { class: "muted", text: "No matches." })); return; }
     rows.forEach((s) => {
       const upsellPills = (s.upsells || []).length
@@ -2532,7 +2551,7 @@ async function renderManagerPerformance(content) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const stats = await api(`/api/manager/performance?${qs}`);
-    body.innerHTML = "";
+    clearHeightLocked(body);
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Your upsell revenue" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(stats.upsellRevenue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars you upsold" }), el("div", { class: "metric-value mono", text: stats.cars })]),
@@ -2681,9 +2700,16 @@ function makeServiceColumns() {
 
   const wrap = el("div", {}, [tabBar, colsWrap]);
   // Clears just the cards for a reload, keeping the tab bar and whichever filter was
-  // selected completely untouched — this is the actual fix for "selecting something
-  // sends me back to All."
-  const clearAll = () => Object.values(cardLists).forEach((c) => { c.innerHTML = ""; });
+  // selected completely untouched. Also holds the container's height steady across the
+  // clear-and-refill — without this, the page briefly collapses to near-zero height the
+  // instant it's cleared, and the browser's native scroll behavior snaps back to the top
+  // during that gap, before the new cards even render.
+  const clearAll = () => {
+    const currentHeight = colsWrap.offsetHeight;
+    if (currentHeight > 0) colsWrap.style.minHeight = currentHeight + "px";
+    Object.values(cardLists).forEach((c) => { c.innerHTML = ""; });
+    requestAnimationFrame(() => requestAnimationFrame(() => { colsWrap.style.minHeight = ""; }));
+  };
   return { cols: cardLists, wrap, clearAll };
 }
 
@@ -2905,7 +2931,10 @@ async function renderManagerJobs(content) {
                 await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) });
                 load();
               }, text: "✕ Cancel appointment" })
-            : null,
+            : el("button", { class: "ghost", style: "font-size:11px;padding:4px 10px", onclick: async () => {
+                await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ status: "pending" }) });
+                load();
+              }, text: "↺ Uncancel" }),
           el("button", { class: "icon-danger", style: "font-size:11px;padding:4px 10px", onclick: async () => {
             if (!confirm(`Permanently DELETE this job (${job.car})? Only do this if it's genuinely not a real appointment - not in the CRM at all, a test entry, etc. This can't be undone.`)) return;
             await api(`/api/sales/${job.id}`, { method: "DELETE" });
@@ -3008,7 +3037,7 @@ async function renderOwnerManagers(content) {
 
   async function loadList() {
     const managers = await api("/api/managers");
-    list.innerHTML = "";
+    clearHeightLocked(list);
     if (managers.length === 0) list.appendChild(el("div", { class: "muted", text: "No managers added yet." }));
     managers.forEach((m) => {
       const rate = el("input", { type: "number", value: m.commissionRate || 0, style: "max-width:70px" });
