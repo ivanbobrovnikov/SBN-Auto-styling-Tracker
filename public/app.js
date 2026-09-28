@@ -568,11 +568,17 @@ async function renderPerformance(content) {
     }
     if (stats.payType) {
       body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` }),
+        el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : stats.payType === "hourly" ? `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` : `CAR COMMISSION (${stats.carCommissionRate}% PER CAR)` }),
         el("div", { class: "row" }, [
-          el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : `${stats.basePay.hoursCounted.toFixed(1)} hours worked` }),
+          el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : stats.payType === "hourly" ? `${stats.basePay.hoursCounted.toFixed(1)} hours worked` : `${(stats.basePay.carDetails || []).length} car(s) arrived + paid` }),
           el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.basePay.amount) }),
         ]),
+        stats.payType === "commission" && (stats.basePay.carDetails || []).length > 0
+          ? el("div", { style: "margin-top:6px" }, stats.basePay.carDetails.map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
+              el("span", { class: "muted", text: `${c.car} — ${money(c.basePrice)} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
+              el("span", { class: "mono", text: money(c.yourShare) }),
+            ])))
+          : null,
       ]));
     }
     body.appendChild(el("div", { class: "card" }, [
@@ -732,13 +738,27 @@ async function renderOwnerPayroll(content) {
       p.payType
         ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
             el("div", { class: "row" }, [
-              el("span", { class: "muted", style: "font-size:12.5px", text: p.payType === "salary" ? `Base pay (salary, $${p.salaryPerPeriod}/period)` : `Base pay (hourly, $${p.hourlyRate}/hr)` }),
+              el("span", { class: "muted", style: "font-size:12.5px", text: p.payType === "salary" ? `Base pay (salary, $${p.salaryPerPeriod}/period)` : p.payType === "hourly" ? `Base pay (hourly, $${p.hourlyRate}/hr)` : `Car commission (${p.carCommissionRate}% per car)` }),
               el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.basePay.amount) }),
             ]),
-            el("div", { class: "muted", style: "font-size:10.5px;margin-top:2px", text: p.payType === "salary"
-              ? `${p.basePay.daysPresent} full day(s), ${p.basePay.daysHalf} half day(s), ${p.basePay.daysAbsent} absent`
-              : `${p.basePay.hoursCounted.toFixed(1)} hours worked`
-            }),
+            p.payType === "commission"
+              ? (() => {
+                  const carsWrap = el("div", { style: "display:none;margin-top:6px" }, (p.basePay.carDetails || []).map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
+                    el("span", { class: "muted", text: `${c.car} — ${money(c.basePrice)} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
+                    el("span", { class: "mono", text: money(c.yourShare) }),
+                  ])));
+                  const toggleBtn = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:10.5px;margin-top:2px", onclick: () => {
+                    const showing = carsWrap.style.display !== "none";
+                    carsWrap.style.display = showing ? "none" : "block";
+                    toggleBtn.textContent = showing ? `▸ See which cars (${(p.basePay.carDetails || []).length})` : "▾ Hide cars";
+                  } }, [el("span", { text: (p.basePay.carDetails || []).length > 0 ? `▸ See which cars (${p.basePay.carDetails.length})` : "No arrived+paid cars yet" })]);
+                  if ((p.basePay.carDetails || []).length === 0) toggleBtn.disabled = true;
+                  return el("div", {}, [toggleBtn, carsWrap]);
+                })()
+              : el("div", { class: "muted", style: "font-size:10.5px;margin-top:2px", text: p.payType === "salary"
+                  ? `${p.basePay.daysPresent} full day(s), ${p.basePay.daysHalf} half day(s), ${p.basePay.daysAbsent} absent`
+                  : `${p.basePay.hoursCounted.toFixed(1)} hours worked`
+                }),
           ])
         : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px", text: "No base pay type set (Employees/Managers tab)." }),
       p.tipDetails !== undefined
@@ -1930,16 +1950,20 @@ async function renderOwnerTeam(content) {
         el("option", { value: "", text: "Not set", ...(!e.payType ? { selected: "true" } : {}) }),
         el("option", { value: "salary", text: "Salary", ...(e.payType === "salary" ? { selected: "true" } : {}) }),
         el("option", { value: "hourly", text: "Hourly", ...(e.payType === "hourly" ? { selected: "true" } : {}) }),
+        el("option", { value: "commission", text: "Commission", ...(e.payType === "commission" ? { selected: "true" } : {}) }),
       ]);
       const salaryInput = el("input", { type: "number", placeholder: "$ per period", value: e.salaryPerPeriod || "", style: `max-width:110px;${e.payType === "salary" ? "" : "display:none"}` });
       const hourlyInput = el("input", { type: "number", placeholder: "$ per hour", value: e.hourlyRate || "", style: `max-width:90px;${e.payType === "hourly" ? "" : "display:none"}` });
+      const carCommissionInput = el("input", { type: "number", placeholder: "% per car", value: e.carCommissionRate || "", style: `max-width:90px;${e.payType === "commission" ? "" : "display:none"}` });
       payTypeSelect.addEventListener("change", async () => {
         salaryInput.style.display = payTypeSelect.value === "salary" ? "" : "none";
         hourlyInput.style.display = payTypeSelect.value === "hourly" ? "" : "none";
+        carCommissionInput.style.display = payTypeSelect.value === "commission" ? "" : "none";
         await api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ payType: payTypeSelect.value || null }) });
       });
       salaryInput.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ salaryPerPeriod: salaryInput.value }) }));
       hourlyInput.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ hourlyRate: hourlyInput.value }) }));
+      carCommissionInput.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ carCommissionRate: carCommissionInput.value }) }));
 
       list.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
@@ -1951,7 +1975,7 @@ async function renderOwnerTeam(content) {
           el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
-          el("span", { class: "muted", style: "font-size:11.5px", text: "Base pay:" }), payTypeSelect, salaryInput, hourlyInput,
+          el("span", { class: "muted", style: "font-size:11.5px", text: "Base pay:" }), payTypeSelect, salaryInput, hourlyInput, carCommissionInput,
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
           newPinInput,
@@ -2584,11 +2608,17 @@ async function renderManagerPerformance(content) {
     }
     if (stats.payType) {
       body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` }),
+        el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : stats.payType === "hourly" ? `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` : `CAR COMMISSION (${stats.carCommissionRate}% PER CAR)` }),
         el("div", { class: "row" }, [
-          el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : `${stats.basePay.hoursCounted.toFixed(1)} hours worked` }),
+          el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : stats.payType === "hourly" ? `${stats.basePay.hoursCounted.toFixed(1)} hours worked` : `${(stats.basePay.carDetails || []).length} car(s) arrived + paid` }),
           el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.basePay.amount) }),
         ]),
+        stats.payType === "commission" && (stats.basePay.carDetails || []).length > 0
+          ? el("div", { style: "margin-top:6px" }, stats.basePay.carDetails.map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
+              el("span", { class: "muted", text: `${c.car} — ${money(c.basePrice)} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
+              el("span", { class: "mono", text: money(c.yourShare) }),
+            ])))
+          : null,
       ]));
     }
     body.appendChild(el("div", { class: "card" }, [
@@ -3051,16 +3081,20 @@ async function renderOwnerManagers(content) {
         el("option", { value: "", text: "Not set", ...(!m.payType ? { selected: "true" } : {}) }),
         el("option", { value: "salary", text: "Salary", ...(m.payType === "salary" ? { selected: "true" } : {}) }),
         el("option", { value: "hourly", text: "Hourly", ...(m.payType === "hourly" ? { selected: "true" } : {}) }),
+        el("option", { value: "commission", text: "Commission", ...(m.payType === "commission" ? { selected: "true" } : {}) }),
       ]);
       const salaryInput = el("input", { type: "number", placeholder: "$ per period", value: m.salaryPerPeriod || "", style: `max-width:110px;${m.payType === "salary" ? "" : "display:none"}` });
       const hourlyInput = el("input", { type: "number", placeholder: "$ per hour", value: m.hourlyRate || "", style: `max-width:90px;${m.payType === "hourly" ? "" : "display:none"}` });
+      const carCommissionInput = el("input", { type: "number", placeholder: "% per car", value: m.carCommissionRate || "", style: `max-width:90px;${m.payType === "commission" ? "" : "display:none"}` });
       payTypeSelect.addEventListener("change", async () => {
         salaryInput.style.display = payTypeSelect.value === "salary" ? "" : "none";
         hourlyInput.style.display = payTypeSelect.value === "hourly" ? "" : "none";
+        carCommissionInput.style.display = payTypeSelect.value === "commission" ? "" : "none";
         await api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ payType: payTypeSelect.value || null }) });
       });
       salaryInput.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ salaryPerPeriod: salaryInput.value }) }));
       hourlyInput.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ hourlyRate: hourlyInput.value }) }));
+      carCommissionInput.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ carCommissionRate: carCommissionInput.value }) }));
 
       list.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
@@ -3072,7 +3106,7 @@ async function renderOwnerManagers(content) {
           el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
-          el("span", { class: "muted", style: "font-size:11.5px", text: "Base pay:" }), payTypeSelect, salaryInput, hourlyInput,
+          el("span", { class: "muted", style: "font-size:11.5px", text: "Base pay:" }), payTypeSelect, salaryInput, hourlyInput, carCommissionInput,
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
           newPinInput,
