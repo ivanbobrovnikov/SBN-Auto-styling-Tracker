@@ -632,22 +632,22 @@ app.get("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
   res.json(db.employees.map((e) => ({
     id: e.id, name: e.name, commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0,
-    payType: e.payType || null, salaryPerPeriod: e.salaryPerPeriod || 0, hourlyRate: e.hourlyRate || 0,
+    payType: e.payType || null, salaryPerPeriod: e.salaryPerPeriod || 0, hourlyRate: e.hourlyRate || 0, carCommissionRate: e.carCommissionRate || 0,
   })));
 });
 
 app.post("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
-  const { name, commissionRate, walkInCommissionRate, pin, payType, salaryPerPeriod, hourlyRate } = req.body;
+  const { name, commissionRate, walkInCommissionRate, pin, payType, salaryPerPeriod, hourlyRate, carCommissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
   const emp = {
     id: newId(), name: name.trim(), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0, pinHash: hash(pin),
-    payType: payType === "salary" || payType === "hourly" ? payType : null,
-    salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0,
+    payType: ["salary", "hourly", "commission"].includes(payType) ? payType : null,
+    salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0, carCommissionRate: parseFloat(carCommissionRate) || 0,
   };
   db.employees.push(emp);
   saveDB(db);
-  res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate, payType: emp.payType, salaryPerPeriod: emp.salaryPerPeriod, hourlyRate: emp.hourlyRate });
+  res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate, payType: emp.payType, salaryPerPeriod: emp.salaryPerPeriod, hourlyRate: emp.hourlyRate, carCommissionRate: emp.carCommissionRate });
 });
 
 app.patch("/api/employees/:id", requireManager, (req, res) => {
@@ -657,9 +657,10 @@ app.patch("/api/employees/:id", requireManager, (req, res) => {
   if (req.body.name) emp.name = req.body.name.trim();
   if (req.body.commissionRate !== undefined) emp.commissionRate = parseFloat(req.body.commissionRate) || 0;
   if (req.body.walkInCommissionRate !== undefined) emp.walkInCommissionRate = parseFloat(req.body.walkInCommissionRate) || 0;
-  if (req.body.payType !== undefined) emp.payType = (req.body.payType === "salary" || req.body.payType === "hourly") ? req.body.payType : null;
+  if (req.body.payType !== undefined) emp.payType = ["salary", "hourly", "commission"].includes(req.body.payType) ? req.body.payType : null;
   if (req.body.salaryPerPeriod !== undefined) emp.salaryPerPeriod = parseFloat(req.body.salaryPerPeriod) || 0;
   if (req.body.hourlyRate !== undefined) emp.hourlyRate = parseFloat(req.body.hourlyRate) || 0;
+  if (req.body.carCommissionRate !== undefined) emp.carCommissionRate = parseFloat(req.body.carCommissionRate) || 0;
   if (req.body.pin) emp.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
@@ -677,22 +678,22 @@ app.get("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
   res.json(db.managers.map((m) => ({
     id: m.id, name: m.name, commissionRate: m.commissionRate || 0, walkInCommissionRate: m.walkInCommissionRate || 0,
-    payType: m.payType || null, salaryPerPeriod: m.salaryPerPeriod || 0, hourlyRate: m.hourlyRate || 0,
+    payType: m.payType || null, salaryPerPeriod: m.salaryPerPeriod || 0, hourlyRate: m.hourlyRate || 0, carCommissionRate: m.carCommissionRate || 0,
   })));
 });
 
 app.post("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, pin, commissionRate, walkInCommissionRate, payType, salaryPerPeriod, hourlyRate } = req.body;
+  const { name, pin, commissionRate, walkInCommissionRate, payType, salaryPerPeriod, hourlyRate, carCommissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
   const mgr = {
     id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0,
-    payType: payType === "salary" || payType === "hourly" ? payType : null,
-    salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0,
+    payType: ["salary", "hourly", "commission"].includes(payType) ? payType : null,
+    salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0, carCommissionRate: parseFloat(carCommissionRate) || 0,
   };
   db.managers.push(mgr);
   saveDB(db);
-  res.json({ id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate, walkInCommissionRate: mgr.walkInCommissionRate, payType: mgr.payType, salaryPerPeriod: mgr.salaryPerPeriod, hourlyRate: mgr.hourlyRate });
+  res.json({ id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate, walkInCommissionRate: mgr.walkInCommissionRate, payType: mgr.payType, salaryPerPeriod: mgr.salaryPerPeriod, hourlyRate: mgr.hourlyRate, carCommissionRate: mgr.carCommissionRate });
 });
 
 app.patch("/api/managers/:id", requireOwner, (req, res) => {
@@ -701,9 +702,10 @@ app.patch("/api/managers/:id", requireOwner, (req, res) => {
   if (!mgr) return res.status(404).json({ error: "Not found." });
   if (req.body.commissionRate !== undefined) mgr.commissionRate = parseFloat(req.body.commissionRate) || 0;
   if (req.body.walkInCommissionRate !== undefined) mgr.walkInCommissionRate = parseFloat(req.body.walkInCommissionRate) || 0;
-  if (req.body.payType !== undefined) mgr.payType = (req.body.payType === "salary" || req.body.payType === "hourly") ? req.body.payType : null;
+  if (req.body.payType !== undefined) mgr.payType = ["salary", "hourly", "commission"].includes(req.body.payType) ? req.body.payType : null;
   if (req.body.salaryPerPeriod !== undefined) mgr.salaryPerPeriod = parseFloat(req.body.salaryPerPeriod) || 0;
   if (req.body.hourlyRate !== undefined) mgr.hourlyRate = parseFloat(req.body.hourlyRate) || 0;
+  if (req.body.carCommissionRate !== undefined) mgr.carCommissionRate = parseFloat(req.body.carCommissionRate) || 0;
   if (req.body.pin) mgr.pinHash = hash(req.body.pin);
   saveDB(db);
   res.json({ ok: true });
@@ -1677,7 +1679,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(emp, s), 0);
 
   const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === employeeId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
-  const basePay = emp ? calculateBasePay(emp, myAttendance) : { amount: 0, configured: false };
+  const basePay = emp ? calculateBasePay(emp, myAttendance, mine) : { amount: 0, configured: false, carDetails: [] };
   const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.employeeId === employeeId));
   const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.employeeId === employeeId).amount, 0);
   const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.employeeId === employeeId).amount, splitCount: t.split.length }));
@@ -1687,7 +1689,7 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: emp ? emp.commissionRate : 0, commission,
     walkInCommissionRate: emp ? emp.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue,
-    payType: emp ? emp.payType : null, salaryPerPeriod: emp ? emp.salaryPerPeriod || 0 : 0, hourlyRate: emp ? emp.hourlyRate || 0 : 0, basePay,
+    payType: emp ? emp.payType : null, salaryPerPeriod: emp ? emp.salaryPerPeriod || 0 : 0, hourlyRate: emp ? emp.hourlyRate || 0 : 0, carCommissionRate: emp ? emp.carCommissionRate || 0 : 0, basePay,
     tipsTotal, tipDetails,
     totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
   });
@@ -1722,14 +1724,15 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const walkInCommission = myWalkIns.reduce((a, s) => a + walkInCommissionForSale(mgr, s), 0);
 
   const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === managerId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
-  const basePay = mgr ? calculateBasePay(mgr, myAttendance) : { amount: 0, configured: false };
+  const periodSales = db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
+  const basePay = mgr ? calculateBasePay(mgr, myAttendance, periodSales) : { amount: 0, configured: false, carDetails: [] };
 
   res.json({
     cars, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: mgr ? mgr.commissionRate : 0, commission,
     walkInCommissionRate: mgr ? mgr.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue,
-    payType: mgr ? mgr.payType : null, salaryPerPeriod: mgr ? mgr.salaryPerPeriod || 0 : 0, hourlyRate: mgr ? mgr.hourlyRate || 0 : 0, basePay,
+    payType: mgr ? mgr.payType : null, salaryPerPeriod: mgr ? mgr.salaryPerPeriod || 0 : 0, hourlyRate: mgr ? mgr.hourlyRate || 0 : 0, carCommissionRate: mgr ? mgr.carCommissionRate || 0 : 0, basePay,
     totalPay: commission + walkInCommission + basePay.amount,
     jobs: relevant.map((s) => ({
       id: s.id, date: s.date, car: s.car, customerName: s.customerName,
@@ -1997,8 +2000,8 @@ function timeStringToHours(t) {
 function endDateStringFor(endIso) {
   return new Date(new Date(endIso).getTime() - 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
-function calculateBasePay(person, attendanceRecords) {
-  if (!person.payType) return { amount: 0, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hoursCounted: 0, dailyRate: 0, configured: false };
+function calculateBasePay(person, attendanceRecords, sales) {
+  if (!person.payType) return { amount: 0, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hoursCounted: 0, dailyRate: 0, configured: false, carDetails: [] };
   if (person.payType === "salary") {
     const dailyRate = (person.salaryPerPeriod || 0) / FULL_PERIOD_WORKDAYS;
     let amount = 0, daysPresent = 0, daysHalf = 0, daysAbsent = 0;
@@ -2007,7 +2010,26 @@ function calculateBasePay(person, attendanceRecords) {
       else if (a.status === "half_day") { amount += dailyRate / 2; daysHalf++; }
       else if (a.status === "absent") { daysAbsent++; }
     });
-    return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted: 0, dailyRate, configured: true };
+    return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted: 0, dailyRate, configured: true, carDetails: [] };
+  }
+  if (person.payType === "commission") {
+    // A % of the car's base price, split evenly among everyone who worked it - techs
+    // (employeeIds) and any manager who helped hands-on (managerHelperIds) both count,
+    // both toward the split total and toward their own share. Same split math as tips,
+    // just automatic and tied to the job's price instead of a manually entered amount.
+    // Only counts once a car has actually arrived and been paid, same rule walk-in
+    // commission already uses, so this reflects money actually collected.
+    const allWorkers = (s) => [...(saleEmployeeIds(s) || []), ...(s.managerHelperIds || [])];
+    const myCars = (sales || []).filter((s) => allWorkers(s).includes(person.id) && s.status === "arrived" && s.paid);
+    let amount = 0;
+    const carDetails = myCars.map((s) => {
+      const splitCount = allWorkers(s).length;
+      const basePrice = parseFloat(s.basePrice) || 0;
+      const share = Math.round((basePrice * (person.carCommissionRate || 0) / 100 / splitCount) * 100) / 100;
+      amount += share;
+      return { id: s.id, car: s.car, basePrice, splitCount, yourShare: share };
+    });
+    return { amount, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hoursCounted: 0, dailyRate: 0, configured: true, carDetails };
   }
   // hourly
   let amount = 0, hoursCounted = 0, daysPresent = 0, daysHalf = 0, daysAbsent = 0;
@@ -2022,7 +2044,7 @@ function calculateBasePay(person, attendanceRecords) {
     hoursCounted += hours;
     if (a.status === "half_day") daysHalf++; else daysPresent++;
   });
-  return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted, dailyRate: 0, configured: true };
+  return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted, dailyRate: 0, configured: true, carDetails: [] };
 }
 
 app.get("/api/owner/payroll", requireOwner, (req, res) => {
@@ -2068,7 +2090,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
       status: s.status || "pending", paid: !!s.paid, commissionAmount: walkInCommissionForSale(emp, s),
     }));
     const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === emp.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
-    const basePay = calculateBasePay(emp, myAttendance);
+    const basePay = calculateBasePay(emp, myAttendance, sales);
     // Tips - matched to whichever pay period the JOB happened in, not when the tip was
     // logged, so this stays consistent with how every other number on this page works.
     const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.employeeId === emp.id));
@@ -2077,7 +2099,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     return {
       id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
       walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue, walkInDetails,
-      payType: emp.payType || null, salaryPerPeriod: emp.salaryPerPeriod || 0, hourlyRate: emp.hourlyRate || 0, basePay,
+      payType: emp.payType || null, salaryPerPeriod: emp.salaryPerPeriod || 0, hourlyRate: emp.hourlyRate || 0, carCommissionRate: emp.carCommissionRate || 0, basePay,
       tipsTotal, tipDetails,
       totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
     };
@@ -2095,11 +2117,11 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
       status: s.status || "pending", paid: !!s.paid, commissionAmount: walkInCommissionForSale(mgr, s),
     }));
     const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === mgr.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
-    const basePay = calculateBasePay(mgr, myAttendance);
+    const basePay = calculateBasePay(mgr, myAttendance, sales);
     return {
       id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
       walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue, walkInDetails,
-      payType: mgr.payType || null, salaryPerPeriod: mgr.salaryPerPeriod || 0, hourlyRate: mgr.hourlyRate || 0, basePay,
+      payType: mgr.payType || null, salaryPerPeriod: mgr.salaryPerPeriod || 0, hourlyRate: mgr.hourlyRate || 0, carCommissionRate: mgr.carCommissionRate || 0, basePay,
       totalPay: commission + walkInCommission + basePay.amount,
     };
   });
