@@ -12,6 +12,10 @@ const PHOTOS_DIR = path.join(DATA_DIR, "photos");
 if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
+// Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
+// tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
+const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
+
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-too";
 // This same codebase runs as multiple separate deployments, one per shop location — this
 // is the one thing that should differ between them without touching any code. Defaults to
@@ -929,9 +933,11 @@ app.post("/api/sales", requireManager, (req, res) => {
   // to match Job Status or any calendar's date range, even though it looks fine anywhere
   // that just displays the date rather than filtering by it (like Search).
   const normalizedDate = date ? normalizeDate(date) : null;
+  const initialDate = normalizedDate || new Date().toISOString();
   const sale = {
     id: newId(),
-    date: normalizedDate || new Date().toISOString(),
+    date: initialDate,
+    closedAt: initialDate, // set at creation so a later reschedule never has to guess what the original date was
     customerName: customerName || "",
     car,
     employeeIds,
@@ -1242,6 +1248,69 @@ app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
+// ---------- Cross-location: for the standalone combined sales rep tracker app ----------
+// Read-only and one narrow write action, all gated on CROSS_LOCATION_SECRET, never the
+// session/PIN system, since these are called server-to-server with no logged-in owner.
+
+// Raw individual close records per rep, not pre-aggregated - the combining app computes
+// totals, trends, day-of-week and service breakdowns, and duplicate detection itself from
+// this, so each location's own endpoint stays simple and low-risk.
+app.get("/api/cross-location/salesrep-closes", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(s.closedAt || s.date, start, end)), db);
+  const byRep = {};
+  relevant.forEach((s) => {
+    const rep = db.salesReps.find((r) => r.id === s.salesRepId);
+    if (!rep) return;
+    if (!byRep[rep.name]) byRep[rep.name] = { name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, closes: [] };
+    const duringHours = isDuringBusinessHours(s.closedAt || s.date);
+    byRep[rep.name].closes.push({
+      id: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date,
+      basePrice: parseFloat(s.basePrice) || 0, baseService: s.baseService || "", status: s.status || "pending", duringHours,
+    });
+  });
+  res.json({ locationLabel: SHOP_LOCATION_LABEL, perRep: Object.values(byRep) });
+});
+
+// Same shape as the owner's own Cleanup list, so the combining app can render it identically.
+app.get("/api/cross-location/cleanup-list", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
+  res.json({
+    locationLabel: SHOP_LOCATION_LABEL,
+    jobs: jobs.map((s) => ({
+      id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
+      employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
+      salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
+      basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
+    })).sort((a, b) => (a.date < b.date ? 1 : -1)),
+  });
+});
+
+// Deliberately narrow - only the exact fields Cleanup itself allows fixing, nothing else.
+// Same as tapping the fix directly inside this tracker; just reachable from the combined app.
+app.post("/api/cross-location/cleanup-fix", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.body.saleId);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  const { basePrice, baseService, isWalkIn, isOnlineBooking, salesRepId } = req.body;
+  if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
+  if (baseService !== undefined) sale.baseService = baseService;
+  if (isWalkIn !== undefined) sale.isWalkIn = !!isWalkIn;
+  if (isOnlineBooking !== undefined) sale.isOnlineBooking = !!isOnlineBooking;
+  if (salesRepId !== undefined) {
+    const rep = db.salesReps.find((r) => r.id === salesRepId);
+    sale.salesRepId = salesRepId;
+    sale.salesRepName = rep ? rep.name : sale.salesRepName;
+  }
+  saveDB(db);
+  res.json({ ok: true });
+});
+
 // Auto-fix as much of Cleanup as can be safely derived from data already on the job —
 // the car/title text — using the exact same detection already proven for the live GHL
 // flow and bulk import. Only acts when a real pattern is found; price can never be
@@ -1424,6 +1493,11 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   if (req.body.date !== undefined && req.body.date) {
     const normalized = normalizeDate(req.body.date);
     if (normalized) {
+      // If this job has never had a real closedAt, this edit IS a reschedule of whatever
+      // the date currently is - capture that current value now, before it's overwritten,
+      // so this appointment's original scheduled time is preserved as its close date
+      // forever, rather than drifting to match every future reschedule.
+      if (!sale.closedAt && sale.date) sale.closedAt = sale.date;
       logAudit(db, req, sale, "Date/Time", sale.date, normalized);
       sale.date = normalized;
     }
@@ -1753,7 +1827,6 @@ function salesRepCommissionForSale(rep, sale) {
   const rate = duringHours ? (rep.commissionRate || 0) : (rep.afterHoursCommissionRate || 0);
   return { amount: (parseFloat(sale.basePrice) || 0) * (rate / 100), duringHours };
 }
-
 // Walk-in closer commission — a DIFFERENT rule than sales reps. This requires the job to
 // be both arrived AND marked paid, not just arrived. It's on the base price, only for
 // whoever is recorded as having personally closed that specific walk-in.
