@@ -1433,12 +1433,17 @@ app.post("/api/manager/tips", requireAnyStaff, (req, res) => {
   const amt = parseFloat(amount);
   if (!sale) return res.status(404).json({ error: "Job not found." });
   if (!amt || amt <= 0) return res.status(400).json({ error: "A real amount is required." });
-  const workers = saleEmployeeIds(sale);
+  // Techs AND any manager who helped hands-on both count toward the split - same
+  // "who actually worked this car" logic already used for car commission.
+  const workers = [
+    ...saleEmployeeIds(sale).map((id) => ({ personType: "employee", personId: id })),
+    ...(sale.managerHelperIds || []).map((id) => ({ personType: "manager", personId: id })),
+  ];
   if (workers.length === 0) return res.status(400).json({ error: "This job has no one assigned to it yet." });
   const each = Math.round((amt / workers.length) * 100) / 100;
-  const split = workers.map((id) => {
-    const emp = db.employees.find((e) => e.id === id);
-    return { employeeId: id, name: emp ? emp.name : "Removed employee", amount: each };
+  const split = workers.map((w) => {
+    const person = w.personType === "employee" ? db.employees.find((e) => e.id === w.personId) : db.managers.find((m) => m.id === w.personId);
+    return { personType: w.personType, personId: w.personId, name: person ? person.name : "Removed person", amount: each };
   });
   const actor = actorInfo(req, db);
   const tip = { id: newId(), saleId, car: sale.car, date: sale.date, amount: amt, split, loggedByName: actor.name, timestamp: new Date().toISOString() };
@@ -1761,9 +1766,9 @@ app.get("/api/my/performance", requireEmployee, (req, res) => {
 
   const myAttendance = db.attendance.filter((a) => a.personType === "employee" && a.personId === employeeId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
   const basePay = emp ? calculateBasePay(emp, myAttendance, mine) : { amount: 0, configured: false, carDetails: [] };
-  const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.employeeId === employeeId));
-  const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.employeeId === employeeId).amount, 0);
-  const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.employeeId === employeeId).amount, splitCount: t.split.length }));
+  const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.personType === "employee" && sp.personId === employeeId));
+  const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.personType === "employee" && sp.personId === employeeId).amount, 0);
+  const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.personType === "employee" && sp.personId === employeeId).amount, splitCount: t.split.length }));
 
   res.json({
     cars, attachRate, upsellRevenue: upsellRev,
@@ -1807,6 +1812,9 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === managerId && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
   const periodSales = db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db));
   const basePay = mgr ? calculateBasePay(mgr, myAttendance, periodSales) : { amount: 0, configured: false, carDetails: [] };
+  const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.personType === "manager" && sp.personId === managerId));
+  const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.personType === "manager" && sp.personId === managerId).amount, 0);
+  const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.personType === "manager" && sp.personId === managerId).amount, splitCount: t.split.length }));
 
   res.json({
     cars, upsellRevenue: upsellRev,
@@ -1814,7 +1822,8 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
     commissionRate: mgr ? mgr.commissionRate : 0, commission,
     walkInCommissionRate: mgr ? mgr.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue,
     payType: mgr ? mgr.payType : null, salaryPerPeriod: mgr ? mgr.salaryPerPeriod || 0 : 0, hourlyRate: mgr ? mgr.hourlyRate || 0 : 0, carCommissionRate: mgr ? mgr.carCommissionRate || 0 : 0, basePay,
-    totalPay: commission + walkInCommission + basePay.amount,
+    tipsTotal, tipDetails,
+    totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
     jobs: relevant.map((s) => ({
       id: s.id, date: s.date, car: s.car, customerName: s.customerName,
       upsells: myUpsells(s).map((u) => ({ name: u.name, price: u.price })),
@@ -2173,9 +2182,9 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     const basePay = calculateBasePay(emp, myAttendance, sales);
     // Tips - matched to whichever pay period the JOB happened in, not when the tip was
     // logged, so this stays consistent with how every other number on this page works.
-    const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.employeeId === emp.id));
-    const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.employeeId === emp.id).amount, 0);
-    const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.employeeId === emp.id).amount, splitCount: t.split.length }));
+    const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.personType === "employee" && sp.personId === emp.id));
+    const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.personType === "employee" && sp.personId === emp.id).amount, 0);
+    const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.personType === "employee" && sp.personId === emp.id).amount, splitCount: t.split.length }));
     return {
       id: emp.id, name: emp.name, commissionRate: emp.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
       walkInCommissionRate: emp.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue, walkInDetails,
@@ -2198,11 +2207,15 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     }));
     const myAttendance = db.attendance.filter((a) => a.personType === "manager" && a.personId === mgr.id && a.date >= start.slice(0, 10) && a.date <= endDateStringFor(end));
     const basePay = calculateBasePay(mgr, myAttendance, sales);
+    const myTips = db.tips.filter((t) => inRange(t.date, start, end) && t.split.some((sp) => sp.personType === "manager" && sp.personId === mgr.id));
+    const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.personType === "manager" && sp.personId === mgr.id).amount, 0);
+    const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.personType === "manager" && sp.personId === mgr.id).amount, splitCount: t.split.length }));
     return {
       id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
       walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue, walkInDetails,
       payType: mgr.payType || null, salaryPerPeriod: mgr.salaryPerPeriod || 0, hourlyRate: mgr.hourlyRate || 0, carCommissionRate: mgr.carCommissionRate || 0, basePay,
-      totalPay: commission + walkInCommission + basePay.amount,
+      tipsTotal, tipDetails,
+      totalPay: commission + walkInCommission + basePay.amount + tipsTotal,
     };
   });
   // Sales reps are a different pay structure entirely — commission on the base sale, only
