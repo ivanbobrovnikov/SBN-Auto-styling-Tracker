@@ -1259,10 +1259,14 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  // Filters by appointment date, matching Payroll exactly - not closed date (that's a
-  // different question, matching Closing Activity instead). This is what makes Combined's
-  // numbers directly comparable to what each location's own Payroll page shows.
-  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(s.date, start, end)), db);
+  // Two genuinely different questions need two different date bases. "appointment" (the
+  // default) filters by when the job is scheduled and matches Payroll exactly - this is
+  // what Combined's period stats need, so they agree with each location's own Payroll page.
+  // "closed" filters by when the deal was actually closed, regardless of when the
+  // appointment happens - this is what a live "who's closing deals today" leaderboard
+  // needs, matching Closing Activity instead.
+  const dateBasis = req.query.dateBasis === "closed" ? (s) => (s.closedAt || s.date) : (s) => s.date;
+  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(dateBasis(s), start, end)), db);
   const byRep = {};
   relevant.forEach((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
