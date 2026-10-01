@@ -405,7 +405,7 @@ function renderTipWidget(jobs, onDone) {
   const notice = el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px" });
   select.addEventListener("change", () => {
     const job = jobs.find((j) => j.id === select.value);
-    whoLabel.textContent = job ? `Splits among: ${job.employeeNames || "Unassigned"}` : "";
+    whoLabel.textContent = job ? `Splits among: ${[job.employeeNames, job.managerHelperNames].filter(Boolean).join(", ") || "Unassigned"}` : "";
   });
   const saveBtn = el("button", { class: "primary", onclick: async () => {
     if (!select.value) { notice.textContent = "Pick a car first."; notice.style.color = "var(--red)"; return; }
@@ -564,6 +564,18 @@ async function renderPerformance(content) {
               el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.walkInCommission) }),
             ])
           : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px", text: "No walk-in commission rate set for you yet." }),
+      ]));
+    }
+    if (stats.tipDetails !== undefined && stats.tipDetails.length > 0) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("span", { class: "muted", style: "margin-bottom:8px", text: `TIPS (${stats.tipDetails.length} CAR${stats.tipDetails.length !== 1 ? "S" : ""})` }),
+          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.tipsTotal) }),
+        ]),
+        el("div", { style: "margin-top:4px" }, stats.tipDetails.map((t) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
+          el("span", { class: "muted", text: `${t.car} — ${money(t.totalAmount)} (split ${t.splitCount} way${t.splitCount !== 1 ? "s" : ""})` }),
+          el("span", { class: "mono", text: money(t.yourShare) }),
+        ]))),
       ]));
     }
     if (stats.payType) {
@@ -2604,6 +2616,18 @@ async function renderManagerPerformance(content) {
               el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.walkInCommission) }),
             ])
           : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px", text: "No walk-in commission rate set for you yet." }),
+      ]));
+    }
+    if (stats.tipDetails !== undefined && stats.tipDetails.length > 0) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("span", { class: "muted", style: "margin-bottom:8px", text: `TIPS (${stats.tipDetails.length} CAR${stats.tipDetails.length !== 1 ? "S" : ""})` }),
+          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.tipsTotal) }),
+        ]),
+        el("div", { style: "margin-top:4px" }, stats.tipDetails.map((t) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
+          el("span", { class: "muted", text: `${t.car} — ${money(t.totalAmount)} (split ${t.splitCount} way${t.splitCount !== 1 ? "s" : ""})` }),
+          el("span", { class: "mono", text: money(t.yourShare) }),
+        ]))),
       ]));
     }
     if (stats.payType) {
