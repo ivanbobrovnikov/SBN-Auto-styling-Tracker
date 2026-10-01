@@ -1259,7 +1259,10 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(s.closedAt || s.date, start, end)), db);
+  // Filters by appointment date, matching Payroll exactly - not closed date (that's a
+  // different question, matching Closing Activity instead). This is what makes Combined's
+  // numbers directly comparable to what each location's own Payroll page shows.
+  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(s.date, start, end)), db);
   const byRep = {};
   relevant.forEach((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
