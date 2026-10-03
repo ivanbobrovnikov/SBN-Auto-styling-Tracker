@@ -14,6 +14,9 @@ const el = (tag, attrs = {}, children = []) => {
   (Array.isArray(children) ? children : [children]).forEach((c) => c && e.appendChild(c));
   return e;
 };
+// Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
+const UI_BUILD = "2026-10-03-cash-menu";
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -176,6 +179,20 @@ function render() {
     el("div", { style: "flex:1;min-width:0" }, [
       el("div", { class: "title oswald", text: "SBN Autostyling Tracker" }),
       el("div", { class: "subtitle", text: `Window tint · PPF · Ceramic coating — ${session.shopLocation || ""}` }),
+      (() => {
+        // Shows which release this screen is, and goes red if the server is on a different one.
+        // A network hiccup alone never triggers the warning - only a real answer that doesn't match.
+        const line = el("div", { class: "muted", style: "font-size:9.5px;margin-top:1px", text: `build ${UI_BUILD}` });
+        fetch("/api/version", { cache: "no-store" })
+          .then(async (r) => { let v = null; if (r.ok) { try { v = await r.json(); } catch (e) {} } return { reached: true, v }; })
+          .catch(() => ({ reached: false }))
+          .then(({ reached, v }) => {
+            if (!reached || (v && v.build === UI_BUILD)) return;
+            line.style.color = "var(--red)";
+            line.textContent = `\u26A0 screen ${UI_BUILD} \u00B7 server ${v && v.build ? v.build : "OLD"} \u2014 update both files`;
+          });
+        return line;
+      })(),
     ]),
     el("div", { style: "text-align:right;flex-shrink:0" }, [
       el("div", { style: "font-size:12.5px;font-weight:500", text: session.name || "Owner" }),
@@ -1416,7 +1433,7 @@ async function renderCashLog(content) {
         el("div", { class: "row" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: `${e.category}${e.isOnline ? " · Online" : ""}` }),
-            el("div", { class: "muted", style: "font-size:12.5px", text: e.note || "(no description)" }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: (e.note || "(no description)") + (e.autoFromJob ? " · from Job Status" : "") }),
             el("div", { class: "muted", style: "font-size:11px", text: formatDateTime(e.timestamp) }),
           ]),
           el("div", { style: "text-align:right" }, [
@@ -1470,7 +1487,7 @@ async function renderOwnerCash(content) {
         el("div", { class: "row" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500", text: `${e.category}${e.isOnline ? " · Online" : ""}` }),
-            el("div", { class: "muted", style: "font-size:12.5px", text: e.note || "(no description)" }),
+            el("div", { class: "muted", style: "font-size:12.5px", text: (e.note || "(no description)") + (e.autoFromJob ? " · from Job Status" : "") }),
             el("div", { class: "muted", style: "font-size:11px", text: `${e.enteredByName} · ${formatDateTime(e.timestamp)}` }),
           ]),
           el("div", { style: "text-align:right" }, [
@@ -2853,12 +2870,52 @@ async function renderManagerJobs(content) {
           text: (active ? "✓ " : "") + label,
         });
       };
+      // Cash asks "how much?" before marking anything, because the amount is what gets
+      // logged to Cash & Expenses. Full amount for the common case, or a custom amount when
+      // a customer split the payment (some cash, rest on card, or just paid part so far).
+      const cashNotice = el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px" });
+      const cashPanel = el("div", { style: "display:none;margin-bottom:10px;padding:10px 12px;background:var(--panel);border:0.5px solid var(--border);border-radius:8px" });
+      const customCashInput = el("input", { type: "number", step: "0.01", min: "0", placeholder: "Custom amount", style: "max-width:130px" });
+      const saveCash = async (amount) => {
+        if (!(amount > 0)) { cashNotice.textContent = "Enter a real amount."; cashNotice.style.color = "var(--red)"; return; }
+        // A typo like 5000 instead of 500 would silently overstate cash on hand, so an
+        // amount above the job's total gets one confirmation (a bigger amount can be real).
+        if ((job.total || 0) > 0 && amount > job.total + 0.005 && !confirm(`That's more than this job's total (${money(job.total || 0)}). Log ${money(amount)} in cash anyway?`)) return;
+        try {
+          await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ paidCash: true, cashPaidAmount: amount }) });
+          load();
+        } catch (err) { cashNotice.textContent = err.message || "Something went wrong."; cashNotice.style.color = "var(--red)"; }
+      };
+      const fullCashBtn = el("button", { class: "primary", onclick: () => saveCash(job.total), text: job.total > 0 ? `Full amount — ${money(job.total)}` : "Full amount — no price set" });
+      if (!(job.total > 0)) fullCashBtn.disabled = true;
+      customCashInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") saveCash(parseFloat(customCashInput.value)); });
+      cashPanel.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: "How much was paid in cash? This goes straight into Cash & Expenses." }));
+      cashPanel.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [
+        fullCashBtn,
+        customCashInput,
+        el("button", { class: "ghost", onclick: () => saveCash(parseFloat(customCashInput.value)), text: "Log custom" }),
+        el("button", { class: "ghost", onclick: () => { cashPanel.style.display = "none"; }, text: "Cancel" }),
+      ]));
+      cashPanel.appendChild(cashNotice);
+      const openCashPanel = () => {
+        customCashInput.value = job.cashPaidAmount > 0 ? job.cashPaidAmount : "";
+        cashNotice.textContent = "";
+        cashPanel.style.display = "block";
+      };
       const paymentBtn = (field, label) => {
         const active = field === "paidCash" ? !!job.paidCash : !!job.paidCard;
         return el("button", {
           class: "tab-btn" + (active ? " active" : ""),
           style: "border-color:" + (active ? "var(--green)" : "var(--border)") + ";color:" + (active ? "var(--green)" : "var(--sub)"),
-          onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ [field]: !active }) }); load(); },
+          onclick: async () => {
+            if (field === "paidCash") {
+              if (!active) { if (cashPanel.style.display === "none") openCashPanel(); else cashPanel.style.display = "none"; return; }
+              // Turning cash OFF also removes the logged cash entry, so say so first.
+              if (job.cashPaidAmount > 0 && !confirm(`Remove the ${money(job.cashPaidAmount)} cash payment from this job and from Cash & Expenses?`)) return;
+            }
+            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ [field]: !active }) });
+            load();
+          },
           text: (active ? "✓ " : "") + label,
         });
       };
@@ -3042,6 +3099,11 @@ async function renderManagerJobs(content) {
             text: (job.isWalkIn ? "✓ " : "") + "Walk-in (no rep commission)",
           }),
         ]),
+        job.paidCash ? el("div", { class: "row", style: "margin-bottom:10px;font-size:12px" }, [
+          el("span", { style: job.cashPaidAmount > 0 ? "color:var(--green)" : "color:var(--sub)", text: job.cashPaidAmount > 0 ? `Cash received: ${money(job.cashPaidAmount)}` : "Cash amount not logged" }),
+          el("button", { class: "ghost", style: "font-size:10.5px;padding:3px 8px", onclick: openCashPanel, text: job.cashPaidAmount > 0 ? "Edit" : "Log amount" }),
+        ]) : null,
+        cashPanel,
         job.isWalkIn ? el("div", { style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `WHO ACTUALLY CLOSED THIS WALK-IN? (currently: ${job.walkInClosedByName || "not set"})` }),
           el("select", {
