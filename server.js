@@ -12,6 +12,9 @@ const PHOTOS_DIR = path.join(DATA_DIR, "photos");
 if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
+// Release label shown on screen so a half-updated deploy (one file replaced, not the other)
+// is obvious at a glance instead of just looking "broken". Bump this with each release.
+const BUILD = "2026-10-03-cash-menu";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -445,7 +448,11 @@ app.use("/api", (req, res, next) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   next();
 });
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), {
+  // Always re-check the app's own files with the server, so a redeploy takes effect on the
+  // very next open instead of a phone quietly running a stale copy of the old screen.
+  setHeaders: (res, filePath) => { if (/\.(js|html|css)$/.test(filePath)) res.setHeader("Cache-Control", "no-cache"); },
+}));
 
 const AUTH_COOKIE = "sbn_auth";
 const AUTH_MAX_AGE = 1000 * 60 * 60 * 24 * 365; // 1 year — stays logged in on a phone indefinitely
@@ -572,6 +579,9 @@ function requireAnyStaff(req, res, next) {
 }
 
 // ---------- session / login ----------
+// Public and harmless - just lets the screen confirm it's on the same release as the server.
+app.get("/api/version", (req, res) => res.json({ build: BUILD }));
+
 app.get("/api/session", (req, res) => {
   const db = loadDB();
   if (req.auth.role === "owner") return res.json({ role: "owner", shopLocation: SHOP_LOCATION_LABEL });
@@ -958,6 +968,9 @@ app.post("/api/sales", requireManager, (req, res) => {
 app.delete("/api/sales/:id", requireManager, (req, res) => {
   const db = loadDB();
   db.sales = db.sales.filter((s) => s.id !== req.params.id);
+  // Cash that was auto-logged from this job's payment has nothing left to point at once the
+  // job is gone - leaving it would overstate cash on hand with money nobody can trace.
+  db.cashEntries = db.cashEntries.filter((e) => !(e.autoFromJob && e.saleId === req.params.id));
   saveDB(db);
   res.json({ ok: true });
 });
@@ -1458,12 +1471,58 @@ app.get("/api/manager/tips", requireManager, (req, res) => {
   res.json(db.tips.filter((t) => t.timestamp >= start && t.timestamp <= end).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)));
 });
 
+// Cash received against a job is kept in lockstep with the Cash & Expenses log. Marking a
+// job paid in cash creates (or updates) ONE linked "cashIn" entry for the amount actually
+// handed over; unmarking it removes that entry again, so cash on hand can never drift away
+// from what Job Status says was collected. The cash entry is the single source of truth for
+// the amount - Job Status reads it back from there rather than keeping a second copy that
+// could disagree if someone later corrects the entry in Cash Log.
+function linkedCashEntries(db, saleId) {
+  return db.cashEntries.filter((e) => e.autoFromJob && e.saleId === saleId);
+}
+function reconcileCashPayment(db, req, sale, requestedAmount) {
+  const linked = linkedCashEntries(db, sale.id);
+  const existing = linked[0] || null;
+  if (!sale.paidCash) {
+    if (linked.length > 0) {
+      const before = linked.reduce((a, e) => a + e.amount, 0);
+      db.cashEntries = db.cashEntries.filter((e) => !(e.autoFromJob && e.saleId === sale.id));
+      logAudit(db, req, sale, "Cash received", before, 0);
+    }
+    return;
+  }
+  // Newly marked with no amount given (e.g. the quick button on Unpaid Arrivals) defaults to
+  // the full job total; an unrelated update to an already-logged job keeps what's there.
+  const amount = requestedAmount !== undefined ? requestedAmount : existing ? existing.amount : Math.round(saleTotal(sale) * 100) / 100;
+  if (!(amount > 0)) return; // a job with no price yet has no cash amount to log
+  if (existing) {
+    if (linked.length > 1) db.cashEntries = db.cashEntries.filter((e) => !(e.autoFromJob && e.saleId === sale.id && e !== existing));
+    if (existing.amount !== amount) {
+      logAudit(db, req, sale, "Cash received", existing.amount, amount);
+      existing.amount = amount;
+    }
+    return;
+  }
+  const actor = actorInfo(req, db);
+  db.cashEntries.unshift({
+    id: newId(), type: "cashIn", amount, category: "Customer Payment",
+    note: `${sale.car || "Job"}${sale.customerName ? " — " + sale.customerName : ""}`,
+    isOnline: false, receiptPhoto: null, saleId: sale.id, autoFromJob: true,
+    enteredByType: actor.type, enteredById: actor.id, enteredByName: actor.name,
+    timestamp: new Date().toISOString(),
+  });
+  logAudit(db, req, sale, "Cash received", 0, amount);
+}
+
 app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const jobs = db.sales.filter((s) => inRange(s.date, start, end));
+  const cashBySale = {};
+  db.cashEntries.forEach((e) => { if (e.autoFromJob && e.saleId) cashBySale[e.saleId] = (cashBySale[e.saleId] || 0) + e.amount; });
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
+    cashPaidAmount: cashBySale[s.id] || 0,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
@@ -1526,6 +1585,14 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   }
   if (req.body.status !== undefined) sale.status = req.body.status;
   if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
+  // How much of the payment was actually cash - validated before anything is changed, so a
+  // bad value can never leave a half-applied update behind.
+  let cashAmountRequested;
+  if (req.body.cashPaidAmount !== undefined) {
+    const amt = Math.round(parseFloat(req.body.cashPaidAmount) * 100) / 100;
+    if (!(amt > 0)) return res.status(400).json({ error: "Enter a real cash amount." });
+    cashAmountRequested = amt;
+  }
   if (req.body.paid !== undefined) {
     sale.paid = !!req.body.paid;
     if (!sale.paid) { sale.paidCash = false; sale.paidCard = false; sale.paymentMethod = null; }
@@ -1537,6 +1604,11 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   if (req.body.paidCash !== undefined || req.body.paidCard !== undefined) {
     sale.paid = !!(sale.paidCash || sale.paidCard);
     sale.paymentMethod = sale.paidCash && sale.paidCard ? "both" : sale.paidCash ? "cash" : sale.paidCard ? "card" : null;
+  }
+  // Every path that can change cash (paidCash, paid:false which clears it, or an amount
+  // edit) funnels through here, so the Cash & Expenses log always matches.
+  if (req.body.paid !== undefined || req.body.paidCash !== undefined || req.body.paidCard !== undefined || cashAmountRequested !== undefined) {
+    reconcileCashPayment(db, req, sale, cashAmountRequested);
   }
   if (req.body.employeeIds !== undefined) {
     sale.employeeIds = req.body.employeeIds;
