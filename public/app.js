@@ -15,7 +15,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-03-cash-menu";
+const UI_BUILD = "2026-10-04-promote";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1962,6 +1962,7 @@ async function renderOwnerTeam(content) {
   const rateInput = el("input", { type: "number", placeholder: "Upsell commission %", style: "max-width:150px" });
   const walkInRateInput = el("input", { type: "number", placeholder: "Walk-in close %", style: "max-width:140px" });
   const notice = el("div", { class: "notice" });
+  const promoteNotice = el("div", { class: "notice" });
   const list = el("div");
 
   async function loadList() {
@@ -2015,6 +2016,20 @@ async function renderOwnerTeam(content) {
             setTimeout(() => { resetNotice.textContent = ""; }, 2500);
           }, text: "Reset PIN" }),
           resetNotice,
+          // Owner only (the server enforces it too). Moves the person to the Manager role and
+          // carries everything they've logged with them, rather than deleting and re-adding.
+          session.role === "owner" ? el("button", { class: "ghost", style: "margin-left:auto", onclick: async () => {
+            if (!confirm(`Make ${e.name} a manager?\n\nEverything ${e.name} has logged moves with them: upsells, walk-in closes, tips, attendance, and the cars they worked. Their rates and pay setup carry over. Same PIN, but they'll need to log in again.`)) return;
+            try {
+              const r = await api(`/api/employees/${e.id}/promote-to-manager`, { method: "POST" });
+              const m = r.moved || {};
+              const parts = [[m.upsells, "upsell"], [m.cars, "car worked", "cars worked"], [m.walkIns, "walk-in close"], [m.tips, "tip share"], [m.attendanceDays, "attendance day"]]
+                .filter(([n]) => n > 0).map(([n, one, many]) => `${n} ${n === 1 ? one : (many || one + "s")}`);
+              promoteNotice.className = "notice ok";
+              promoteNotice.textContent = `${r.name} is now a manager. Moved with them: ${parts.length ? parts.join(", ") : "nothing logged yet, so nothing to move"}.`;
+              loadList();
+            } catch (err) { promoteNotice.className = "notice err"; promoteNotice.textContent = err.message || "Couldn't make that change."; }
+          }, text: "Make manager" }) : null,
         ]),
       ]));
     });
@@ -2034,6 +2049,7 @@ async function renderOwnerTeam(content) {
     ]),
     notice,
   ]));
+  content.appendChild(promoteNotice);
   content.appendChild(list);
   await loadList();
 }
