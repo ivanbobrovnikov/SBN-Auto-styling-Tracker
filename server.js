@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-03-cash-menu";
+const BUILD = "2026-10-04-promote";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -685,6 +685,58 @@ app.delete("/api/employees/:id", requireManager, (req, res) => {
   db.employees = db.employees.filter((e) => e.id !== req.params.id);
   saveDB(db);
   res.json({ ok: true });
+});
+
+// Promotes a tech to manager WITHOUT losing anything they've logged. A person's history is
+// attached to their ROLE, not just their name - upsells point at an "employee" or a "manager",
+// and so do walk-in closes, tips and attendance - so simply moving the record would orphan all
+// of it and wipe their pay history. The person keeps the same id, PIN and pay setup, and every
+// reference to them is rewritten to the manager side in one pass (saved once: all or nothing).
+function promoteEmployeeToManager(db, empId) {
+  const emp = db.employees.find((e) => e.id === empId);
+  if (!emp) return null;
+  const moved = { upsells: 0, cars: 0, walkIns: 0, tips: 0, attendanceDays: 0 };
+
+  db.managers.push({ ...emp, promotedFromEmployeeAt: new Date().toISOString() });
+  db.employees = db.employees.filter((e) => e.id !== empId);
+
+  db.sales.forEach((s) => {
+    (s.upsells || []).forEach((u) => {
+      if (u.employeeId === empId) { u.employeeId = null; u.managerId = empId; moved.upsells++; }
+    });
+    // "Techs who worked this car" becomes "Managers who also helped". Both count toward a car's
+    // split (tips, car commission), so everyone else's share stays exactly what it was.
+    const techIds = saleEmployeeIds(s);
+    if (techIds.includes(empId)) {
+      s.employeeIds = techIds.filter((id) => id !== empId);
+      if (s.employeeId === empId) s.employeeId = null;
+      s.employeeNames = s.employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean).join(", ") || "Unassigned";
+      s.managerHelperIds = [...new Set([...(s.managerHelperIds || []), empId])];
+      s.managerHelperNames = s.managerHelperIds.map((id) => (db.managers.find((m) => m.id === id) || {}).name).filter(Boolean).join(", ");
+      moved.cars++;
+    }
+    if (s.walkInClosedByType === "employee" && s.walkInClosedById === empId) { s.walkInClosedByType = "manager"; moved.walkIns++; }
+  });
+  db.tips.forEach((t) => (t.split || []).forEach((sp) => {
+    if (sp.personType === "employee" && sp.personId === empId) { sp.personType = "manager"; moved.tips++; }
+  }));
+  db.attendance.forEach((a) => {
+    if (a.personType === "employee" && a.personId === empId) { a.personType = "manager"; moved.attendanceDays++; }
+  });
+  db.cashEntries.forEach((c) => { if (c.enteredByType === "employee" && c.enteredById === empId) c.enteredByType = "manager"; });
+  return moved;
+}
+
+// Owner only. If they're logged in as an employee at that moment, the app just sends them back
+// to the login screen, and the same PIN then signs them in as a manager.
+app.post("/api/employees/:id/promote-to-manager", requireOwner, (req, res) => {
+  const db = loadDB();
+  const emp = db.employees.find((e) => e.id === req.params.id);
+  if (!emp) return res.status(404).json({ error: "Employee not found." });
+  const name = emp.name;
+  const moved = promoteEmployeeToManager(db, req.params.id);
+  saveDB(db);
+  res.json({ ok: true, name, moved });
 });
 
 // ---------- managers (owner only to manage) ----------
