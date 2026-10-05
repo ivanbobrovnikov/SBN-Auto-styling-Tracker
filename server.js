@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-05-audit";
+const BUILD = "2026-10-05-edit";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -57,7 +57,8 @@ function logAudit(db, req, sale, field, oldValue, newValue) {
   if (oldValue === newValue) return; // no real change, nothing to log
   if (!db.auditLog) db.auditLog = [];
   let actor = "Unknown";
-  if (req.auth.role === "owner") actor = "Owner";
+  if (req.auth.label) actor = req.auth.label; // e.g. changes made from the combined rep tracker say so
+  else if (req.auth.role === "owner") actor = "Owner";
   else if (req.auth.role === "manager") {
     const mgr = (db.managers || []).find((m) => m.id === req.auth.id);
     actor = `${mgr ? mgr.name : "Removed manager"} (manager)`;
@@ -1423,6 +1424,85 @@ app.post("/api/cross-location/cleanup-fix", (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Editing and adding jobs from the combined rep tracker ----------
+// These let the owner correct or add jobs from the combined rep tracker. The edit runs through this
+// shop's own job editor (patchJobHandler), so every rule - Eastern-aware times, validation, Edit
+// History - is identical to editing on this shop's own screen. Edit History just says who did it.
+app.get("/api/cross-location/salesreps", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  res.json({ locationLabel: SHOP_LOCATION_LABEL, salesReps: db.salesReps.map((r) => ({ id: r.id, name: r.name })) });
+});
+
+// Only these fields can be changed from there - nothing about payments, techs, upsells or deleting.
+const CROSS_EDITABLE = ["closedAt", "date", "car", "basePrice", "baseService", "salesRepId", "isWalkIn", "isOnlineBooking", "status"];
+app.post("/api/cross-location/job-edit", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.body.saleId);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  const body = {};
+  CROSS_EDITABLE.forEach((k) => { if (req.body[k] !== undefined) body[k] = req.body[k]; });
+  // Checked up front so a bad value gets a clear message instead of being silently ignored.
+  if (body.closedAt !== undefined && !normalizeDate(body.closedAt)) return res.status(400).json({ error: "That closing time isn't a valid date and time." });
+  if (body.date !== undefined && !normalizeDate(body.date)) return res.status(400).json({ error: "That appointment time isn't a valid date and time." });
+  if (body.basePrice !== undefined && !(parseFloat(body.basePrice) >= 0)) return res.status(400).json({ error: "Price must be a number, 0 or more." });
+  if (body.car !== undefined && !String(body.car).trim()) return res.status(400).json({ error: "The title can't be empty." });
+  if (body.status !== undefined && !["pending", "arrived", "no_show", "cancelled"].includes(body.status)) return res.status(400).json({ error: "Unknown status." });
+  if (body.salesRepId !== undefined && !db.salesReps.some((r) => r.id === body.salesRepId)) return res.status(400).json({ error: "That sales rep doesn't exist at this location." });
+  req.params = { id: sale.id };
+  req.body = body;
+  req.auth = { role: "owner", id: "rep-tracker", label: "Rep tracker (owner)" };
+  return patchJobHandler(req, res);
+});
+
+// Adds a job that never made it into the tracker. Unlike the shop's own add-job form it needs no
+// tech, and it takes the sales rep and the REAL closing time, since those decide the commission.
+app.post("/api/cross-location/job-add", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB();
+  const { customerName, car, date, closedAt, basePrice, baseService, salesRepId, isWalkIn, isOnlineBooking, status, force } = req.body;
+  if (!String(car || "").trim()) return res.status(400).json({ error: "Enter the car / title." });
+  const apptIso = normalizeDate(date);
+  if (!apptIso) return res.status(400).json({ error: "Enter the appointment date and time." });
+  const closedIso = closedAt ? normalizeDate(closedAt) : new Date().toISOString();
+  if (!closedIso) return res.status(400).json({ error: "That closing time isn't a valid date and time." });
+  const price = basePrice === undefined || basePrice === null || basePrice === "" ? 0 : parseFloat(basePrice);
+  if (!(price >= 0)) return res.status(400).json({ error: "Price must be a number, 0 or more." });
+  const st = status || "pending";
+  if (!["pending", "arrived", "no_show"].includes(st)) return res.status(400).json({ error: "Unknown status." });
+  let rep = null;
+  if (salesRepId) {
+    rep = db.salesReps.find((r) => r.id === salesRepId);
+    if (!rep) return res.status(400).json({ error: "That sales rep doesn't exist at this location." });
+  }
+  // The most likely mistake is adding something that's already there - same customer, similar title,
+  // same day. Say so first; the caller can resend with force to add it anyway.
+  const cust = String(customerName || "").trim().toLowerCase();
+  const title = String(car).trim().toLowerCase();
+  if (cust && !force) {
+    const dupe = db.sales.find((s) => s.status !== "cancelled" && String(s.customerName || "").trim().toLowerCase() === cust
+      && EASTERN_DAY_FMT.format(new Date(s.date)) === EASTERN_DAY_FMT.format(new Date(apptIso))
+      && (String(s.car || "").toLowerCase().includes(title) || title.includes(String(s.car || "").toLowerCase())));
+    if (dupe) return res.status(409).json({ duplicate: true, error: `A job for ${customerName.trim()} with a similar title is already on the books for that day.`, existing: { id: dupe.id, car: dupe.car, date: dupe.date } });
+  }
+  const sale = {
+    id: newId(), date: apptIso, closedAt: closedIso, customerName: String(customerName || "").trim(), car: String(car).trim(),
+    employeeIds: [], employeeNames: "Unassigned", baseService: baseService || "", basePrice: price,
+    syncedFromGHL: false, upsells: [], status: st, completed: false, paid: false,
+    salesRepId: null, salesRepName: "Unassigned", isWalkIn: false, isOnlineBooking: false,
+  };
+  if (isWalkIn) { sale.isWalkIn = true; sale.salesRepName = "Walk-in (booked by staff)"; }
+  else if (isOnlineBooking) { sale.isOnlineBooking = true; sale.salesRepName = "Online Booking"; }
+  else if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
+  db.sales.push(sale);
+  if (!db.auditLog) db.auditLog = [];
+  db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Rep tracker (owner)", saleId: sale.id, car: sale.car, field: "Job added", oldValue: null, newValue: `${sale.salesRepName} · $${sale.basePrice}` });
+  db.auditLog = db.auditLog.slice(0, 1000);
+  saveDB(db);
+  res.json({ ok: true, id: sale.id });
+});
+
 // Auto-fix as much of Cleanup as can be safely derived from data already on the job —
 // the car/title text — using the exact same detection already proven for the live GHL
 // flow and bulk import. Only acts when a real pattern is found; price can never be
@@ -1684,7 +1764,8 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   })));
 });
 
-app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
+// The shop's own job editor. Named so the combined rep tracker's edit endpoint can run the exact same code.
+function patchJobHandler(req, res) {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
@@ -1810,7 +1891,8 @@ app.patch("/api/manager/jobs/:id", requireManager, (req, res) => {
   }
   saveDB(db);
   res.json({ ok: true });
-});
+}
+app.patch("/api/manager/jobs/:id", requireManager, patchJobHandler);
 
 // ---------- upsells ----------
 app.post("/api/sales/:id/upsells", requireAnyStaff, (req, res) => {
