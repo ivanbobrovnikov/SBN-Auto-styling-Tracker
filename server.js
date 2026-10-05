@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-04-promote";
+const BUILD = "2026-10-05-audit";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -333,6 +333,30 @@ function resolveSalesRepAttribution(db, salesRepName, appointmentTitle) {
   return result;
 }
 
+// A customer can book again later under the very same GHL opportunity (a "find and update"
+// booking workflow reuses it), and the tracker identifies a job by that opportunity ID. Treating
+// every incoming booking for an opportunity as "an update to my existing job" meant a NEW
+// appointment quietly overwrote the OLD one: it moved it to the new date and renamed it, and left
+// everything else behind - the old price, the arrived/paid status, the old close time, the
+// upsells. That corrupted past payroll and made the new appointment look already paid.
+// This decides whether an incoming booking is the SAME appointment (an edit, or a reschedule of
+// one that's still live) or a separate, later appointment for the same customer.
+const EASTERN_DAY_FMT = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+function isSeparateAppointment(existing, incomingIso) {
+  if (!incomingIso || !existing.date) return false;
+  const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
+  if (isNaN(oldMs) || isNaN(newMs)) return false;
+  // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment.
+  if (EASTERN_DAY_FMT.format(new Date(oldMs)) === EASTERN_DAY_FMT.format(new Date(newMs))) return false;
+  // A job that's been worked, resolved or paid is history - a new booking must never rewrite it.
+  const worked = ["arrived", "no_show", "cancelled"].includes(existing.status) || !!existing.paid || !!existing.completed
+    || (existing.upsells || []).length > 0
+    || !!(existing.photos && Object.values(existing.photos).some((stage) => stage && Object.values(stage).some(Boolean)));
+  // An unresolved job whose appointment passed days ago isn't being rescheduled either - it's stale.
+  const longPast = oldMs < Date.now() - 3 * 86400000;
+  return worked || longPast;
+}
+
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
@@ -345,7 +369,22 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     else if (n) unmatched.push(n);
   });
   const attribution = resolveSalesRepAttribution(db, salesRepName, car);
+  const incomingIso = normalizeDate(date);
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  if (sale && isSeparateAppointment(sale, incomingIso)) {
+    // Same opportunity, different appointment. The old job keeps all of its own history untouched
+    // but gives up its claim on the opportunity ID, so this booking - and every later event for
+    // the opportunity (confirm, cancel, price changes) - lands on the new job instead.
+    const oldKey = sale.ghlOpportunityId;
+    sale.ghlOpportunityId = `${oldKey}~earlier-${sale.id}`;
+    if (!db.auditLog) db.auditLog = [];
+    db.auditLog.unshift({
+      id: newId(), timestamp: new Date().toISOString(), actor: "Auto-split (new appointment)",
+      saleId: sale.id, car: sale.car, field: "GHL Opportunity ID", oldValue: oldKey, newValue: sale.ghlOpportunityId,
+    });
+    db.auditLog = db.auditLog.slice(0, 1000);
+    sale = undefined;
+  }
   let isNew = !sale;
   if (!sale && contactId) {
     // A reschedule in GHL can generate a brand-new Appointment ID for what is logically the
@@ -365,6 +404,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     };
     const existingUnresolved = db.sales.find((s) =>
       s.contactId === contactId && !["arrived", "no_show", "cancelled"].includes(s.status) && carsLikelyMatch(s.car, car)
+      && !isSeparateAppointment(s, incomingIso)
     );
     if (existingUnresolved) {
       sale = existingUnresolved;
@@ -390,7 +430,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // (like a price update) never touch it — that would let someone accidentally shift a
   // rep's commission rate after the fact just by editing the price later.
   if (isNew) sale.closedAt = closedAt || new Date().toISOString();
-  sale.date = normalizeDate(date) || sale.date || new Date().toISOString();
+  sale.date = incomingIso || sale.date || new Date().toISOString();
   sale.customerName = customerName || sale.customerName || "";
   sale.customerPhone = customerPhone || sale.customerPhone || "";
   sale.customerEmail = customerEmail || sale.customerEmail || "";
@@ -1565,6 +1605,65 @@ function reconcileCashPayment(db, req, sale, requestedAmount) {
   });
   logAudit(db, req, sale, "Cash received", 0, amount);
 }
+
+// Repairs a job that the old matching bug overwrote with a NEWER booking. Everything the job has
+// accumulated - price, status, payment, close time, upsells, photos, notes, techs, tips, cash -
+// belongs to the EARLIER appointment, so it all moves to a restored earlier job carrying the
+// original date, and the live job is reset to what it really is: a fresh, pending booking.
+// The original date can't be recovered automatically (the bug wrote over it), so the owner supplies it.
+function splitEarlierAppointment(db, req, saleId, originalIso, originalCar, opts = {}) {
+  const live = db.sales.find((s) => s.id === saleId);
+  if (!live) return null;
+  const earlier = JSON.parse(JSON.stringify(live));
+  earlier.id = newId();
+  earlier.date = originalIso;
+  if (originalCar) earlier.car = originalCar;
+  earlier.ghlOpportunityId = `${live.ghlOpportunityId}~earlier-${earlier.id}`;
+  // The overwrite also replaced the rep with whoever booked the NEWER appointment, so without this
+  // the original close would stay credited to the wrong person. The owner says who it really was.
+  if (opts.originalRep) {
+    earlier.salesRepId = opts.originalRep.id; earlier.salesRepName = opts.originalRep.name;
+    earlier.isWalkIn = false; earlier.isOnlineBooking = false;
+    earlier.walkInClosedByType = null; earlier.walkInClosedById = null; earlier.walkInClosedByName = null;
+    logAudit(db, req, earlier, "Sales rep", live.salesRepName, opts.originalRep.name);
+  }
+  db.sales.push(earlier);
+  // Things logged against the job back when it was still the earlier appointment go with it.
+  db.tips.forEach((t) => { if (t.saleId === live.id) t.saleId = earlier.id; });
+  db.cashEntries.forEach((c) => { if (c.autoFromJob && c.saleId === live.id) c.saleId = earlier.id; });
+  // The live job becomes the fresh booking it really is. Price is cleared on purpose so it shows
+  // up in Cleanup until the real one is entered (or GHL's price sync fills it in).
+  live.status = "pending"; live.completed = false;
+  live.paid = false; live.paidCash = false; live.paidCard = false; live.paymentMethod = null;
+  // The new booking counts as a close for the rep on the day it REALLY closed (that decides the day it
+  // shows in Closing Activity and whether the in-hours or after-hours rate applies); blank means now.
+  live.basePrice = 0; live.closedAt = opts.newClosedIso || new Date().toISOString();
+  live.upsells = []; live.notes = []; delete live.photos;
+  live.employeeIds = []; live.employeeNames = "Unassigned"; live.managerHelperIds = []; live.managerHelperNames = "";
+  delete live.employeeId;
+  logAudit(db, req, live, "Split off earlier appointment", null, `${earlier.car} (${originalIso.slice(0, 10)})`);
+  return { earlierId: earlier.id };
+}
+
+app.post("/api/owner/jobs/:id/split-earlier", requireOwner, (req, res) => {
+  const db = loadDB();
+  const originalIso = normalizeDate(req.body.originalDate);
+  if (!originalIso) return res.status(400).json({ error: "Enter the original appointment date and time." });
+  let originalRep = null;
+  if (req.body.originalSalesRepId) {
+    originalRep = db.salesReps.find((r) => r.id === req.body.originalSalesRepId);
+    if (!originalRep) return res.status(400).json({ error: "That sales rep doesn't exist." });
+  }
+  let newClosedIso = null;
+  if (req.body.newClosedAt) {
+    newClosedIso = normalizeDate(req.body.newClosedAt);
+    if (!newClosedIso) return res.status(400).json({ error: "Enter a valid close time for the new booking." });
+  }
+  const result = splitEarlierAppointment(db, req, req.params.id, originalIso, String(req.body.originalCar || "").trim(), { originalRep, newClosedIso });
+  if (!result) return res.status(404).json({ error: "Job not found." });
+  saveDB(db);
+  res.json({ ok: true, ...result });
+});
 
 app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
