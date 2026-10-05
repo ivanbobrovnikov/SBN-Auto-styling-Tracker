@@ -15,7 +15,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-04-promote";
+const UI_BUILD = "2026-10-05-audit";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2918,6 +2918,35 @@ async function renderManagerJobs(content) {
         cashNotice.textContent = "";
         cashPanel.style.display = "block";
       };
+      // A job marked arrived/paid/done whose appointment is still in the future is the fingerprint
+      // of an older job that a newer booking overwrote (the matching bug this build fixes).
+      const looksOverwritten = (job.status === "arrived" || job.status === "no_show" || job.paid || job.completed) && new Date(job.date).getTime() > Date.now() + 6 * 3600 * 1000;
+      const splitNotice = el("div", { style: "font-size:11.5px;margin-top:6px" });
+      const splitDate = el("input", { type: "datetime-local", style: "max-width:210px" });
+      const splitCar = el("input", { type: "text", value: job.car || "", placeholder: "Original appointment title", style: "max-width:100%" });
+      const splitRep = el("select", { style: "max-width:220px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px" }, [
+        el("option", { value: "", text: `Keep as is (currently ${job.salesRepName || "Unassigned"})` }),
+        ...salesRepsList.map((r) => el("option", { value: r.id, text: r.name })),
+      ]);
+      const splitClosed = el("input", { type: "datetime-local", style: "max-width:210px" });
+      const splitPanel = el("div", { style: "display:none;margin-bottom:10px;padding:10px 12px;background:var(--panel);border:0.5px solid var(--border);border-radius:8px" });
+      splitPanel.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: "This job looks like an older appointment that a newer booking overwrote. Enter the ORIGINAL appointment's date and title, and who closed it. Everything this job has now (price, arrived/paid status, upsells, notes, photos, techs, tips) moves to that earlier appointment, and this job resets to a fresh pending booking, so also say when that new booking was actually closed." }));
+      splitPanel.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [el("span", { class: "muted", style: "font-size:11.5px", text: "Original date / time" }), splitDate]));
+      splitPanel.appendChild(el("div", { style: "margin-bottom:8px" }, [splitCar]));
+      splitPanel.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [el("span", { class: "muted", style: "font-size:11.5px", text: "Who closed the original?" }), splitRep]));
+      splitPanel.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [el("span", { class: "muted", style: "font-size:11.5px", text: "New booking closed (blank = now)" }), splitClosed]));
+      splitPanel.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+        el("button", { class: "primary", onclick: async () => {
+          if (!splitDate.value) { splitNotice.textContent = "Enter the original appointment date and time."; splitNotice.style.color = "var(--red)"; return; }
+          if (!confirm(`Split this job? The earlier appointment (${splitCar.value || job.car}) is restored with everything this job has now, and this job becomes a fresh pending booking.`)) return;
+          try {
+            await api(`/api/owner/jobs/${job.id}/split-earlier`, { method: "POST", body: JSON.stringify({ originalDate: splitDate.value, originalCar: splitCar.value, originalSalesRepId: splitRep.value || undefined, newClosedAt: splitClosed.value || undefined }) });
+            load();
+          } catch (err) { splitNotice.textContent = err.message || "Couldn't split this job."; splitNotice.style.color = "var(--red)"; }
+        }, text: "Split into two jobs" }),
+        el("button", { class: "ghost", onclick: () => { splitPanel.style.display = "none"; }, text: "Cancel" }),
+      ]));
+      splitPanel.appendChild(splitNotice);
       const paymentBtn = (field, label) => {
         const active = field === "paidCash" ? !!job.paidCash : !!job.paidCard;
         return el("button", {
@@ -3067,7 +3096,10 @@ async function renderManagerJobs(content) {
             await api(`/api/sales/${job.id}`, { method: "DELETE" });
             load();
           }, text: "🗑 Delete job" }),
+          session.role === "owner" ? el("button", { class: "ghost", style: "font-size:11px;padding:4px 10px", onclick: () => { splitNotice.textContent = ""; splitPanel.style.display = splitPanel.style.display === "none" ? "block" : "none"; }, text: "⎘ Split off earlier appointment" }) : null,
         ]),
+        looksOverwritten ? el("div", { style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--red);border-radius:8px;color:var(--red);font-size:11.5px", text: "⚠ Marked as done, but the appointment is in the future. A newer booking may have overwritten an earlier job." + (session.role === "owner" ? " Use “Split off earlier appointment” to separate them." : " Ask the owner to check it.") }) : null,
+        session.role === "owner" ? splitPanel : null,
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
         el("div", { style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "DATE / TIME — for the rare case it needs a manual fix" }),
