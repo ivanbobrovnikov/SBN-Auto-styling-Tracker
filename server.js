@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-05-edit";
+const BUILD = "2026-10-06-resched";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -343,19 +343,37 @@ function resolveSalesRepAttribution(db, salesRepName, appointmentTitle) {
 // This decides whether an incoming booking is the SAME appointment (an edit, or a reschedule of
 // one that's still live) or a separate, later appointment for the same customer.
 const EASTERN_DAY_FMT = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
-function isSeparateAppointment(existing, incomingIso) {
+const normalizeTitle = (t) => String(t || "").trim().toLowerCase();
+// "Same car and service" - a substring check (not exact) so GHL tacking on "- RESCHEDULED" still matches.
+function titlesMatch(a, b) {
+  const na = normalizeTitle(a), nb = normalizeTitle(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+// Work that was actually finished: marked complete, or paid once its appointment day has passed (a job
+// paid in advance for a future day hasn't been done yet).
+function isServiced(sale) {
+  return !!sale.completed || (!!sale.paid && Date.parse(sale.date) < Date.now());
+}
+function isSeparateAppointment(existing, incomingIso, incomingTitle) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
   if (isNaN(oldMs) || isNaN(newMs)) return false;
   // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment.
   if (EASTERN_DAY_FMT.format(new Date(oldMs)) === EASTERN_DAY_FMT.format(new Date(newMs))) return false;
-  // A job that's been worked, resolved or paid is history - a new booking must never rewrite it.
-  const worked = ["arrived", "no_show", "cancelled"].includes(existing.status) || !!existing.paid || !!existing.completed
-    || (existing.upsells || []).length > 0
-    || !!(existing.photos && Object.values(existing.photos).some((stage) => stage && Object.values(stage).some(Boolean)));
-  // An unresolved job whose appointment passed days ago isn't being rescheduled either - it's stale.
-  const longPast = oldMs < Date.now() - 3 * 86400000;
-  return worked || longPast;
+  // Finished work is history: a new booking after it is a new deal.
+  if (isServiced(existing)) return true;
+  // A cancellation is explicit - that deal ended, so booking again is a fresh sale.
+  if (existing.status === "cancelled") return true;
+  // Everything else - still pending, a no-show, an appointment nobody marked, a car that came in but wasn't
+  // finished - is a deal that never got completed. Moving it to another day is a RESCHEDULE of that same
+  // deal (it keeps its original closing time, so it doesn't count as a new close) as long as it's the same
+  // car and service. This is what Frank does when he edits the existing appointment.
+  if (titlesMatch(existing.car, incomingTitle)) return false;
+  // A different car or service: if the old booking is still upcoming and untouched it was simply edited;
+  // otherwise it's a new deal for the same customer.
+  const upcoming = oldMs >= Date.now() && (!existing.status || existing.status === "pending");
+  return !upcoming;
 }
 
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId }) {
@@ -372,7 +390,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   const attribution = resolveSalesRepAttribution(db, salesRepName, car);
   const incomingIso = normalizeDate(date);
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
-  if (sale && isSeparateAppointment(sale, incomingIso)) {
+  if (sale && isSeparateAppointment(sale, incomingIso, car)) {
     // Same opportunity, different appointment. The old job keeps all of its own history untouched
     // but gives up its claim on the opportunity ID, so this booking - and every later event for
     // the opportunity (confirm, cancel, price changes) - lands on the new job instead.
@@ -397,15 +415,11 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     // booking got rescheduled" from "this customer booked a second, different car" — a
     // substring check (not exact) tolerates GHL appending something like "- RESCHEDULED"
     // or otherwise lightly reformatting the title without losing the real vehicle text.
-    const normalize = (s) => String(s || "").trim().toLowerCase();
-    const carsLikelyMatch = (a, b) => {
-      const na = normalize(a), nb = normalize(b);
-      if (!na || !nb) return false;
-      return na === nb || na.includes(nb) || nb.includes(na);
-    };
+    // A no-show or an unfinished job counts too: a rescheduled booking that GHL gave a new opportunity ID
+    // is still that same deal. Finished or cancelled jobs are excluded by isSeparateAppointment.
     const existingUnresolved = db.sales.find((s) =>
-      s.contactId === contactId && !["arrived", "no_show", "cancelled"].includes(s.status) && carsLikelyMatch(s.car, car)
-      && !isSeparateAppointment(s, incomingIso)
+      s.contactId === contactId && s.status !== "cancelled" && titlesMatch(s.car, car)
+      && !isSeparateAppointment(s, incomingIso, car)
     );
     if (existingUnresolved) {
       sale = existingUnresolved;
@@ -431,6 +445,15 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // (like a price update) never touch it — that would let someone accidentally shift a
   // rep's commission rate after the fact just by editing the price later.
   if (isNew) sale.closedAt = closedAt || new Date().toISOString();
+  // The customer didn't show, and the appointment was moved to another day: that's the same deal being
+  // rescheduled, so it's a live booking again (the no-show stays visible in Edit History).
+  if (!isNew && incomingIso && sale.date && sale.status === "no_show"
+      && EASTERN_DAY_FMT.format(new Date(sale.date)) !== EASTERN_DAY_FMT.format(new Date(incomingIso))) {
+    if (!db.auditLog) db.auditLog = [];
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (reschedule)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "no_show", newValue: "pending" });
+    db.auditLog = db.auditLog.slice(0, 1000);
+    sale.status = "pending";
+  }
   sale.date = incomingIso || sale.date || new Date().toISOString();
   sale.customerName = customerName || sale.customerName || "";
   sale.customerPhone = customerPhone || sale.customerPhone || "";
@@ -1725,6 +1748,45 @@ function splitEarlierAppointment(db, req, saleId, originalIso, originalCar, opts
   return { earlierId: earlier.id };
 }
 
+// Undoes a split that was really just a reschedule: the EARLIER job is the real deal (it keeps its original
+// closing time, rep and history); the newer one is only where it got moved to, so its date, title and
+// price move onto the earlier job and the duplicate goes away. Refused if the earlier job was actually
+// finished - then it's a separate deal and merging would rewrite history.
+function mergeBackIntoEarlier(db, req, liveId) {
+  const live = db.sales.find((s) => s.id === liveId);
+  if (!live || !live.ghlOpportunityId) return { status: 404, error: "Job not found." };
+  const earlier = db.sales.filter((s) => (s.ghlOpportunityId || "").startsWith(`${live.ghlOpportunityId}~earlier-`)).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  if (!earlier) return { status: 404, error: "There's no earlier job to merge this into." };
+  if (isServiced(earlier)) return { status: 409, error: "That earlier job was already completed or paid, so this is a separate deal, not a reschedule. Nothing was changed." };
+  const fromDate = earlier.date;
+  earlier.ghlOpportunityId = live.ghlOpportunityId;
+  earlier.date = live.date;
+  if (live.car) earlier.car = live.car;
+  if (live.baseService) earlier.baseService = live.baseService;
+  if ((parseFloat(live.basePrice) || 0) > 0) earlier.basePrice = live.basePrice;
+  if (earlier.status === "no_show") earlier.status = "pending";
+  if (!earlier.salesRepId && live.salesRepId) { earlier.salesRepId = live.salesRepId; earlier.salesRepName = live.salesRepName; }
+  if (!(earlier.employeeIds || []).length && (live.employeeIds || []).length) { earlier.employeeIds = live.employeeIds; earlier.employeeNames = live.employeeNames; }
+  earlier.upsells = [...(earlier.upsells || []), ...(live.upsells || [])];
+  earlier.notes = [...(earlier.notes || []), ...(live.notes || [])];
+  if (live.photos) {
+    earlier.photos = earlier.photos || { before: {}, after: {} };
+    ["before", "after"].forEach((stage) => Object.entries((live.photos || {})[stage] || {}).forEach(([slot, file]) => { earlier.photos[stage] = earlier.photos[stage] || {}; if (file && !earlier.photos[stage][slot]) earlier.photos[stage][slot] = file; }));
+  }
+  db.tips.forEach((t) => { if (t.saleId === live.id) t.saleId = earlier.id; });
+  db.cashEntries.forEach((c) => { if (c.autoFromJob && c.saleId === live.id) c.saleId = earlier.id; });
+  db.sales = db.sales.filter((s) => s.id !== live.id);
+  logAudit(db, req, earlier, "Merged back (it was a reschedule)", fromDate.slice(0, 10), earlier.date.slice(0, 10));
+  return { ok: true, id: earlier.id };
+}
+app.post("/api/owner/jobs/:id/merge-earlier", requireOwner, (req, res) => {
+  const db = loadDB();
+  const result = mergeBackIntoEarlier(db, req, req.params.id);
+  if (result.error) return res.status(result.status).json({ error: result.error });
+  saveDB(db);
+  res.json(result);
+});
+
 app.post("/api/owner/jobs/:id/split-earlier", requireOwner, (req, res) => {
   const db = loadDB();
   const originalIso = normalizeDate(req.body.originalDate);
@@ -1749,11 +1811,15 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const jobs = db.sales.filter((s) => inRange(s.date, start, end));
+  // A job the old rule split off from an unfinished earlier one (same customer, same opportunity) - the owner can merge them back.
+  const earlierByBase = {};
+  db.sales.forEach((e) => { const k = e.ghlOpportunityId || "", i = k.indexOf("~earlier-"); if (i > 0 && (!earlierByBase[k.slice(0, i)] || e.date > earlierByBase[k.slice(0, i)].date)) earlierByBase[k.slice(0, i)] = e; });
+  const earlierFor = (s) => { const e = s.ghlOpportunityId && earlierByBase[s.ghlOpportunityId]; return e && !isServiced(e) ? { id: e.id, car: e.car, date: e.date, status: e.status || "pending" } : null; };
   const cashBySale = {};
   db.cashEntries.forEach((e) => { if (e.autoFromJob && e.saleId) cashBySale[e.saleId] = (cashBySale[e.saleId] || 0) + e.amount; });
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-    cashPaidAmount: cashBySale[s.id] || 0,
+    cashPaidAmount: cashBySale[s.id] || 0, earlierJob: earlierFor(s),
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
@@ -3205,6 +3271,243 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
     upsellPercentOfRevenue: totalRevenue ? (totalUpsell / totalRevenue) * 100 : 0,
     carCount, attachRate, perEmployee, perManager, perSalesRep, leaderboard,
     bookedNotShownValue, bookedNotShownCount, shownUpValue, shownUpCount,
+  });
+});
+
+// ---------- Statistics ----------
+// "Money" on this page means exactly what the Dashboard's Total revenue means: jobs marked PAID, counted
+// on the day of the appointment, never cancelled, and nothing dated before the revenue start date. That
+// way the two screens can never disagree. Days are Eastern days, same as everywhere else in the app.
+const ymdOf = (iso) => EASTERN_DAY_FMT.format(new Date(iso));
+const shiftYmd = (ymd, n) => { const d = new Date(ymd + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const daysBetweenYmd = (a, b) => Math.round((Date.parse(b + "T12:00:00Z") - Date.parse(a + "T12:00:00Z")) / 86400000);
+const mondayOfYmd = (ymd) => shiftYmd(ymd, -((new Date(ymd + "T12:00:00Z").getUTCDay() + 6) % 7));
+const EASTERN_WEEKDAY_HOUR_FMT = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "long", hour: "2-digit", hourCycle: "h23" });
+function easternWeekdayHour(iso) {
+  const p = Object.fromEntries(EASTERN_WEEKDAY_HOUR_FMT.formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
+  return { weekday: p.weekday, hour: Number(p.hour) };
+}
+const statRound = (n) => Math.round((n || 0) * 100) / 100;
+const statSum = (list, f) => list.reduce((a, x) => a + f(x), 0);
+const WEEKDAYS_MON_FIRST = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+// The headline numbers, worked out the same way for the chosen period and for the one before it, so
+// every tile can show how it compares.
+function statsHeadline(db, start, end) {
+  const inP = (iso) => inRange(iso, start, end);
+  const sales = revenueEligible(db.sales.filter((s) => inP(s.date)), db);
+  const paid = sales.filter((s) => s.paid);
+  const revenue = statSum(paid, saleTotal);
+  const upsellRevenue = statSum(paid, saleUpsellTotal);
+  const completed = sales.filter((s) => s.completed);
+  const pending = sales.filter((s) => !s.status || s.status === "pending");
+  const arrived = sales.filter((s) => s.status === "arrived").length;
+  const noShow = sales.filter((s) => s.status === "no_show").length;
+  const cancelled = db.sales.filter((s) => inP(s.date) && s.status === "cancelled" && afterRevenueStart(s, db)).length;
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const dealValue = statSum(closed, (s) => parseFloat(s.basePrice) || 0);
+  return {
+    revenue: statRound(revenue), paidJobs: paid.length, avgTicket: statRound(paid.length ? revenue / paid.length : 0),
+    upsellRevenue: statRound(upsellRevenue), upsellPercent: revenue ? (upsellRevenue / revenue) * 100 : 0,
+    carsServiced: completed.length, attachRate: completed.length ? (completed.filter((s) => (s.upsells || []).length > 0).length / completed.length) * 100 : 0,
+    arrived, noShow, noShowRate: arrived + noShow ? (noShow / (arrived + noShow)) * 100 : 0,
+    dealsClosed: closed.length, dealValue: statRound(dealValue), avgDeal: closed.length ? statRound(dealValue / closed.length) : 0,
+    walkInRevenue: statRound(statSum(paid.filter((s) => s.isWalkIn), saleTotal)), onlineRevenue: statRound(statSum(paid.filter((s) => s.isOnlineBooking), saleTotal)),
+    pendingJobs: pending.length, pendingValue: statRound(statSum(pending, saleTotal)),
+    cancelled, cancelRate: cancelled + sales.length ? (cancelled / (cancelled + sales.length)) * 100 : 0,
+    tips: statRound(statSum(db.tips.filter((t) => inP(t.date)), (t) => t.amount || 0)),
+  };
+}
+
+// The same kind of period, one step back - calendar-aware (last month, last year, the 14 days before a
+// pay period), so "vs previous" compares like with like.
+function previousStatsQuery(q, today) {
+  if (q.period === "all") return null;
+  if (q.period === "day") return { period: "day", date: shiftYmd(q.date, -1) };
+  if (q.period === "week") return { period: "week", date: shiftYmd(q.date, -7) };
+  if (q.period === "payperiod") return { period: "payperiod", date: shiftYmd(q.date, -14) };
+  if (q.period === "year") return { period: "year", date: `${Number(q.date.slice(0, 4)) - 1}-01-01` };
+  if (q.period === "custom") { const len = daysBetweenYmd(q.startDate, q.endDate) + 1; return { period: "custom", startDate: shiftYmd(q.startDate, -len), endDate: shiftYmd(q.startDate, -1) }; }
+  const [y, mo] = q.month.split("-").map(Number);
+  return { period: "month", month: mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, "0")}` };
+}
+
+// Best day / week / month so far. Independent of the period picker, and only days up to today count -
+// money paid in advance for a future day isn't a record yet.
+function statsRecords(db, today) {
+  const revenue = {}, cars = {}, closed = {};
+  revenueEligible(db.sales, db).forEach((s) => {
+    const d = ymdOf(s.date);
+    if (s.paid) revenue[d] = (revenue[d] || 0) + saleTotal(s);
+    if (s.completed) cars[d] = (cars[d] || 0) + 1;
+  });
+  db.sales.filter((s) => s.status !== "cancelled" && afterRevenueStart(s, db)).forEach((s) => {
+    const d = ymdOf(s.closedAt || s.date);
+    const c = (closed[d] = closed[d] || { count: 0, value: 0 });
+    c.count += 1; c.value += parseFloat(s.basePrice) || 0;
+  });
+  const ranges = {
+    week: [mondayOfYmd(today), today], month: [today.slice(0, 7) + "-01", today],
+    year: [today.slice(0, 4) + "-01-01", today], all: ["0000-01-01", today],
+  };
+  const within = (map, [from, to]) => Object.keys(map).filter((d) => d >= from && d <= to);
+  // Highest score wins; on a tie the later day.
+  const best = (map, range, scoreFn) => {
+    let top = null;
+    within(map, range).forEach((d) => {
+      const sc = scoreFn(d);
+      const cmp = sc[0] - top?.sc[0] || sc[1] - top?.sc[1];
+      if (!top || cmp > 0 || (cmp === 0 && d > top.d)) top = { d, sc };
+    });
+    return top && top.d;
+  };
+  const bucket = (keyFn, range) => {
+    const sums = {};
+    within(revenue, range).forEach((d) => { const k = keyFn(d); sums[k] = (sums[k] || 0) + revenue[d]; });
+    let top = null;
+    Object.entries(sums).forEach(([k, v]) => { if (!top || v > top.revenue || (v === top.revenue && k > top.key)) top = { key: k, revenue: v }; });
+    return top && { key: top.key, revenue: statRound(top.revenue) };
+  };
+  const eachRange = (fn) => Object.fromEntries(Object.entries(ranges).map(([k, r]) => [k, fn(r)]));
+  return {
+    bestDayCollected: eachRange((r) => { const d = best(revenue, r, (x) => [revenue[x], cars[x] || 0]); return d ? { day: d, revenue: statRound(revenue[d]), cars: cars[d] || 0 } : null; }),
+    bestDayCars: eachRange((r) => { const d = best(cars, r, (x) => [cars[x], revenue[x] || 0]); return d ? { day: d, cars: cars[d], revenue: statRound(revenue[d] || 0) } : null; }),
+    bestDayClosed: eachRange((r) => { const d = best(closed, r, (x) => [closed[x].value, closed[x].count]); return d ? { day: d, value: statRound(closed[d].value), count: closed[d].count } : null; }),
+    bestWeek: { year: bucket(mondayOfYmd, ranges.year), all: bucket(mondayOfYmd, ranges.all) },
+    bestMonth: { year: bucket((d) => d.slice(0, 7), ranges.year), all: bucket((d) => d.slice(0, 7), ranges.all) },
+  };
+}
+
+// Money collected and cars serviced over time: daily for a short period, weekly for a long one, monthly for
+// "all time". Quiet days stay in as gaps; empty buckets still in the future are trimmed off the end.
+function statsTrend(db, firstDay, lastDay, today) {
+  const span = daysBetweenYmd(firstDay, lastDay) + 1;
+  const unit = span <= 62 ? "day" : span <= 400 ? "week" : "month";
+  const keyOf = (d) => (unit === "day" ? d : unit === "week" ? mondayOfYmd(d) : d.slice(0, 7));
+  const buckets = {};
+  const ensure = (k) => (buckets[k] = buckets[k] || { key: k, revenue: 0, cars: 0 });
+  for (let d = firstDay; d <= lastDay; d = shiftYmd(d, 1)) ensure(keyOf(d));
+  revenueEligible(db.sales, db).forEach((s) => {
+    const d = ymdOf(s.date);
+    if (d < firstDay || d > lastDay) return;
+    const b = ensure(keyOf(d));
+    if (s.paid) b.revenue += saleTotal(s);
+    if (s.completed) b.cars += 1;
+  });
+  const points = Object.values(buckets).sort((a, b) => (a.key < b.key ? -1 : 1)).map((b) => ({ ...b, revenue: statRound(b.revenue) }));
+  while (points.length && points[points.length - 1].key > today && !points[points.length - 1].revenue && !points[points.length - 1].cars) points.pop();
+  return { unit, points };
+}
+
+app.get("/api/owner/statistics", requireOwner, (req, res) => {
+  const db = loadDB();
+  const today = ymdOf(new Date().toISOString());
+  const period = req.query.period || "month";
+  const q = { ...req.query, period };
+  if (["day", "week", "payperiod", "year"].includes(period)) q.date = q.date || today;
+  if (period === "month") q.month = q.month || today.slice(0, 7);
+  if (period === "custom") { q.startDate = q.startDate || today; q.endDate = q.endDate || q.startDate; }
+
+  const allDays = revenueEligible(db.sales, db).map((s) => ymdOf(s.date)).sort();
+  let start, end, firstDay, lastDay;
+  if (period === "all") {
+    start = "0000-01-01T00:00:00.000Z"; end = "9999-12-31T23:59:59.999Z";
+    firstDay = allDays[0] || today; lastDay = allDays.length && allDays[allDays.length - 1] > today ? allDays[allDays.length - 1] : today;
+  } else {
+    ({ start, end } = dateRangeFor(q));
+    firstDay = ymdOf(start); lastDay = ymdOf(end);
+  }
+  const inP = (iso) => inRange(iso, start, end);
+  const sales = revenueEligible(db.sales.filter((s) => inP(s.date)), db);
+  const paid = sales.filter((s) => s.paid);
+  const head = statsHeadline(db, start, end);
+  const pq = previousStatsQuery(q, today);
+  const previous = pq ? (({ start: ps, end: pe }) => statsHeadline(db, ps, pe))(dateRangeFor(pq)) : null;
+
+  const completed = sales.filter((s) => s.completed);
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const headline = head;
+
+  const groupBy = (list, keyFn) => { const m = {}; list.forEach((x) => { const k = keyFn(x); (m[k] = m[k] || []).push(x); }); return m; };
+  const byService = Object.entries(groupBy(sales, (s) => (s.baseService || "").trim() || "(not set)")).map(([service, list]) => {
+    const p = list.filter((s) => s.paid), rev = statSum(p, saleTotal);
+    return { service, jobs: list.length, paidJobs: p.length, revenue: statRound(rev), avgTicket: statRound(p.length ? rev / p.length : 0), share: head.revenue ? (rev / head.revenue) * 100 : 0 };
+  }).sort((a, b) => b.revenue - a.revenue || b.jobs - a.jobs);
+
+  const bySalesRep = db.salesReps.map((rep) => {
+    const repClosed = closed.filter((s) => s.salesRepId === rep.id);
+    const mine = sales.filter((s) => s.salesRepId === rep.id);
+    const showed = mine.filter((s) => s.status === "arrived");
+    const noShows = mine.filter((s) => s.status === "no_show").length;
+    return {
+      name: rep.name, dealsClosed: repClosed.length, dealValue: statRound(statSum(repClosed, (s) => parseFloat(s.basePrice) || 0)),
+      showed: showed.length, noShows, showRate: showed.length + noShows ? (showed.length / (showed.length + noShows)) * 100 : null,
+      commission: statRound(statSum(showed, (s) => salesRepCommissionForSale(rep, s).amount)),
+    };
+  }).filter((r) => r.dealsClosed || r.showed || r.noShows).sort((a, b) => b.dealValue - a.dealValue || b.dealsClosed - a.dealsClosed);
+
+  const upsellsOn = (key, id) => paid.flatMap((s) => (s.upsells || []).filter((u) => u[key] === id));
+  const people = [
+    ...db.employees.map((e) => ({ name: e.name, role: "Tech", cars: completed.filter((s) => saleEmployeeIds(s).includes(e.id)).length, list: upsellsOn("employeeId", e.id) })),
+    ...db.managers.map((m) => ({ name: m.name, role: "Manager", cars: completed.filter((s) => (s.managerHelperIds || []).includes(m.id)).length, list: upsellsOn("managerId", m.id) })),
+  ].map((p) => ({ name: p.name, role: p.role, carsCompleted: p.cars, upsells: p.list.length, upsellRevenue: statRound(statSum(p.list, (u) => parseFloat(u.price) || 0)) }))
+    .filter((p) => p.carsCompleted || p.upsells).sort((a, b) => b.upsellRevenue - a.upsellRevenue || b.carsCompleted - a.carsCompleted);
+
+  // Day of week: totals, plus the AVERAGE per that weekday so a period with five Saturdays and four
+  // Sundays doesn't make Saturday look busier than it is.
+  const occurrences = Object.fromEntries(WEEKDAYS_MON_FIRST.map((d) => [d, 0]));
+  for (let d = firstDay; d <= (lastDay < today ? lastDay : today); d = shiftYmd(d, 1)) occurrences[WEEKDAYS_MON_FIRST[(new Date(d + "T12:00:00Z").getUTCDay() + 6) % 7]] += 1;
+  const dow = Object.fromEntries(WEEKDAYS_MON_FIRST.map((d) => [d, { day: d, jobs: 0, revenue: 0, cars: 0 }]));
+  const hours = {};
+  sales.forEach((s) => {
+    const { weekday, hour } = easternWeekdayHour(s.date);
+    dow[weekday].jobs += 1;
+    if (s.paid) dow[weekday].revenue += saleTotal(s);
+    if (s.completed) dow[weekday].cars += 1;
+    hours[hour] = (hours[hour] || 0) + 1;
+  });
+  const byDayOfWeek = WEEKDAYS_MON_FIRST.map((d) => ({ ...dow[d], revenue: statRound(dow[d].revenue), occurrences: occurrences[d], avgRevenue: statRound(occurrences[d] ? dow[d].revenue / occurrences[d] : 0) }));
+  const byHour = Object.entries(hours).map(([hour, jobs]) => ({ hour: Number(hour), jobs })).sort((a, b) => a.hour - b.hour);
+
+  const paymentMix = Object.entries(groupBy(paid, (s) => s.paymentMethod || "unknown")).map(([method, list]) => ({ method, jobs: list.length, revenue: statRound(statSum(list, saleTotal)) })).sort((a, b) => b.revenue - a.revenue);
+
+  const upsellGroups = {};
+  paid.forEach((s) => (s.upsells || []).forEach((u) => {
+    const key = String(u.name || "").trim().toLowerCase();
+    if (!key) return;
+    const g = (upsellGroups[key] = upsellGroups[key] || { name: String(u.name).trim(), count: 0, revenue: 0 });
+    g.count += 1; g.revenue += parseFloat(u.price) || 0;
+  }));
+  const topUpsells = Object.values(upsellGroups).map((g) => ({ ...g, revenue: statRound(g.revenue) })).sort((a, b) => b.revenue - a.revenue || b.count - a.count).slice(0, 10);
+
+  // New vs returning: a job is a returning customer's if that same customer had an earlier job.
+  const custKey = (s) => s.contactId || String(s.customerPhone || "").replace(/\D/g, "") || String(s.customerName || "").trim().toLowerCase();
+  const history = {};
+  db.sales.filter((s) => s.status !== "cancelled").forEach((s) => { const k = custKey(s); if (k) (history[k] = history[k] || []).push(s.date); });
+  const withKey = sales.filter((s) => custKey(s));
+  const returningJobs = withKey.filter((s) => history[custKey(s)].some((d) => d < s.date)).length;
+  const customers = {
+    jobs: withKey.length, returningJobs, newJobs: withKey.length - returningJobs,
+    returningPercent: withKey.length ? (returningJobs / withKey.length) * 100 : 0,
+    allTimeCustomers: Object.keys(history).length, allTimeRepeatCustomers: Object.values(history).filter((d) => d.length >= 2).length,
+  };
+
+  const leads = sales.filter((s) => s.closedAt && s.date).map((s) => daysBetweenYmd(ymdOf(s.closedAt), ymdOf(s.date))).filter((n) => n >= 0);
+  const leadTime = { sampled: leads.length, avgDays: leads.length ? statSum(leads, (n) => n) / leads.length : 0, sameDayPercent: leads.length ? (leads.filter((n) => n === 0).length / leads.length) * 100 : 0 };
+
+  const cashRows = db.cashEntries.filter((e) => inP(e.timestamp));
+  const expenseRows = cashRows.filter((e) => e.type === "cashOut" || e.type === "cardExpense");
+  const expensesByCategory = Object.entries(groupBy(expenseRows, (e) => e.category || "Other")).map(([category, list]) => ({ category, total: statRound(statSum(list, (e) => e.amount || 0)), entries: list.length })).sort((a, b) => b.total - a.total);
+  const expensesTotal = statRound(statSum(expenseRows, (e) => e.amount || 0));
+  const cash = {
+    customerCashLogged: statRound(statSum(cashRows.filter((e) => e.type === "cashIn" && e.category === "Customer Payment"), (e) => e.amount || 0)),
+    expensesTotal, expensesByCategory, collectedMinusExpenses: statRound(head.revenue - expensesTotal),
+  };
+
+  res.json({
+    period: { key: period, start: firstDay, end: lastDay }, cutoff: db.revenueStartDate || null,
+    headline, previous, trend: statsTrend(db, firstDay, lastDay, today), records: statsRecords(db, today),
+    byService, bySalesRep, people, byDayOfWeek, byHour, paymentMix, topUpsells, customers, leadTime, cash,
   });
 });
 
