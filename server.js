@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-06-twocars";
+const BUILD = "2026-10-06-pick";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -507,7 +507,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.customerPhone = customerPhone || sale.customerPhone || "";
   sale.customerEmail = customerEmail || sale.customerEmail || "";
   sale.contactId = contactId || sale.contactId || null;
-  sale.car = car || sale.car || "";
+  sale.car = sale.titleLocked ? (sale.car || car || "") : (car || sale.car || "");
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
   if (attribution) {
@@ -2005,8 +2005,16 @@ function patchJobHandler(req, res) {
   // booking (no trigger fires for a plain edit) — this makes the manual fix a quick inline
   // correction instead of something requiring a database edit.
   if (req.body.car !== undefined && req.body.car.trim()) {
-    logAudit(db, req, sale, "Car/Title", sale.car, req.body.car.trim());
-    sale.car = req.body.car.trim();
+    const newTitle = req.body.car.trim();
+    if (newTitle !== sale.car) {
+      logAudit(db, req, sale, "Car/Title", sale.car, newTitle);
+      sale.car = newTitle;
+      // A title someone corrected by hand is theirs: neither the background sync nor a later GHL event may change it back.
+      // (A title picked straight from GHL's own appointment list isn't hand-typed, so it stays free to follow GHL.)
+      sale.titleLocked = !req.body.titleFromGhl;
+    } else if (req.body.titleFromGhl) {
+      sale.titleLocked = false;
+    }
   }
   // Manual date/time correction — for the rare case an appointment's real time needs fixing
   // directly (a reschedule that didn't sync correctly, a data entry mistake, etc). Uses the
@@ -3006,38 +3014,72 @@ app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
 // account's data shape, piece by piece, before any import logic gets written.
 const GHL_API_TOKEN = process.env.GHL_API_TOKEN || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
+const GHL_API_BASE = process.env.GHL_API_BASE || "https://services.leadconnectorhq.com";
+
+// A customer can have SEVERAL appointments (several cars), so "the customer's appointment" is ambiguous. This picks the
+// appointment that belongs to THIS job: its own appointment id first (the booking workflow keys every job on it), then the
+// exact start time, then - only when the customer has exactly one upcoming appointment and exactly one such job - that
+// one. If it can't tell, it returns nothing: leaving a title alone is far better than putting one car's title on another.
+function appointmentForJob(sale, events, jobsForContact, now) {
+  const isCancelled = (e) => String(e.appointmentStatus || e.status || "").toLowerCase() === "cancelled";
+  const startMs = (e) => { const iso = normalizeDate(e.startTime); const ms = iso ? Date.parse(iso) : NaN; return ms; };
+  const active = events.filter((e) => !isCancelled(e));
+  if (sale.ghlOpportunityId) {
+    const own = events.find((e) => e.id && e.id === sale.ghlOpportunityId);
+    if (own) return own;
+  }
+  const saleMs = Date.parse(sale.date);
+  if (!isNaN(saleMs)) {
+    const sameTime = active.filter((e) => { const ms = startMs(e); return !isNaN(ms) && Math.abs(ms - saleMs) <= 60000; });
+    if (sameTime.length === 1) return sameTime[0];
+    if (sameTime.length > 1) return null;
+  }
+  const upcoming = active.filter((e) => { const ms = startMs(e); return !isNaN(ms) && ms >= now.getTime() - 24 * 60 * 60 * 1000; });
+  if (jobsForContact.length === 1 && upcoming.length === 1) return upcoming[0];
+  return null;
+}
 
 // GHL never fires any event for a plain title edit after booking — there's no signal to
 // listen for, so instead of waiting for one, this periodically asks GHL directly using
 // the same API connection the bulk import uses. Runs on upcoming jobs only, within a
 // reasonable near-term window, so it stays a light, bounded check rather than scanning
-// your entire history every time.
+// your entire history every time. One lookup per customer, and each job only ever takes the title of its OWN
+// appointment; a title that was edited by hand in the tracker is locked and never overwritten.
 async function runTitleSync() {
   if (!GHL_API_TOKEN || !GHL_LOCATION_ID) return { skipped: true, reason: "GHL API not configured on this deployment." };
   const db = loadDB();
   const now = new Date();
   const horizon = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000); // next 3 weeks
   const candidates = db.sales.filter((s) =>
-    s.contactId && !["arrived", "no_show", "cancelled"].includes(s.status) &&
+    s.contactId && ["arrived", "no_show", "cancelled"].indexOf(s.status) === -1 &&
     !isNaN(new Date(s.date).getTime()) && new Date(s.date) >= now && new Date(s.date) <= horizon
   );
-  let checked = 0, updated = 0;
-  for (const sale of candidates) {
+  const byContact = {};
+  candidates.forEach((s) => { (byContact[s.contactId] = byContact[s.contactId] || []).push(s); });
+  let checked = 0, updated = 0, ambiguous = 0;
+  for (const [contactId, jobs] of Object.entries(byContact)) {
     try {
-      const apptUrl = `https://services.leadconnectorhq.com/contacts/${sale.contactId}/appointments`;
+      const apptUrl = `${GHL_API_BASE}/contacts/${contactId}/appointments`;
       const apptRes = await fetch(apptUrl, { headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" } });
       const apptBody = await apptRes.json().catch(() => null);
       const events = (apptBody && apptBody.events) || [];
       if (events.length === 0) continue;
-      const appt = events.slice().sort((a, b) => (a.dateAdded < b.dateAdded ? 1 : -1))[0];
-      checked++;
-      if (appt.title && appt.title.trim() && appt.title.trim() !== sale.car) {
-        const before = sale.car;
-        sale.car = appt.title.trim();
-        if (!db.auditLog) db.auditLog = [];
-        db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
-        db.auditLog = db.auditLog.slice(0, 1000);
-        updated++;
+      const taken = new Set();
+      for (const sale of jobs) {
+        if (sale.titleLocked) continue; // edited by hand in the tracker: the tracker's title wins
+        const appt = appointmentForJob(sale, events, jobs, now);
+        if (!appt) { ambiguous += 1; continue; } // can't tell which appointment is this job's: leave it alone
+        if (appt.id) { if (taken.has(appt.id)) { ambiguous += 1; continue; } taken.add(appt.id); } // one appointment can only belong to one job
+        checked++;
+        const title = String(appt.title || "").trim();
+        if (title && title !== sale.car) {
+          const before = sale.car;
+          sale.car = title;
+          if (!db.auditLog) db.auditLog = [];
+          db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
+          db.auditLog = db.auditLog.slice(0, 1000);
+          updated++;
+        }
       }
       await new Promise((r) => setTimeout(r, 200)); // same pacing as the bulk import - stays well under GHL's rate limits
     } catch (e) {
@@ -3045,8 +3087,43 @@ async function runTitleSync() {
     }
   }
   if (updated > 0) saveDB(db);
-  return { skipped: false, candidateCount: candidates.length, checked, updated };
+  return { skipped: false, candidateCount: candidates.length, checked, updated, ambiguous };
 }
+
+// Lets a manager see EXACTLY what GHL has for this job's customer, so the right title (and time) can be applied with one
+// tap when the automatic sync can't tell two appointments apart (for example two jobs that were bulk-imported with the
+// same time). It only reads from GHL; nothing changes until a manager picks one.
+app.get("/api/manager/jobs/:id/ghl-appointments", requireManager, async (req, res) => {
+  if (!GHL_API_TOKEN || !GHL_LOCATION_ID) return res.json({ configured: false });
+  const db = loadDB();
+  const sale = db.sales.find((s) => s.id === req.params.id);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  if (!sale.contactId) return res.json({ configured: true, appointments: [], note: "This job has no GHL contact on file, so there's nothing to compare." });
+  let events;
+  try {
+    const r = await fetch(`${GHL_API_BASE}/contacts/${sale.contactId}/appointments`, { headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" } });
+    if (!r.ok) throw new Error(`GHL answered ${r.status}`);
+    const body = await r.json();
+    events = (body && body.events) || [];
+  } catch (e) {
+    return res.status(502).json({ error: "Couldn't reach GHL: " + (e.message || "unknown error") });
+  }
+  const mine = db.sales.filter((s) => s.contactId === sale.contactId && s.status !== "cancelled");
+  // Two jobs for this customer at the same time (e.g. bulk-imported together) can't be told apart, so don't hint at all.
+  const sameSlot = mine.filter((s) => Math.abs(Date.parse(s.date) - Date.parse(sale.date)) <= 60000).length > 1;
+  const ownEvent = events.find((e) => e.id && e.id === sale.ghlOpportunityId);
+  const match = sameSlot && !ownEvent ? null : appointmentForJob(sale, events, mine, new Date());
+  const appointments = events.map((e) => {
+    const title = String(e.title || "").trim();
+    return {
+      id: e.id || "", title, startTime: normalizeDate(e.startTime) || null, status: String(e.appointmentStatus || e.status || ""),
+      matchesThisJob: !!match && match === e,
+      sameTitleAsJob: title === sale.car,
+      belongsToAnotherJob: !!e.id && db.sales.some((s) => s.id !== sale.id && s.contactId === sale.contactId && s.ghlOpportunityId === e.id),
+    };
+  }).sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+  res.json({ configured: true, currentTitle: sale.car, currentDate: sale.date, appointments });
+});
 
 app.post("/api/owner/title-sync-now", requireOwner, async (req, res) => {
   const result = await runTitleSync();
