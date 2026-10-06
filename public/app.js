@@ -15,7 +15,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-06-twocars";
+const UI_BUILD = "2026-10-06-pick";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2999,8 +2999,26 @@ function makeServiceColumns() {
   return { cols: cardLists, wrap, clearAll };
 }
 
+// An ISO instant as the Eastern wall-clock "YYYY-MM-DDTHH:mm" the date editor expects.
+function isoToEasternLocal(iso) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+
 async function renderManagerJobs(content) {
-  const { cols, wrap, clearAll } = makeServiceColumns();
+  // One time-ordered list of compact rows (not three tall columns), so any appointment is a glance away.
+  const listEl = el("div", { class: "appt-list" });
+  const clearAll = () => {
+    const h = listEl.offsetHeight; // hold the height steady across the rebuild so the page never jumps to the top
+    if (h > 0) listEl.style.minHeight = h + "px";
+    listEl.innerHTML = "";
+    requestAnimationFrame(() => requestAnimationFrame(() => { listEl.style.minHeight = ""; }));
+  };
+  const rows = []; // { job, el } for every appointment drawn
+  const openIds = new Set(); // which appointments are expanded - remembered across the refresh that follows every tap
+  const filt = { text: "", status: "all", service: "all" };
+  let lastDay = null, didAutoScroll = false;
+  const tagPart = (name, node) => { node.setAttribute("data-part", name); return node; };
   const emptyMsg = el("div", { class: "muted", style: "display:none", text: "No jobs on this day." });
   const employees = await api("/api/manager/employees");
   const managersList = await api("/api/manager/managers-list");
@@ -3056,7 +3074,137 @@ async function renderManagerJobs(content) {
     addNotice,
   ]));
 
-  const tipWidgetWrap = el("div", { style: "margin-bottom:14px" });
+
+  // ---------- compact appointment rows ----------
+  const composeApptRow = (job, builtCard, cardStyle) => {
+    const kids = Array.from(builtCard.children);
+    const part = (n) => kids.filter((k) => k.getAttribute("data-part") === n);
+    const main = kids.filter((k) => !k.getAttribute("data-part"));
+    // The things used all day (status, payment, techs, upsells, photos, notes) come first. The things changed rarely
+    // (title, service, price, date/time, rep, cancel/delete) wait behind one button.
+    const editWrap = el("div", { style: "display:none;margin-top:10px;padding:10px 12px;border:0.5px dashed var(--border);border-radius:8px" }, part("edit"));
+    const EDIT_LABEL = "✎ Edit details (title, service, price, time, rep, cancel / delete)";
+    const editBtn = el("button", { class: "ghost", style: "margin-top:10px;font-size:12px", text: EDIT_LABEL, onclick: () => {
+      const show = editWrap.style.display === "none";
+      editWrap.style.display = show ? "block" : "none";
+      editBtn.textContent = show ? "✕ Hide edit details" : EDIT_LABEL;
+    } });
+    const body = el("div", { class: "appt-body", style: "margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px;" + (openIds.has(job.id) ? "" : "display:none") },
+      [...part("warn"), ...part("head"), ...main, editBtn, editWrap]);
+
+    const d = new Date(job.date);
+    const time = isNaN(d.getTime()) ? "" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    const chip = (text, color) => el("span", { class: "appt-tag", style: `border-color:${color};color:${color}`, text });
+    const tags = [];
+    if (job.status === "cancelled") tags.push(chip("CANCELLED", "var(--red)"));
+    else if (job.status === "no_show") tags.push(chip("NO-SHOW", "var(--red)"));
+    else if (job.status === "unconfirmed") tags.push(chip("UNCONFIRMED", "var(--amber)"));
+    else if (job.status === "arrived") tags.push(chip("HERE", "var(--green)"));
+    else tags.push(chip("UPCOMING", "var(--sub)"));
+    if (job.completed) tags.push(chip("DONE", "var(--green)"));
+    if (job.paid) tags.push(chip("PAID", "var(--green)"));
+    else if ((job.status === "arrived" || job.completed) && job.status !== "no_show" && job.status !== "cancelled") tags.push(chip("UNPAID", "var(--red)"));
+    if (!(job.basePrice > 0)) tags.push(chip("NO PRICE", "var(--red)"));
+    if (job.status === "arrived" && (!job.employeeNames || job.employeeNames === "Unassigned")) tags.push(chip("NO TECH", "var(--red)"));
+    if ((job.status === "arrived" || job.status === "no_show" || job.paid || job.completed) && d.getTime() > Date.now() + 6 * 3600 * 1000) tags.push(chip("⚠ CHECK DATE", "var(--red)"));
+    const canQuickArrive = !["arrived", "no_show", "cancelled"].includes(job.status);
+    const serviceShort = { "Window Tint": "Tint", "Ceramic Coating": "Ceramic", "PPF": "PPF" }[serviceColumnFor(job.baseService)];
+    const summary = el("div", { class: "appt-sum" }, [
+      el("div", { class: "row", style: "align-items:flex-start" }, [
+        el("div", { style: "min-width:0;flex:1" }, [
+          el("div", { style: "display:flex;gap:8px;align-items:baseline" }, [
+            el("span", { class: "mono", style: "font-weight:600;flex:0 0 auto", text: time }),
+            el("span", { class: "appt-title", style: "font-weight:500", text: job.car || "(no title)" }),
+            el("span", { class: "appt-first", style: "flex:0 0 auto" }),
+          ]),
+          el("div", { class: "muted", style: "font-size:12px;margin-top:2px", text: [job.customerName, job.employeeNames && job.employeeNames !== "Unassigned" ? job.employeeNames : null, serviceShort].filter(Boolean).join(" · ") }),
+        ]),
+        el("div", { style: "text-align:right;flex:0 0 auto" }, [
+          el("div", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(job.total) }),
+          canQuickArrive ? el("button", { class: "tab-btn", style: "margin-top:4px;padding:5px 10px;font-size:12px", onclick: async (ev) => {
+            ev.stopPropagation();
+            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ status: "arrived" }) });
+            load();
+          }, text: "Arrived" }) : null,
+        ]),
+      ]),
+      el("div", { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:6px" }, tags),
+    ]);
+    summary.addEventListener("click", () => {
+      const open = body.style.display === "none";
+      body.style.display = open ? "" : "none";
+      if (open) openIds.add(job.id); else openIds.delete(job.id);
+    });
+    return el("div", { class: "card appt", "data-job-id": job.id, style: (cardStyle || "") + ";padding:10px 12px;margin-bottom:8px" }, [summary, body]);
+  };
+
+  // ---------- the sticky search + filter bar ----------
+  const STATUS_FILTERS = [
+    ["all", "All", () => true],
+    ["upcoming", "Upcoming", (j) => !["arrived", "no_show", "cancelled"].includes(j.status)],
+    ["here", "Here", (j) => j.status === "arrived" && !(j.completed && j.paid)],
+    ["unpaid", "Unpaid", (j) => (j.status === "arrived" || j.completed) && !j.paid && j.status !== "no_show" && j.status !== "cancelled"],
+    ["done", "Done", (j) => !!(j.completed && j.paid)],
+    ["out", "No-show / Cancelled", (j) => j.status === "no_show" || j.status === "cancelled"],
+  ];
+  const searchInput = el("input", { type: "search", placeholder: "Search customer, car, phone, tech or rep…", style: "flex:1;min-width:140px" });
+  const serviceSel = el("select", { style: "max-width:130px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px" }, [
+    el("option", { value: "all", text: "All services" }), el("option", { value: "Window Tint", text: "Tint" }),
+    el("option", { value: "Ceramic Coating", text: "Ceramic" }), el("option", { value: "PPF", text: "PPF" }),
+  ]);
+  const chipBtns = {};
+  STATUS_FILTERS.forEach(([key, label]) => {
+    chipBtns[key] = el("button", { class: "tab-btn appt-chip" + (key === "all" ? " active" : ""), onclick: () => { filt.status = key; applyFilters(); }, text: label });
+  });
+  const summaryEl = el("div", { class: "muted", style: "font-size:12px;margin-top:2px" });
+  const noMatch = el("div", { class: "muted", style: "display:none;margin:12px 2px", text: "No appointments match. Not on this day? Use the Search tab to look across all days." });
+  const barEl = el("div", { class: "appt-bar" }, [
+    el("div", { style: "display:flex;gap:8px;margin-bottom:6px" }, [searchInput, serviceSel]),
+    el("div", { class: "appt-chips" }, Object.values(chipBtns)),
+    summaryEl,
+  ]);
+  searchInput.addEventListener("input", () => { filt.text = searchInput.value; applyFilters(); });
+  serviceSel.addEventListener("change", () => { filt.service = serviceSel.value; applyFilters(); });
+
+  function applyFilters() {
+    const tokens = filt.text.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const matchesText = (j) => {
+      if (tokens.length === 0) return true;
+      const hay = [j.car, j.customerName, j.customerPhone, j.employeeNames, j.managerHelperNames, j.salesRepName, j.baseService].filter(Boolean).join(" ").toLowerCase();
+      const phoneDigits = String(j.customerPhone || "").replace(/\D/g, "");
+      return tokens.every((t) => { const td = t.replace(/\D/g, ""); return hay.includes(t) || (td.length >= 3 && phoneDigits.includes(td)); });
+    };
+    const matchesService = (j) => filt.service === "all" || serviceColumnFor(j.baseService) === filt.service;
+    const base = rows.filter((r) => matchesText(r.job) && matchesService(r.job)); // chip counts reflect the search, so they tell you what you'd find
+    const active = STATUS_FILTERS.find(([k]) => k === filt.status) || STATUS_FILTERS[0];
+    STATUS_FILTERS.forEach(([key, label, pred]) => {
+      chipBtns[key].textContent = `${label} (${base.filter((r) => pred(r.job)).length})`;
+      chipBtns[key].classList.toggle("active", key === filt.status);
+    });
+    let shown = 0;
+    rows.forEach((r) => { const show = base.includes(r) && active[2](r.job); r.el.style.display = show ? "" : "none"; if (show) shown += 1; });
+    summaryEl.textContent = rows.length === 0 ? "" : `Showing ${shown} of ${rows.length} appointment${rows.length !== 1 ? "s" : ""}`;
+    noMatch.style.display = rows.length > 0 && shown === 0 ? "" : "none";
+  }
+
+  // The next appointment still to come today gets a marker, and the page scrolls to it the first time you open today.
+  function finishRender() {
+    const isToday = lastDay === easternToday();
+    const next = isToday ? rows.find((r) => !["arrived", "no_show", "cancelled"].includes(r.job.status) && new Date(r.job.date).getTime() >= Date.now() - 30 * 60 * 1000) : null;
+    if (next) {
+      const m = next.el.querySelector(".appt-first");
+      m.className = "appt-first appt-tag";
+      m.style.cssText = "flex:0 0 auto;border-color:var(--green);color:var(--green)";
+      m.textContent = "NEXT UP";
+    }
+    applyFilters();
+    if (!didAutoScroll) {
+      didAutoScroll = true;
+      if (next && rows.indexOf(next) > 2 && !filt.text && next.el.scrollIntoView) next.el.scrollIntoView({ block: "center" });
+    }
+  }
+
+  const tipWidgetWrap = el("div", { style: "margin-bottom:14px;display:none" });
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
@@ -3064,8 +3212,10 @@ async function renderManagerJobs(content) {
     tipWidgetWrap.innerHTML = "";
     tipWidgetWrap.appendChild(renderTipWidget(jobs, () => load()));
     clearAll();
+    rows.length = 0;
+    if (p.date !== lastDay) { lastDay = p.date; didAutoScroll = false; }
     emptyMsg.style.display = jobs.length === 0 ? "" : "none";
-    if (jobs.length === 0) return;
+    if (jobs.length === 0) { finishRender(); return; }
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
       const statusBtn = (value, label) => {
         const active = job.status === value;
@@ -3238,8 +3388,8 @@ async function renderManagerJobs(content) {
       ]);
 
       const { cardStyle, badge } = cancelledTreatment(job.status);
-      cols[serviceColumnFor(job.baseService)].appendChild(el("div", { class: "card", style: cardStyle }, [
-        el("div", { class: "row", style: "margin-bottom:10px" }, [
+      const builtCard = el("div", { class: "card", style: cardStyle }, [
+        el("div", { "data-part": "head", class: "row", style: "margin-bottom:10px" }, [
           el("div", {}, [
             el("div", { style: "font-weight:500" }, [el("span", { text: job.car }), badge]),
             el("div", { class: "muted", text: `${formatDateTime(job.date)}${job.customerName ? " · " + job.customerName : ""}${job.customerPhone ? " · " + job.customerPhone : ""}` }),
@@ -3251,7 +3401,7 @@ async function renderManagerJobs(content) {
             el("div", { class: "mono", style: "color:var(--amber);font-size:17px;font-weight:600;margin-top:2px", text: `Total: ${money(job.total)}` }),
           ]),
         ]),
-        el("div", { style: "margin-bottom:10px" }, [
+        el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "CAR / TITLE — GHL doesn't tell us if this gets edited after booking, fix it here if it changes" }),
           (() => {
             const carInput = el("input", { value: job.car || "", style: "max-width:280px" });
@@ -3260,10 +3410,49 @@ async function renderManagerJobs(content) {
               await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ car: carInput.value }) });
               load();
             }, text: "Save" });
-            return el("div", { style: "display:flex;align-items:center" }, [carInput, saveBtn]);
+            // What does GHL actually have for this customer? Lists their real appointments and applies the right one with a tap.
+            const ghlPanel = el("div", { style: "display:none;margin-top:8px" });
+            const apply = async (fields, okText) => {
+              try { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ ...fields, titleFromGhl: true }) }); load(); }
+              catch (err) { ghlPanel.appendChild(el("div", { style: "color:var(--red);font-size:12px;margin-top:4px", text: err.message || okText })); }
+            };
+            const ghlBtn = el("button", { class: "ghost", style: "margin-top:6px;font-size:12px", text: "Compare with GHL", onclick: async () => {
+              ghlPanel.style.display = "block";
+              ghlPanel.innerHTML = "";
+              ghlPanel.appendChild(el("div", { class: "muted", style: "font-size:12px", text: "Asking GHL…" }));
+              try {
+                const r = await api(`/api/manager/jobs/${job.id}/ghl-appointments`);
+                ghlPanel.innerHTML = "";
+                if (!r.configured) { ghlPanel.appendChild(el("div", { class: "muted", style: "font-size:12px", text: "GHL isn't connected on this location, so there's nothing to compare." })); return; }
+                if (r.note) { ghlPanel.appendChild(el("div", { class: "muted", style: "font-size:12px", text: r.note })); return; }
+                if (r.appointments.length === 0) { ghlPanel.appendChild(el("div", { class: "muted", style: "font-size:12px", text: "GHL has no appointments for this customer." })); return; }
+                ghlPanel.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "This customer's appointments in GHL. Pick the one that belongs to THIS job (it keeps following GHL afterwards):" }));
+                r.appointments.forEach((ap) => {
+                  const sameTime = ap.startTime && formatDateTime(ap.startTime) === formatDateTime(job.date);
+                  const tag = (t, c) => el("span", { class: "appt-tag", style: `border-color:${c};color:${c};margin-left:6px`, text: t });
+                  ghlPanel.appendChild(el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+                    el("div", { style: "font-size:12.5px" }, [
+                      el("span", { style: "font-weight:500", text: ap.title || "(no title)" }),
+                      ap.matchesThisJob ? tag("LOOKS LIKE THIS JOB", "var(--green)") : null,
+                      ap.belongsToAnotherJob ? tag("ANOTHER JOB'S", "var(--sub)") : null,
+                      /cancel/i.test(ap.status) ? tag("CANCELLED", "var(--red)") : null,
+                    ]),
+                    el("div", { class: "muted", style: "font-size:11.5px", text: `${ap.startTime ? formatDateTime(ap.startTime) : "no time"}${ap.sameTitleAsJob ? " · same title as this job" : ""}${sameTime ? " · same time as this job" : ""}` }),
+                    sameTime && ap.sameTitleAsJob ? null : el("div", { style: "display:flex;gap:8px;margin-top:4px;flex-wrap:wrap" }, [
+                      ap.sameTitleAsJob ? null : el("button", { class: "ghost", style: "font-size:11.5px;padding:4px 9px", onclick: () => apply({ car: ap.title }, "Couldn't apply that title."), text: "Use this title" }),
+                      ap.startTime && !sameTime ? el("button", { class: "ghost", style: "font-size:11.5px;padding:4px 9px", onclick: () => apply({ car: ap.title, date: isoToEasternLocal(ap.startTime) }, "Couldn't apply that."), text: "Use title + time" }) : null,
+                    ]),
+                  ]));
+                });
+              } catch (err) {
+                ghlPanel.innerHTML = "";
+                ghlPanel.appendChild(el("div", { style: "color:var(--red);font-size:12px", text: err.message || "Couldn't reach GHL." }));
+              }
+            } });
+            return el("div", {}, [el("div", { style: "display:flex;align-items:center" }, [carInput, saveBtn]), ghlBtn, ghlPanel]);
           })(),
         ]),
-        el("div", { style: "margin-bottom:10px" }, [
+        el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `SERVICE (currently: ${job.baseService || "not set"})` }),
           el("select", {
             style: "max-width:200px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
@@ -3279,7 +3468,7 @@ async function renderManagerJobs(content) {
             el("option", { value: "PPF", text: "PPF", ...(job.baseService === "PPF" ? { selected: "true" } : {}) }),
           ]),
         ]),
-        el("div", { style: "margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap" }, [
+        el("div", { "data-part": "edit", style: "margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap" }, [
           job.status !== "cancelled"
             ? el("button", { class: "icon-danger", style: "font-size:11px;padding:4px 10px", onclick: async () => {
                 if (!confirm(`Cancel this appointment for ${job.car}? This can't be easily undone from here.`)) return;
@@ -3297,10 +3486,10 @@ async function renderManagerJobs(content) {
           }, text: "🗑 Delete job" }),
           session.role === "owner" ? el("button", { class: "ghost", style: "font-size:11px;padding:4px 10px", onclick: () => { splitNotice.textContent = ""; splitPanel.style.display = splitPanel.style.display === "none" ? "block" : "none"; }, text: "⎘ Split off earlier appointment" }) : null,
         ]),
-        looksOverwritten ? el("div", { style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--red);border-radius:8px;color:var(--red);font-size:11.5px", text: "⚠ Marked as done, but the appointment is in the future. A newer booking may have overwritten an earlier job." + (session.role === "owner" ? " Use “Split off earlier appointment” to separate them." : " Ask the owner to check it.") }) : null,
-        session.role === "owner" ? splitPanel : null,
-        el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
-        el("div", { style: "margin-bottom:10px" }, [
+        looksOverwritten ? el("div", { "data-part": "warn", style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--red);border-radius:8px;color:var(--red);font-size:11.5px", text: "⚠ Marked as done, but the appointment is in the future. A newer booking may have overwritten an earlier job." + (session.role === "owner" ? " Use “Split off earlier appointment” to separate them." : " Ask the owner to check it.") }) : null,
+        session.role === "owner" ? tagPart("edit", splitPanel) : null,
+        el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
+        el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "DATE / TIME — for the rare case it needs a manual fix" }),
           (() => {
             const dt = new Date(job.date);
@@ -3317,7 +3506,7 @@ async function renderManagerJobs(content) {
             ]);
           })(),
         ]),
-        el("div", { style: "margin-bottom:10px" }, [
+        el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `SALES REP (currently: ${job.salesRepName})` }),
           el("select", {
             style: "max-width:220px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
@@ -3377,14 +3566,25 @@ async function renderManagerJobs(content) {
         ]),
         renderPhotoGrid(job, () => load()),
         renderNotesSection(job, () => load()),
-      ]));
+      ]);
+      const rowEl = composeApptRow(job, builtCard, cardStyle);
+      listEl.appendChild(rowEl);
+      rows.push({ job, el: rowEl });
     });
+    finishRender();
   }
-  content.appendChild(tipWidgetWrap);
-  content.appendChild(addToggleBtn);
-  content.appendChild(addFormWrap);
+  const tipToggleBtn = el("button", { class: "ghost", style: "margin-bottom:10px", text: "💵 Log a tip", onclick: () => {
+    const showing = tipWidgetWrap.style.display !== "none";
+    tipWidgetWrap.style.display = showing ? "none" : "block";
+    tipToggleBtn.textContent = showing ? "💵 Log a tip" : "− Hide tip form";
+  } });
   content.appendChild(nav.el);
-  content.appendChild(wrap);
+  content.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [addToggleBtn, tipToggleBtn]));
+  content.appendChild(addFormWrap);
+  content.appendChild(tipWidgetWrap);
+  content.appendChild(barEl);
+  content.appendChild(listEl);
+  content.appendChild(noMatch);
   content.appendChild(emptyMsg);
   await load();
 }
@@ -3636,7 +3836,7 @@ async function renderTestTool(content) {
       titleSyncResult.innerHTML = "";
       if (r.skipped) { titleSyncResult.appendChild(el("div", { class: "muted", text: r.reason })); return; }
       titleSyncResult.appendChild(el("div", { class: "card" }, [
-        el("div", { style: "font-size:12.5px", text: `Checked ${r.checked} of ${r.candidateCount} upcoming job(s), corrected ${r.updated} title(s).` }),
+        el("div", { style: "font-size:12.5px", text: `Checked ${r.checked} of ${r.candidateCount} upcoming job(s), corrected ${r.updated} title(s).${r.ambiguous ? ` ${r.ambiguous} couldn't be matched to one specific GHL appointment (for example two cars for the same customer with nothing linking them), so they were left alone. Open the job, tap Edit details, then Compare with GHL.` : ""}` }),
       ]));
     }, text: "Run title sync now" }),
     titleSyncResult,
