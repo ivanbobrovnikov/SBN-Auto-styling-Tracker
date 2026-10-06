@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-06-resched";
+const BUILD = "2026-10-06-resflag";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1394,8 +1394,16 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
   // "closed" filters by when the deal was actually closed, regardless of when the
   // appointment happens - this is what a live "who's closing deals today" leaderboard
   // needs, matching Closing Activity instead.
-  const dateBasis = req.query.dateBasis === "closed" ? (s) => (s.closedAt || s.date) : (s) => s.date;
-  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(dateBasis(s), start, end)), db);
+  const closedBasis = req.query.dateBasis === "closed";
+  const dateBasis = closedBasis ? (s) => (s.closedAt || s.date) : (s) => s.date;
+  const inRangeJobs = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(dateBasis(s), start, end)), db);
+  // On the closing view a booking marked as a reschedule isn't a new close. On the appointment view (the one that
+  // matches Payroll) it stays, so the rep is still paid when the client shows up.
+  const relevant = closedBasis ? inRangeJobs.filter((s) => !s.isReschedule) : inRangeJobs;
+  const leftOut = closedBasis ? inRangeJobs.filter((s) => s.isReschedule).map((s) => {
+    const r = db.salesReps.find((x) => x.id === s.salesRepId);
+    return { id: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending", repName: r ? r.name : "Removed rep" };
+  }) : [];
   const byRep = {};
   relevant.forEach((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
@@ -1404,10 +1412,10 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
     const duringHours = isDuringBusinessHours(s.closedAt || s.date);
     byRep[rep.name].closes.push({
       id: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date,
-      basePrice: parseFloat(s.basePrice) || 0, baseService: s.baseService || "", status: s.status || "pending", duringHours,
+      basePrice: parseFloat(s.basePrice) || 0, baseService: s.baseService || "", status: s.status || "pending", duringHours, isReschedule: !!s.isReschedule,
     });
   });
-  res.json({ locationLabel: SHOP_LOCATION_LABEL, perRep: Object.values(byRep) });
+  res.json({ locationLabel: SHOP_LOCATION_LABEL, perRep: Object.values(byRep), leftOut });
 });
 
 // Same shape as the owner's own Cleanup list, so the combining app can render it identically.
@@ -1458,7 +1466,7 @@ app.get("/api/cross-location/salesreps", (req, res) => {
 });
 
 // Only these fields can be changed from there - nothing about payments, techs, upsells or deleting.
-const CROSS_EDITABLE = ["closedAt", "date", "car", "basePrice", "baseService", "salesRepId", "isWalkIn", "isOnlineBooking", "status"];
+const CROSS_EDITABLE = ["closedAt", "date", "car", "basePrice", "baseService", "salesRepId", "isWalkIn", "isOnlineBooking", "status", "isReschedule"];
 app.post("/api/cross-location/job-edit", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
@@ -1473,9 +1481,14 @@ app.post("/api/cross-location/job-edit", (req, res) => {
   if (body.car !== undefined && !String(body.car).trim()) return res.status(400).json({ error: "The title can't be empty." });
   if (body.status !== undefined && !["pending", "arrived", "no_show", "cancelled"].includes(body.status)) return res.status(400).json({ error: "Unknown status." });
   if (body.salesRepId !== undefined && !db.salesReps.some((r) => r.id === body.salesRepId)) return res.status(400).json({ error: "That sales rep doesn't exist at this location." });
+  if (body.isReschedule !== undefined && typeof body.isReschedule !== "boolean") return res.status(400).json({ error: "isReschedule must be true or false." });
   req.params = { id: sale.id };
   req.body = body;
   req.auth = { role: "owner", id: "rep-tracker", label: "Rep tracker (owner)" };
+  // Say which fields were actually applied, so the caller can tell a tracker that hasn't been updated yet
+  // (it would silently ignore a field it doesn't know) from one that really did the change.
+  const sendJson = res.json.bind(res);
+  res.json = (obj) => sendJson(obj && obj.ok ? { ...obj, applied: Object.keys(body) } : obj);
   return patchJobHandler(req, res);
 });
 
@@ -1741,7 +1754,7 @@ function splitEarlierAppointment(db, req, saleId, originalIso, originalCar, opts
   // The new booking counts as a close for the rep on the day it REALLY closed (that decides the day it
   // shows in Closing Activity and whether the in-hours or after-hours rate applies); blank means now.
   live.basePrice = 0; live.closedAt = opts.newClosedIso || new Date().toISOString();
-  live.upsells = []; live.notes = []; delete live.photos;
+  live.upsells = []; live.notes = []; delete live.photos; delete live.isReschedule;
   live.employeeIds = []; live.employeeNames = "Unassigned"; live.managerHelperIds = []; live.managerHelperNames = "";
   delete live.employeeId;
   logAudit(db, req, live, "Split off earlier appointment", null, `${earlier.car} (${originalIso.slice(0, 10)})`);
@@ -1819,7 +1832,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   db.cashEntries.forEach((e) => { if (e.autoFromJob && e.saleId) cashBySale[e.saleId] = (cashBySale[e.saleId] || 0) + e.amount; });
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-    cashPaidAmount: cashBySale[s.id] || 0, earlierJob: earlierFor(s),
+    cashPaidAmount: cashBySale[s.id] || 0, earlierJob: earlierFor(s), isReschedule: !!s.isReschedule,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
@@ -1835,6 +1848,14 @@ function patchJobHandler(req, res) {
   const db = loadDB();
   const sale = db.sales.find((s) => s.id === req.params.id);
   if (!sale) return res.status(404).json({ error: "Job not found." });
+  // "This is a reschedule, not a new close": keeps the job out of closing activity (the audit, the rep tracker's
+  // closes, Statistics) while leaving it fully in payroll. Owner only, and always logged.
+  if (req.body.isReschedule !== undefined) {
+    if (req.auth.role !== "owner") return res.status(403).json({ error: "Only the owner can change this." });
+    const flag = !!req.body.isReschedule;
+    logAudit(db, req, sale, "Reschedule (not a new close)", !!sale.isReschedule, flag);
+    sale.isReschedule = flag;
+  }
   // Manual price correction — the price GHL/sync captured isn't always final; a customer
   // can negotiate down after the fact. This flows through to every downstream number
   // automatically (total, commission math), since everything reads from this one field.
@@ -2279,7 +2300,7 @@ app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
     return {
       saleId: s.id, car: s.car, customerName: s.customerName, basePrice: parseFloat(s.basePrice) || 0,
       salesRepName: rep ? rep.name : "Removed rep", status: s.status || "pending",
-      closedAtRaw, closedAtEastern: easternLabel, duringHours, rateApplied, commissionAmount,
+      closedAtRaw, closedAtEastern: easternLabel, duringHours, rateApplied, commissionAmount, isReschedule: !!s.isReschedule,
     };
   }).sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1));
   res.json(rows);
@@ -2294,7 +2315,15 @@ app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
 app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const relevant = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(s.closedAt || s.date, start, end)), db);
+  // A booking the owner marked as a RESCHEDULE is the same deal moved to a new day, not a new sale, so it stays out
+  // of closing activity (it's listed separately as "left out", with a way to undo). It is NOT left out of payroll or
+  // the appointment lists: when the client shows up, the rep is paid exactly as normal.
+  const inClosingRange = db.sales.filter((s) => s.salesRepId && inRange(s.closedAt || s.date, start, end));
+  const relevant = revenueEligible(inClosingRange.filter((s) => !s.isReschedule), db);
+  const leftOut = revenueEligible(inClosingRange.filter((s) => s.isReschedule), db).map((s) => {
+    const r = db.salesReps.find((x) => x.id === s.salesRepId);
+    return { saleId: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, repName: r ? r.name : "Removed rep", status: s.status || "pending" };
+  });
   const byRep = {};
   relevant.forEach((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
@@ -2323,7 +2352,7 @@ app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
     totalCloses: relevant.length,
     totalProjectedCommission: perRep.reduce((a, r) => a + r.projectedCommission, 0),
     totalValue: perRep.reduce((a, r) => a + r.totalValue, 0),
-    perRep,
+    perRep, leftOut,
   });
 });
 
@@ -3304,7 +3333,7 @@ function statsHeadline(db, start, end) {
   const arrived = sales.filter((s) => s.status === "arrived").length;
   const noShow = sales.filter((s) => s.status === "no_show").length;
   const cancelled = db.sales.filter((s) => inP(s.date) && s.status === "cancelled" && afterRevenueStart(s, db)).length;
-  const closed = db.sales.filter((s) => s.status !== "cancelled" && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
   const dealValue = statSum(closed, (s) => parseFloat(s.basePrice) || 0);
   return {
     revenue: statRound(revenue), paidJobs: paid.length, avgTicket: statRound(paid.length ? revenue / paid.length : 0),
@@ -3341,7 +3370,7 @@ function statsRecords(db, today) {
     if (s.paid) revenue[d] = (revenue[d] || 0) + saleTotal(s);
     if (s.completed) cars[d] = (cars[d] || 0) + 1;
   });
-  db.sales.filter((s) => s.status !== "cancelled" && afterRevenueStart(s, db)).forEach((s) => {
+  db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && afterRevenueStart(s, db)).forEach((s) => {
     const d = ymdOf(s.closedAt || s.date);
     const c = (closed[d] = closed[d] || { count: 0, value: 0 });
     c.count += 1; c.value += parseFloat(s.basePrice) || 0;
@@ -3425,7 +3454,7 @@ app.get("/api/owner/statistics", requireOwner, (req, res) => {
   const previous = pq ? (({ start: ps, end: pe }) => statsHeadline(db, ps, pe))(dateRangeFor(pq)) : null;
 
   const completed = sales.filter((s) => s.completed);
-  const closed = db.sales.filter((s) => s.status !== "cancelled" && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
   const headline = head;
 
   const groupBy = (list, keyFn) => { const m = {}; list.forEach((x) => { const k = keyFn(x); (m[k] = m[k] || []).push(x); }); return m; };
