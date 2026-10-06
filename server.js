@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-06-resched3";
+const BUILD = "2026-10-06-twocars";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -89,8 +89,10 @@ function findDuplicateSaleIds(sales) {
   // one car. Within each customer's group, only flag the ones that ALSO share the same
   // car/title text as an actual duplicate; a second, different car is a real separate job.
   function flagRealDuplicatesWithin(group) {
+    // The same customer, the same title AND the same appointment time. A second appointment at a different time
+    // (a second car, with an identical title) is a real separate job, not a duplicate.
     const byCar = {};
-    group.forEach((s) => { (byCar[normalize(s.car)] = byCar[normalize(s.car)] || []).push(s); });
+    group.forEach((s) => { const k = `${normalize(s.car)}|${String(s.date || "").slice(0, 16)}`; (byCar[k] = byCar[k] || []).push(s); });
     Object.values(byCar).forEach((carGroup) => { if (carGroup.length > 1) carGroup.forEach((s) => flagged.add(s.id)); });
   }
   Object.values(byContact).forEach(flagRealDuplicatesWithin);
@@ -355,6 +357,16 @@ function titleTokens(t) {
   if (toks.length > 2 && /^[a-z]{2,3}$/.test(toks[0]) && /^(19|20)\d\d$/.test(toks[1])) toks.shift(); // "fk 2015 toyota ..."
   return toks;
 }
+// The car itself: the year and make at the front of a title ("2015 toyota"). Two titles that name DIFFERENT cars are
+// never the same booking, whatever else they share.
+function vehicleKey(t) {
+  const toks = titleTokens(t);
+  return toks.length >= 2 && /^(19|20)\d\d$/.test(toks[0]) ? `${toks[0]} ${toks[1]}` : null;
+}
+function vehiclesDiffer(a, b) {
+  const ka = vehicleKey(a), kb = vehicleKey(b);
+  return !!(ka && kb && ka !== kb);
+}
 // "Same car and service". Comparing the raw text broke the moment anyone touched the deposit or added "WS" while
 // rescheduling, which made a plain reschedule look like a brand-new deal (and a new close today).
 function titlesMatch(a, b) {
@@ -372,6 +384,15 @@ function titlesMatch(a, b) {
 function isServiced(sale) {
   return !!sale.completed || (!!sale.paid && sale.status === "arrived" && Date.parse(sale.date) < Date.now());
 }
+// An earlier booking that is no longer going to happen: cancelled, a no-show, left unconfirmed, or an appointment whose
+// day has already passed without the car coming in. A booking that is still coming up is LIVE, and a second booking next to
+// a live one is a second appointment (for example another car), not a reschedule of it.
+function isDeadBooking(s) {
+  if (["cancelled", "no_show", "unconfirmed"].includes(s.status)) return true;
+  if (s.status && s.status !== "pending") return false; // arrived: the car is here
+  const ms = Date.parse(s.date);
+  return !isNaN(ms) && EASTERN_DAY_FMT.format(new Date(ms)) < EASTERN_DAY_FMT.format(new Date());
+}
 function isSeparateAppointment(existing, incomingIso, incomingTitle) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
@@ -387,7 +408,9 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle) {
   // deal (it keeps its original closing time, so it doesn't count as a new close) as long as it's the same
   // car and service. This is what Frank does when he edits the existing appointment.
   if (titlesMatch(existing.car, incomingTitle)) return false;
-  // A different car or service: if the old booking is still upcoming and untouched it was simply edited;
+  // A different CAR is a different booking, even when the old one is still upcoming (a customer with two cars).
+  if (vehiclesDiffer(existing.car, incomingTitle)) return true;
+  // The same car but a different service: if the old booking is still upcoming and untouched it was simply edited;
   // otherwise it's a new deal for the same customer.
   const upcoming = oldMs >= Date.now() && (!existing.status || existing.status === "pending");
   return !upcoming;
@@ -428,19 +451,15 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   const sameCustomer = (s) => (contactId ? s.contactId === contactId
     : !!((phoneKey && digitsOf(s.customerPhone) === phoneKey) || (emailKey && String(s.customerEmail || "").trim().toLowerCase() === emailKey)));
   if (!sale && (contactId || phoneKey || emailKey)) {
-    // A reschedule in GHL can generate a brand-new Appointment ID for what is logically the
-    // same booking — matching strictly by that ID would treat it as an unrelated new job.
-    // But the same customer can genuinely book more than one car at once, so matching by
-    // contact alone isn't safe — that could silently merge two real, separate jobs into
-    // one, which is worse than a duplicate since one of them would just vanish. Requiring
-    // the car/title text to substantially match is what actually distinguishes "this exact
-    // booking got rescheduled" from "this customer booked a second, different car" — a
-    // substring check (not exact) tolerates GHL appending something like "- RESCHEDULED"
-    // or otherwise lightly reformatting the title without losing the real vehicle text.
-    // A no-show or an unfinished job counts too: a rescheduled booking that GHL gave a new opportunity ID
-    // is still that same deal. Finished or cancelled jobs are excluded by isSeparateAppointment.
+    // A booking that arrives with a DIFFERENT appointment ID is a different booking - the key is the appointment's ID,
+    // so one appointment is one id. The one thing we still fold into an existing job is a booking the customer had
+    // left UNCONFIRMED and has now re-confirmed (GHL can hand that a fresh ID), for the same car and service.
+    // We never fold a new appointment into one that is still live: a customer with two cars books two appointments,
+    // very possibly with identical titles, and merging them would silently erase one of two real jobs. Matching on
+    // the title alone can't tell those apart, so a duplicate is the safer mistake: it's visible (Payroll warns
+    // about identical bookings at the same time) and Cleanup suggests it once the earlier one is clearly dead.
     const existingUnresolved = db.sales.find((s) =>
-      sameCustomer(s) && s.status !== "cancelled" && titlesMatch(s.car, car)
+      sameCustomer(s) && s.status === "unconfirmed" && titlesMatch(s.car, car)
       && !isSeparateAppointment(s, incomingIso, car)
     );
     if (existingUnresolved) {
@@ -455,6 +474,13 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
           saleId: sale.id, car: sale.car, field: "GHL Opportunity ID", oldValue: oldOppId, newValue: ghlOpportunityId,
         });
         db.auditLog = db.auditLog.slice(0, 1000);
+      }
+      // The customer re-confirmed a booking they'd left unconfirmed: it's a normal live appointment again.
+      if (sale.status === "unconfirmed") {
+        if (!db.auditLog) db.auditLog = [];
+        db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (re-confirmed)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "unconfirmed", newValue: "pending" });
+        db.auditLog = db.auditLog.slice(0, 1000);
+        sale.status = "pending";
       }
     }
   }
@@ -1801,6 +1827,7 @@ function mergeJobPair(db, req, liveId, earlierId) {
   if (!((linked || (jobPersonKey(live) && jobPersonKey(live) === jobPersonKey(earlier))) && titlesMatch(live.car, earlier.car))) {
     return { status: 409, error: "These two don't look like the same customer's same booking, so they weren't merged." };
   }
+  if (!isDeadBooking(earlier) && !isServiced(earlier)) return { status: 409, error: "That earlier booking is still coming up, so these look like two separate appointments (for example two cars), not a reschedule. Nothing was changed." };
   if (isServiced(earlier)) return { status: 409, error: "That earlier job was already completed or paid, so this is a separate deal, not a reschedule. Nothing was changed." };
   if (liveJobWorked(live)) return { status: 409, error: "The newer job has already been worked on (arrived, paid or completed), and merging would lose that. Use \"Don't count as a new close\" instead. Nothing was changed." };
   const fromDate = earlier.date;
@@ -1856,7 +1883,7 @@ function findPossibleReschedules(db, days = 7) {
     const k = keyOf(j);
     if (!k) return;
     const earlier = (byKey[k] || [])
-      .filter((e) => e.id !== j.id && !isServiced(e) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
+      .filter((e) => e.id !== j.id && !isServiced(e) && isDeadBooking(e) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
       .sort((a, b) => (a.date < b.date ? 1 : -1))[0];
     if (!earlier) return;
     const rep = db.salesReps.find((r) => r.id === j.salesRepId);
