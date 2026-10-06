@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-06-resflag";
+const BUILD = "2026-10-06-resched3";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -344,16 +344,33 @@ function resolveSalesRepAttribution(db, salesRepName, appointmentTitle) {
 // one that's still live) or a separate, later appointment for the same customer.
 const EASTERN_DAY_FMT = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
 const normalizeTitle = (t) => String(t || "").trim().toLowerCase();
-// "Same car and service" - a substring check (not exact) so GHL tacking on "- RESCHEDULED" still matches.
+// The words that identify the car and the service, with everything that changes when a booking is merely
+// RESCHEDULED taken out: the price and deposit written into the title ("$400-$350"), the rep's initials in front,
+// and markers like "rescheduled". Titles here look like "JA 2015 Toyota Camry Sides + Rear + Removal $400-$350".
+function titleTokens(t) {
+  const toks = String(t || "").toLowerCase()
+    .replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*-\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, " ")
+    .replace(/\b(?:re-?scheduled?|resched|rebooked?|moved|new)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  if (toks.length > 2 && /^[a-z]{2,3}$/.test(toks[0]) && /^(19|20)\d\d$/.test(toks[1])) toks.shift(); // "fk 2015 toyota ..."
+  return toks;
+}
+// "Same car and service". Comparing the raw text broke the moment anyone touched the deposit or added "WS" while
+// rescheduling, which made a plain reschedule look like a brand-new deal (and a new close today).
 function titlesMatch(a, b) {
   const na = normalizeTitle(a), nb = normalizeTitle(b);
   if (!na || !nb) return false;
-  return na === nb || na.includes(nb) || nb.includes(na);
+  if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+  const A = new Set(titleTokens(a)), B = new Set(titleTokens(b));
+  if (Math.min(A.size, B.size) < 3) return false; // too little to compare safely
+  let shared = 0;
+  A.forEach((t) => { if (B.has(t)) shared += 1; });
+  return shared / Math.min(A.size, B.size) >= 0.75;
 }
-// Work that was actually finished: marked complete, or paid once its appointment day has passed (a job
-// paid in advance for a future day hasn't been done yet).
+// Work that was actually finished: marked complete, or the car came in and was paid once its appointment
+// day had passed. Paying in advance, or paying a deposit, doesn't make a job "finished".
 function isServiced(sale) {
-  return !!sale.completed || (!!sale.paid && Date.parse(sale.date) < Date.now());
+  return !!sale.completed || (!!sale.paid && sale.status === "arrived" && Date.parse(sale.date) < Date.now());
 }
 function isSeparateAppointment(existing, incomingIso, incomingTitle) {
   if (!incomingIso || !existing.date) return false;
@@ -405,7 +422,12 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     sale = undefined;
   }
   let isNew = !sale;
-  if (!sale && contactId) {
+  const digitsOf = (v) => String(v || "").replace(/\D/g, "");
+  const phoneKey = digitsOf(customerPhone), emailKey = String(customerEmail || "").trim().toLowerCase();
+  // Who counts as "the same customer": the GHL contact when we have it, otherwise their phone or email.
+  const sameCustomer = (s) => (contactId ? s.contactId === contactId
+    : !!((phoneKey && digitsOf(s.customerPhone) === phoneKey) || (emailKey && String(s.customerEmail || "").trim().toLowerCase() === emailKey)));
+  if (!sale && (contactId || phoneKey || emailKey)) {
     // A reschedule in GHL can generate a brand-new Appointment ID for what is logically the
     // same booking — matching strictly by that ID would treat it as an unrelated new job.
     // But the same customer can genuinely book more than one car at once, so matching by
@@ -418,7 +440,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     // A no-show or an unfinished job counts too: a rescheduled booking that GHL gave a new opportunity ID
     // is still that same deal. Finished or cancelled jobs are excluded by isSeparateAppointment.
     const existingUnresolved = db.sales.find((s) =>
-      s.contactId === contactId && s.status !== "cancelled" && titlesMatch(s.car, car)
+      sameCustomer(s) && s.status !== "cancelled" && titlesMatch(s.car, car)
       && !isSeparateAppointment(s, incomingIso, car)
     );
     if (existingUnresolved) {
@@ -1431,6 +1453,7 @@ app.get("/api/cross-location/cleanup-list", (req, res) => {
       salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
       basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
     })).sort((a, b) => (a.date < b.date ? 1 : -1)),
+    possibleReschedules: findPossibleReschedules(db), leftOut: recentLeftOut(db), recentMerges: recentMerges(db),
   });
 });
 
@@ -1466,7 +1489,7 @@ app.get("/api/cross-location/salesreps", (req, res) => {
 });
 
 // Only these fields can be changed from there - nothing about payments, techs, upsells or deleting.
-const CROSS_EDITABLE = ["closedAt", "date", "car", "basePrice", "baseService", "salesRepId", "isWalkIn", "isOnlineBooking", "status", "isReschedule"];
+const CROSS_EDITABLE = ["closedAt", "date", "car", "basePrice", "baseService", "salesRepId", "isWalkIn", "isOnlineBooking", "status", "isReschedule", "rescheduleDismissed"];
 app.post("/api/cross-location/job-edit", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
@@ -1481,7 +1504,7 @@ app.post("/api/cross-location/job-edit", (req, res) => {
   if (body.car !== undefined && !String(body.car).trim()) return res.status(400).json({ error: "The title can't be empty." });
   if (body.status !== undefined && !["pending", "arrived", "no_show", "cancelled"].includes(body.status)) return res.status(400).json({ error: "Unknown status." });
   if (body.salesRepId !== undefined && !db.salesReps.some((r) => r.id === body.salesRepId)) return res.status(400).json({ error: "That sales rep doesn't exist at this location." });
-  if (body.isReschedule !== undefined && typeof body.isReschedule !== "boolean") return res.status(400).json({ error: "isReschedule must be true or false." });
+  if ((body.isReschedule !== undefined && typeof body.isReschedule !== "boolean") || (body.rescheduleDismissed !== undefined && typeof body.rescheduleDismissed !== "boolean")) return res.status(400).json({ error: "That must be true or false." });
   req.params = { id: sale.id };
   req.body = body;
   req.auth = { role: "owner", id: "rep-tracker", label: "Rep tracker (owner)" };
@@ -1761,23 +1784,32 @@ function splitEarlierAppointment(db, req, saleId, originalIso, originalCar, opts
   return { earlierId: earlier.id };
 }
 
-// Undoes a split that was really just a reschedule: the EARLIER job is the real deal (it keeps its original
-// closing time, rep and history); the newer one is only where it got moved to, so its date, title and
-// price move onto the earlier job and the duplicate goes away. Refused if the earlier job was actually
-// finished - then it's a separate deal and merging would rewrite history.
-function mergeBackIntoEarlier(db, req, liveId) {
-  const live = db.sales.find((s) => s.id === liveId);
-  if (!live || !live.ghlOpportunityId) return { status: 404, error: "Job not found." };
-  const earlier = db.sales.filter((s) => (s.ghlOpportunityId || "").startsWith(`${live.ghlOpportunityId}~earlier-`)).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
-  if (!earlier) return { status: 404, error: "There's no earlier job to merge this into." };
+// Combines two bookings for the same customer into ONE job. The EARLIER job is the real deal (it keeps its original
+// closing time, rep and history); the newer one is only where it got moved to, so its date, title and price move onto
+// the earlier job and the duplicate goes away. It refuses whenever merging could lose something:
+//  - the earlier job was actually finished (then it's a separate deal, not a reschedule),
+//  - the newer job has already been worked (arrived / paid / completed), which a merge would drop,
+//  - or the two don't look like the same customer's same booking.
+const jobPersonKey = (s) => s.contactId || String(s.customerPhone || "").replace(/\D/g, "") || String(s.customerName || "").trim().toLowerCase();
+function liveJobWorked(s) { return (!!s.status && s.status !== "pending") || !!s.paid || !!s.completed; }
+function mergeJobPair(db, req, liveId, earlierId) {
+  const live = db.sales.find((s) => s.id === liveId), earlier = db.sales.find((s) => s.id === earlierId);
+  if (!live || !earlier || live.id === earlier.id) return { status: 404, error: "Job not found." };
+  const linked = (earlier.ghlOpportunityId || "").startsWith(`${live.ghlOpportunityId}~earlier-`) && !!live.ghlOpportunityId;
+  // Same customer (or the same GHL opportunity) AND the same car and service. Sharing an opportunity alone isn't enough:
+  // a cancelled Camry job and a new BMW booking on the same opportunity are two different sales.
+  if (!((linked || (jobPersonKey(live) && jobPersonKey(live) === jobPersonKey(earlier))) && titlesMatch(live.car, earlier.car))) {
+    return { status: 409, error: "These two don't look like the same customer's same booking, so they weren't merged." };
+  }
   if (isServiced(earlier)) return { status: 409, error: "That earlier job was already completed or paid, so this is a separate deal, not a reschedule. Nothing was changed." };
+  if (liveJobWorked(live)) return { status: 409, error: "The newer job has already been worked on (arrived, paid or completed), and merging would lose that. Use \"Don't count as a new close\" instead. Nothing was changed." };
   const fromDate = earlier.date;
-  earlier.ghlOpportunityId = live.ghlOpportunityId;
+  if (live.ghlOpportunityId) earlier.ghlOpportunityId = live.ghlOpportunityId; // so later GHL events for this booking find it
   earlier.date = live.date;
   if (live.car) earlier.car = live.car;
   if (live.baseService) earlier.baseService = live.baseService;
   if ((parseFloat(live.basePrice) || 0) > 0) earlier.basePrice = live.basePrice;
-  if (earlier.status === "no_show") earlier.status = "pending";
+  if (earlier.status === "no_show" || earlier.status === "cancelled") earlier.status = "pending"; // it's a live booking again
   if (!earlier.salesRepId && live.salesRepId) { earlier.salesRepId = live.salesRepId; earlier.salesRepName = live.salesRepName; }
   if (!(earlier.employeeIds || []).length && (live.employeeIds || []).length) { earlier.employeeIds = live.employeeIds; earlier.employeeNames = live.employeeNames; }
   earlier.upsells = [...(earlier.upsells || []), ...(live.upsells || [])];
@@ -1792,6 +1824,75 @@ function mergeBackIntoEarlier(db, req, liveId) {
   logAudit(db, req, earlier, "Merged back (it was a reschedule)", fromDate.slice(0, 10), earlier.date.slice(0, 10));
   return { ok: true, id: earlier.id };
 }
+// The key-based form: the newer job holds the GHL opportunity id and the earlier one was re-keyed "~earlier-".
+function mergeBackIntoEarlier(db, req, liveId) {
+  const live = db.sales.find((s) => s.id === liveId);
+  if (!live || !live.ghlOpportunityId) return { status: 404, error: "Job not found." };
+  const earlier = db.sales.filter((s) => (s.ghlOpportunityId || "").startsWith(`${live.ghlOpportunityId}~earlier-`)).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  if (!earlier) return { status: 404, error: "There's no earlier job to merge this into." };
+  return mergeJobPair(db, req, liveId, earlier.id);
+}
+// What has been merged lately, read straight from Edit History, so "what happened to that job?" always has an answer.
+function recentMerges(db, days = 14) {
+  const cutoff = Date.now() - days * 86400000;
+  return (db.auditLog || []).filter((e) => /^Merged back/.test(e.field || "") && Date.parse(e.timestamp) >= cutoff).map((e) => {
+    const sale = db.sales.find((x) => x.id === e.saleId);
+    return { saleId: e.saleId, car: (sale && sale.car) || e.car || "", customerName: sale ? sale.customerName : "", mergedAt: e.timestamp, actor: e.actor || "", fromDate: e.oldValue, toDate: e.newValue, stillExists: !!sale };
+  });
+}
+// A safety net for anything the automatic matching still misses: recent closes where the SAME customer already has an
+// earlier, unfinished booking for the same car/service. These are what a reschedule that slipped through looks like,
+// so the owner can flag them from Cleanup in one tap. Dismissed ones (marked "not a reschedule") never come back.
+function findPossibleReschedules(db, days = 7) {
+  const cutoff = Date.now() - days * 86400000;
+  const keyOf = (s) => s.contactId || String(s.customerPhone || "").replace(/\D/g, "") || String(s.customerName || "").trim().toLowerCase();
+  const byKey = {};
+  db.sales.forEach((s) => { const k = keyOf(s); if (k) (byKey[k] = byKey[k] || []).push(s); });
+  const out = [];
+  db.sales.forEach((j) => {
+    if (j.isReschedule || j.rescheduleDismissed || j.status === "cancelled" || !j.salesRepId || !afterRevenueStart(j, db)) return;
+    const closedMs = Date.parse(j.closedAt || j.date);
+    if (!(closedMs >= cutoff)) return;
+    const k = keyOf(j);
+    if (!k) return;
+    const earlier = (byKey[k] || [])
+      .filter((e) => e.id !== j.id && !isServiced(e) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
+      .sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    if (!earlier) return;
+    const rep = db.salesReps.find((r) => r.id === j.salesRepId);
+    out.push({
+      saleId: j.id, car: j.car, customerName: j.customerName, repName: rep ? rep.name : "Removed rep", closedAt: j.closedAt || j.date, date: j.date,
+      basePrice: parseFloat(j.basePrice) || 0, status: j.status || "pending", canMerge: !liveJobWorked(j),
+      earlier: { id: earlier.id, car: earlier.car, date: earlier.date, status: earlier.status || "pending", closedAt: earlier.closedAt || earlier.date, basePrice: parseFloat(earlier.basePrice) || 0 },
+    });
+  });
+  return out.sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
+}
+// Bookings already marked as reschedules in the last month, so there's always a way to put one back.
+function recentLeftOut(db, days = 30) {
+  const cutoff = Date.now() - days * 86400000;
+  return db.sales.filter((s) => s.isReschedule && Date.parse(s.closedAt || s.date) >= cutoff).map((s) => {
+    const rep = db.salesReps.find((r) => r.id === s.salesRepId);
+    return { saleId: s.id, car: s.car, customerName: s.customerName, repName: rep ? rep.name : (s.salesRepName || "Unassigned"), closedAt: s.closedAt || s.date, date: s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending" };
+  }).sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
+}
+app.get("/api/owner/possible-reschedules", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json({ possibleReschedules: findPossibleReschedules(db), leftOut: recentLeftOut(db) });
+});
+
+// The rep tracker's way to merge two of a location's bookings. The merge function does every safety check itself.
+app.post("/api/cross-location/job-merge", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const { saleId, earlierId } = req.body || {};
+  if (!saleId || !earlierId) return res.status(400).json({ error: "Both jobs are needed." });
+  const db = loadDB();
+  req.auth = { role: "owner", id: "rep-tracker", label: "Rep tracker (owner)" };
+  const result = mergeJobPair(db, req, saleId, earlierId);
+  if (result.error) return res.status(result.status).json({ error: result.error });
+  saveDB(db);
+  res.json(result);
+});
 app.post("/api/owner/jobs/:id/merge-earlier", requireOwner, (req, res) => {
   const db = loadDB();
   const result = mergeBackIntoEarlier(db, req, req.params.id);
@@ -1824,15 +1925,11 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const jobs = db.sales.filter((s) => inRange(s.date, start, end));
-  // A job the old rule split off from an unfinished earlier one (same customer, same opportunity) - the owner can merge them back.
-  const earlierByBase = {};
-  db.sales.forEach((e) => { const k = e.ghlOpportunityId || "", i = k.indexOf("~earlier-"); if (i > 0 && (!earlierByBase[k.slice(0, i)] || e.date > earlierByBase[k.slice(0, i)].date)) earlierByBase[k.slice(0, i)] = e; });
-  const earlierFor = (s) => { const e = s.ghlOpportunityId && earlierByBase[s.ghlOpportunityId]; return e && !isServiced(e) ? { id: e.id, car: e.car, date: e.date, status: e.status || "pending" } : null; };
   const cashBySale = {};
   db.cashEntries.forEach((e) => { if (e.autoFromJob && e.saleId) cashBySale[e.saleId] = (cashBySale[e.saleId] || 0) + e.amount; });
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-    cashPaidAmount: cashBySale[s.id] || 0, earlierJob: earlierFor(s), isReschedule: !!s.isReschedule,
+    cashPaidAmount: cashBySale[s.id] || 0, isReschedule: !!s.isReschedule,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
@@ -1855,6 +1952,13 @@ function patchJobHandler(req, res) {
     const flag = !!req.body.isReschedule;
     logAudit(db, req, sale, "Reschedule (not a new close)", !!sale.isReschedule, flag);
     sale.isReschedule = flag;
+  }
+  // "Not a reschedule": the owner looked at a Cleanup suggestion and says it's a genuinely separate deal.
+  if (req.body.rescheduleDismissed !== undefined) {
+    if (req.auth.role !== "owner") return res.status(403).json({ error: "Only the owner can change this." });
+    const flag = !!req.body.rescheduleDismissed;
+    logAudit(db, req, sale, "Reschedule suggestion dismissed", !!sale.rescheduleDismissed, flag);
+    sale.rescheduleDismissed = flag;
   }
   // Manual price correction — the price GHL/sync captured isn't always final; a customer
   // can negotiate down after the fact. This flows through to every downstream number
