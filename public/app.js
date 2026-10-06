@@ -15,7 +15,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-05-edit";
+const UI_BUILD = "2026-10-06-resched";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -29,6 +29,12 @@ async function api(path, opts = {}) {
 }
 function money(n) { return "$" + (Math.round((n || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function pct(n) { return isFinite(n) ? Math.round(n) + "%" : "0%"; }
+// Today's calendar date in Eastern time. The shops run on Eastern, but toISOString() is UTC, which turns
+// into "tomorrow" around 8pm Eastern - so pickers built on it opened on an empty future day every evening.
+function easternToday() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
+
 function formatDateTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -66,12 +72,12 @@ function nearestValidPayPeriodEnd(referenceDateStr, anchorOverride) {
 
 function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) {
   let period = defaultPeriod;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = easternToday();
   const vis = (key) => (period === key ? "" : "display:none");
   const dayInput = el("input", { type: "date", value: today, style: vis("day") });
   const weekInput = el("input", { type: "date", value: today, style: vis("week") });
   const monthInput = el("input", { type: "month", value: today.slice(0, 7), style: vis("month") });
-  const yearInput = el("input", { type: "number", value: String(new Date().getFullYear()), style: vis("year") + ";max-width:100px" });
+  const yearInput = el("input", { type: "number", value: today.slice(0, 4), style: vis("year") + ";max-width:100px" });
   let payPeriodEnd = nearestValidPayPeriodEnd(today, payPeriodAnchor);
   const payPeriodLabel = el("div", { class: "muted", style: `font-size:11.5px;${vis("payperiod")}` });
   const payPeriodStepper = el("div", { style: `display:flex;gap:8px;align-items:center;${vis("payperiod")}` });
@@ -250,8 +256,211 @@ function renderLogin() {
   ]);
 }
 
+// ---------- Statistics ----------
+// The revenue cutoff used to sit as a card at the top of the Dashboard. It's still a real setting - jobs
+// dated before it are left out of every revenue and commission total - so it lives here, tucked away.
+function renderRevenueStartCard(onChanged) {
+  const input = el("input", { type: "date" });
+  const notice = el("span", { class: "muted", style: "font-size:11.5px" });
+  async function loadIt() {
+    const r = await api("/api/owner/revenue-start-date");
+    if (r.revenueStartDate) {
+      input.value = r.revenueStartDate;
+      notice.textContent = `Currently tracking revenue from ${r.revenueStartDate} onward. Everything before that is excluded from every total, but still fully visible in All Jobs.`;
+    } else {
+      input.value = "";
+      notice.textContent = "No cutoff set — every job ever entered counts toward revenue.";
+    }
+  }
+  const card = el("div", { class: "card", style: "max-width:520px" }, [
+    el("div", { class: "muted", style: "margin-bottom:8px", text: "REVENUE TRACKING START DATE — jobs before this date are excluded from every revenue and commission total everywhere, but stay completely visible in All Jobs, Search, and the schedule with their real prices intact. Nothing ever gets deleted or altered." }),
+    el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
+      input,
+      el("button", { class: "primary", text: "Set cutoff", onclick: async () => { await api("/api/owner/revenue-start-date", { method: "POST", body: JSON.stringify({ date: input.value }) }); await loadIt(); onChanged(); } }),
+      el("button", { class: "ghost", text: "Clear cutoff", onclick: async () => { await api("/api/owner/revenue-start-date", { method: "POST", body: JSON.stringify({ date: null }) }); await loadIt(); onChanged(); } }),
+    ]),
+    notice,
+  ]);
+  return { el: card, load: loadIt };
+}
+
+const STAT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function statDay(ymd, withYear) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const wd = new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+  return `${wd} ${STAT_MONTHS[m - 1]} ${d}${withYear ? ", " + y : ""}`;
+}
+function statMonth(ym) { const [y, m] = ym.split("-").map(Number); return `${STAT_MONTHS[m - 1]} ${y}`; }
+const statPct = (n) => `${(Math.round((n || 0) * 10) / 10).toFixed(1)}%`;
+const statHour = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
+const statPlural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
+
+// A small "up or down compared with the period before" line. Percent for money and counts, points for rates.
+function statDelta(cur, prev, kind, lowerIsBetter) {
+  if (prev === null || prev === undefined) return null;
+  const same = (t) => el("div", { class: "muted", style: "font-size:11px;margin-top:2px", text: t });
+  let text, good;
+  if (kind === "points") {
+    const diff = cur - prev;
+    if (Math.abs(diff) < 0.05) return same("no change vs previous");
+    text = `${diff > 0 ? "▲" : "▼"} ${(Math.round(Math.abs(diff) * 10) / 10).toFixed(1)} pts vs previous`;
+    good = lowerIsBetter ? diff < 0 : diff > 0;
+  } else if (prev === 0) {
+    if (cur === 0) return null;
+    text = "▲ new vs previous"; good = !lowerIsBetter;
+  } else {
+    const pct = ((cur - prev) / prev) * 100;
+    if (Math.abs(pct) < 0.05) return same("no change vs previous");
+    text = `${pct > 0 ? "▲" : "▼"} ${(Math.round(Math.abs(pct) * 10) / 10).toFixed(1)}% vs previous`;
+    good = lowerIsBetter ? pct < 0 : pct > 0;
+  }
+  return el("div", { style: `font-size:11px;margin-top:2px;color:${good ? "var(--green)" : "var(--red)"}`, text });
+}
+function statTile(label, value, opts = {}) {
+  return el("div", { class: "metric" }, [
+    el("div", { class: "metric-label", text: label }),
+    el("div", { class: "metric-value", style: opts.color ? `color:${opts.color}` : "", text: value }),
+    opts.sub ? el("div", { class: "muted", style: "font-size:11px;margin-top:2px", text: opts.sub }) : null,
+    opts.delta || null,
+  ]);
+}
+function statTable(headers, rows) {
+  if (rows.length === 0) return el("div", { class: "muted", style: "font-size:12px", text: "Nothing in this period." });
+  const tpl = `grid-template-columns:minmax(0,1.6fr) repeat(${headers.length - 1},minmax(0,1fr))`;
+  const line = (cells, head) => el("div", { style: `display:grid;${tpl};gap:8px;align-items:center;padding:6px 0;${head ? "color:var(--sub);font-size:10.5px;" : "border-top:0.5px solid var(--border);font-size:12.5px;"}` },
+    cells.map((c, i) => el("div", { style: `${i ? "text-align:right;" : ""}${!head && i ? "font-family:'JetBrains Mono',monospace;" : ""}overflow:hidden;text-overflow:ellipsis`, text: c })));
+  return el("div", {}, [line(headers, true), ...rows.map((r) => line(r))]);
+}
+function statSection(title, ...children) {
+  return el("div", { class: "card", style: "margin-bottom:14px" }, [el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em;margin-bottom:8px", text: title }), ...children]);
+}
+
+async function renderStatistics(content) {
+  let allTime = false, latestRequestId = 0, lastParams = null;
+  const picker = renderPeriodPicker((params) => { allTime = false; syncAll(); load(params); }, "month");
+  const allBtn = el("button", { class: "ghost", text: "All time", onclick: () => { allTime = true; syncAll(); load({ period: "all" }); } });
+  const syncAll = () => { allBtn.className = allTime ? "primary" : "ghost"; };
+  const recordsWrap = el("div");
+  const periodLine = el("div", { class: "muted", style: "font-size:12px;margin:8px 0 12px" });
+  const body = el("div");
+  const revenueCard = renderRevenueStartCard(() => load(lastParams));
+  const advBody = el("div", { style: "display:none;margin-top:10px" }, [revenueCard.el]);
+  const advBtn = el("button", { class: "ghost", text: "Advanced ▸", onclick: () => {
+    const open = advBody.style.display !== "none";
+    advBody.style.display = open ? "none" : "block";
+    advBtn.textContent = open ? "Advanced ▸" : "Advanced ▾";
+  } });
+
+  function renderRecords(r) {
+    const cols = [["week", "This week"], ["month", "This month"], ["year", "This year"], ["all", "All time"]];
+    const cell = (when, main, sub) => el("div", { style: "min-width:0" }, [
+      el("div", { class: "muted", style: "font-size:10.5px", text: when }),
+      el("div", { class: "mono", style: "font-size:16px;font-weight:600", text: main }),
+      el("div", { class: "muted", style: "font-size:11px", text: sub }),
+    ]);
+    const grid = (cells) => el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px" }, cells);
+    const dayRow = (map, mainFn, subFn) => grid(cols.map(([k, label]) => (map[k] ? cell(label, mainFn(map[k]), subFn(map[k])) : cell(label, "—", "nothing yet"))));
+    recordsWrap.innerHTML = "";
+    recordsWrap.appendChild(statSection("BEST DAY SO FAR · MONEY COLLECTED", dayRow(r.bestDayCollected, (x) => money(x.revenue), (x) => `${statDay(x.day, true)} · ${statPlural(x.cars, "car")}`)));
+    recordsWrap.appendChild(statSection("BEST DAY SO FAR · CARS SERVICED", dayRow(r.bestDayCars, (x) => statPlural(x.cars, "car"), (x) => `${statDay(x.day, true)} · ${money(x.revenue)}`)));
+    recordsWrap.appendChild(statSection("BEST DAY SO FAR · DEALS CLOSED (VALUE)", dayRow(r.bestDayClosed, (x) => money(x.value), (x) => `${statDay(x.day, true)} · ${statPlural(x.count, "deal")}`)));
+    const bucket = (b, subFn) => (b ? [money(b.revenue), subFn(b)] : ["—", "nothing yet"]);
+    recordsWrap.appendChild(statSection("BEST WEEK AND MONTH · MONEY COLLECTED", grid([
+      cell("Best week this year", ...bucket(r.bestWeek.year, (b) => `Week of ${statDay(b.key)}`)), cell("Best week ever", ...bucket(r.bestWeek.all, (b) => `Week of ${statDay(b.key, true)}`)),
+      cell("Best month this year", ...bucket(r.bestMonth.year, (b) => statMonth(b.key))), cell("Best month ever", ...bucket(r.bestMonth.all, (b) => statMonth(b.key))),
+    ])));
+  }
+
+  function renderBody(d) {
+    body.innerHTML = "";
+    const h = d.headline, p = d.previous, pv = (k) => (p ? p[k] : null);
+    const range = d.period.key === "all" ? `All time (${statDay(d.period.start, true)} to today)` : d.period.start === d.period.end ? statDay(d.period.start, true) : `${statDay(d.period.start, true)} to ${statDay(d.period.end, true)}`;
+    periodLine.textContent = `${range}${p ? " · compared with the period before it" : ""}`;
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      statTile("Money collected", money(h.revenue), { sub: `${statPlural(h.paidJobs, "paid job")}`, delta: statDelta(h.revenue, pv("revenue")), color: "var(--green)" }),
+      statTile("Cars serviced", String(h.carsServiced), { delta: statDelta(h.carsServiced, pv("carsServiced")) }),
+      statTile("Average ticket", money(h.avgTicket), { sub: "per paid job", delta: statDelta(h.avgTicket, pv("avgTicket")) }),
+      statTile("Deals closed", String(h.dealsClosed), { sub: `avg ${money(h.avgDeal)}`, delta: statDelta(h.dealsClosed, pv("dealsClosed")), color: "var(--cyan)" }),
+      statTile("Closed value", money(h.dealValue), { sub: "base price of deals closed", delta: statDelta(h.dealValue, pv("dealValue")), color: "var(--amber)" }),
+      statTile("Upsell revenue", money(h.upsellRevenue), { sub: `${statPct(h.upsellPercent)} of money collected`, delta: statDelta(h.upsellRevenue, pv("upsellRevenue")) }),
+      statTile("Upsell attach rate", statPct(h.attachRate), { sub: "serviced cars with an upsell", delta: statDelta(h.attachRate, pv("attachRate"), "points") }),
+      statTile("No-show rate", statPct(h.noShowRate), { sub: `${h.noShow} no-show, ${h.arrived} arrived`, delta: statDelta(h.noShowRate, pv("noShowRate"), "points", true) }),
+      statTile("Cancelled", String(h.cancelled), { sub: `${statPct(h.cancelRate)} of those booked`, delta: statDelta(h.cancelRate, pv("cancelRate"), "points", true) }),
+      statTile("Still to show", money(h.pendingValue), { sub: statPlural(h.pendingJobs, "booked job") }),
+      statTile("Walk-in money", money(h.walkInRevenue), { delta: statDelta(h.walkInRevenue, pv("walkInRevenue")) }),
+      statTile("Online-booking money", money(h.onlineRevenue), { delta: statDelta(h.onlineRevenue, pv("onlineRevenue")) }),
+      statTile("Tips", money(h.tips), { delta: statDelta(h.tips, pv("tips")) }),
+      statTile("Expenses logged", money(d.cash.expensesTotal), { sub: "from Cash & Expenses", color: "var(--red)" }),
+      statTile("Collected minus expenses", money(d.cash.collectedMinusExpenses), { sub: "before pay and commissions", color: d.cash.collectedMinusExpenses < 0 ? "var(--red)" : "var(--green)" }),
+      statTile("Booked this far ahead", `${(Math.round(d.leadTime.avgDays * 10) / 10).toFixed(1)} days`, { sub: `${statPct(d.leadTime.sameDayPercent)} booked the same day` }),
+    ]));
+
+    // Money and cars over time
+    const pts = d.trend.points, top = Math.max(1, ...pts.map((x) => x.revenue));
+    const unitName = { day: "day", week: "week", month: "month" }[d.trend.unit];
+    const label = (x) => (d.trend.unit === "month" ? statMonth(x.key) : d.trend.unit === "week" ? `Week of ${statDay(x.key)}` : statDay(x.key));
+    body.appendChild(statSection(`MONEY COLLECTED BY ${unitName.toUpperCase()}`,
+      el("div", { style: "display:flex;align-items:flex-end;gap:3px;height:120px;overflow-x:auto;padding-bottom:4px" }, pts.map((x) => el("div", {
+        title: `${label(x)}: ${money(x.revenue)} · ${statPlural(x.cars, "car")}`, "data-bar": x.key,
+        style: `flex:1 0 ${pts.length > 40 ? 6 : 14}px;background:var(--green);height:${Math.max(2, (x.revenue / top) * 100)}%;border-radius:3px 3px 0 0;opacity:${x.revenue ? 1 : 0.25}`,
+      }))),
+      el("div", { class: "muted", style: "font-size:11px;margin-top:6px", text: pts.length ? `${pts.length} ${unitName}${pts.length === 1 ? "" : "s"} · ${label(pts[0])} to ${label(pts[pts.length - 1])} · tallest bar ${money(top === 1 && !pts.some((x) => x.revenue) ? 0 : top)}` : "No data yet." })));
+
+    body.appendChild(statSection("BY SERVICE", statTable(["Service", "Jobs", "Money", "Avg ticket", "Share"], d.byService.map((x) => [x.service, String(x.jobs), money(x.revenue), money(x.avgTicket), statPct(x.share)]))));
+    body.appendChild(statSection("SALES REPS · RANKED BY VALUE CLOSED", statTable(["Rep", "Deals", "Closed", "Showed", "Show rate", "Commission"], d.bySalesRep.map((x) => [x.name, String(x.dealsClosed), money(x.dealValue), String(x.showed), x.showRate === null ? "—" : statPct(x.showRate), money(x.commission)]))));
+    body.appendChild(statSection("TECHS AND MANAGERS", statTable(["Name", "Role", "Cars", "Upsells", "Upsell $"], d.people.map((x) => [x.name, x.role, String(x.carsCompleted), String(x.upsells), money(x.upsellRevenue)]))));
+
+    const busiest = d.byDayOfWeek.reduce((a, x) => (x.avgRevenue > (a ? a.avgRevenue : -1) ? x : a), null);
+    body.appendChild(statSection("DAY OF THE WEEK", statTable(["Day", "Jobs", "Money", "Avg per day", "Cars"], d.byDayOfWeek.map((x) => [x.day + (busiest && busiest.avgRevenue > 0 && x.day === busiest.day ? "  ★ busiest" : ""), String(x.jobs), money(x.revenue), money(x.avgRevenue), String(x.cars)])),
+      el("div", { class: "muted", style: "font-size:11px;margin-top:6px", text: "The average divides by how many of that weekday fell in the period, so five Saturdays don't make Saturday look busier." })));
+    const hmax = Math.max(1, ...d.byHour.map((x) => x.jobs));
+    body.appendChild(statSection("WHAT TIME CARS COME IN", d.byHour.length === 0 ? el("div", { class: "muted", style: "font-size:12px", text: "Nothing in this period." }) : el("div", {}, d.byHour.map((x) => el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:3px" }, [
+      el("span", { class: "muted", style: "font-size:11px;width:54px", text: statHour(x.hour) }),
+      el("div", { style: "flex:1;background:var(--panel);border-radius:4px;height:12px" }, [el("div", { style: `background:var(--cyan);height:100%;border-radius:4px;width:${(x.jobs / hmax) * 100}%` })]),
+      el("span", { class: "mono", style: "font-size:11px;width:24px;text-align:right", text: String(x.jobs) }),
+    ])))));
+    body.appendChild(statSection("HOW PEOPLE PAY", statTable(["Method", "Jobs", "Money"], d.paymentMix.map((x) => [{ cash: "Cash", card: "Card", both: "Cash + card", unknown: "Not recorded" }[x.method] || x.method, String(x.jobs), money(x.revenue)]))));
+    body.appendChild(statSection("TOP UPSELLS", statTable(["Upsell", "Sold", "Money"], d.topUpsells.map((x) => [x.name, String(x.count), money(x.revenue)]))));
+    body.appendChild(statSection("CUSTOMERS",
+      statTable(["", "Jobs", "Share"], d.customers.jobs ? [["From new customers", String(d.customers.newJobs), statPct(100 - d.customers.returningPercent)], ["From returning customers", String(d.customers.returningJobs), statPct(d.customers.returningPercent)]] : []),
+      el("div", { class: "muted", style: "font-size:11px;margin-top:6px", text: `Ever: ${statPlural(d.customers.allTimeCustomers, "customer")}, ${d.customers.allTimeRepeatCustomers} of them came back for a second job.` })));
+    body.appendChild(statSection("CASH AND EXPENSES",
+      statTable(["", "Amount"], [["Customer cash logged", money(d.cash.customerCashLogged)], ["Expenses logged", money(d.cash.expensesTotal)], ["Money collected minus expenses", money(d.cash.collectedMinusExpenses)]]),
+      d.cash.expensesByCategory.length ? el("div", { style: "margin-top:8px" }, [statTable(["Expense category", "Entries", "Total"], d.cash.expensesByCategory.map((x) => [x.category, String(x.entries), money(x.total)]))]) : null));
+
+    body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin:4px 0 10px", text: "Money collected means jobs marked paid, counted on the day of the appointment, never counting cancelled jobs: the same as the Dashboard's Total revenue. Records only count days up to today." }));
+    if (d.cutoff) body.appendChild(el("div", { style: "font-size:12px;color:var(--amber);margin-bottom:10px", text: `Counting jobs from ${d.cutoff} onward only (the revenue start date). Change it under Advanced below.` }));
+  }
+
+  async function load(params) {
+    const p = params || lastParams || picker.getParams();
+    lastParams = p;
+    const thisId = ++latestRequestId;
+    let d;
+    try { d = await api("/api/owner/statistics?" + new URLSearchParams(p).toString()); }
+    catch (e) {
+      if (thisId !== latestRequestId) return;
+      body.innerHTML = "";
+      body.appendChild(el("div", { class: "notice err", text: `Couldn't load the statistics: ${e.message || "something went wrong"}. Change the period or reload to try again.` }));
+      return;
+    }
+    if (thisId !== latestRequestId) return; // a newer request already won
+    renderRecords(d.records);
+    renderBody(d);
+  }
+
+  content.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px", text: "This location only. Pick a period for the numbers below; the best-day records at the top are always all-time." }));
+  content.appendChild(recordsWrap);
+  content.appendChild(picker.el);
+  content.appendChild(el("div", { style: "margin-bottom:4px" }, [allBtn]));
+  content.appendChild(periodLine);
+  content.appendChild(body);
+  content.appendChild(el("div", { style: "margin-top:6px" }, [advBtn, advBody]));
+  await Promise.all([load(), revenueCard.load()]);
+}
+
 const TAB_ICONS = {
-  "owner-summary": "📊", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
+  "owner-summary": "📊", "owner-stats": "📈", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
   "owner-serviced": "✅", "owner-audit": "🕐", "owner-edit-history": "📝",
   "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
   "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
@@ -262,7 +471,7 @@ const TAB_ICONS = {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
     allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"]];
@@ -641,6 +850,7 @@ async function renderSalesTabContent(content) {
 }
 
 async function renderOwnerTabContent(content) {
+  if (currentTab === "owner-stats") return renderStatistics(content);
   if (currentTab === "owner-sales") return renderOwnerSales(content);
   if (currentTab === "owner-serviced") return renderServicedCars(content);
   if (currentTab === "owner-arrived") return renderCarsArrived(content);
@@ -978,35 +1188,6 @@ function openPrintableReport(title, s, periodLabel) {
   cloudStatus.appendChild(cloudStatusText);
   cloudStatus.appendChild(backupNowBtn);
 
-  const revenueStartInput = el("input", { type: "date" });
-  const revenueStartNotice = el("span", { class: "muted", style: "font-size:11.5px" });
-  async function loadRevenueStart() {
-    const r = await api("/api/owner/revenue-start-date");
-    if (r.revenueStartDate) {
-      revenueStartInput.value = r.revenueStartDate;
-      revenueStartNotice.textContent = `Currently tracking revenue from ${r.revenueStartDate} onward. Everything before that is excluded from every total, but still fully visible in All Jobs.`;
-    } else {
-      revenueStartNotice.textContent = "No cutoff set — every job ever entered counts toward revenue.";
-    }
-  }
-  const revenueStartRow = el("div", { class: "card", style: "max-width:520px;margin-bottom:14px" }, [
-    el("div", { class: "muted", style: "margin-bottom:8px", text: "REVENUE TRACKING START DATE — jobs before this date are excluded from every revenue and commission total everywhere, but stay completely visible in All Jobs, Search, and the schedule with their real prices intact. Nothing ever gets deleted or altered." }),
-    el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
-      revenueStartInput,
-      el("button", { class: "primary", onclick: async () => {
-        await api("/api/owner/revenue-start-date", { method: "POST", body: JSON.stringify({ date: revenueStartInput.value }) });
-        await loadRevenueStart();
-        load();
-      }, text: "Set cutoff" }),
-      el("button", { class: "ghost", onclick: async () => {
-        await api("/api/owner/revenue-start-date", { method: "POST", body: JSON.stringify({ date: null }) });
-        revenueStartInput.value = "";
-        await loadRevenueStart();
-        load();
-      }, text: "Clear cutoff" }),
-    ]),
-    revenueStartNotice,
-  ]);
 
   async function renderOwnerSummary(content) {
   const body = el("div");
@@ -1100,12 +1281,10 @@ function openPrintableReport(title, s, periodLabel) {
   }
   content.appendChild(picker.el);
   content.appendChild(actions);
-  content.appendChild(revenueStartRow);
   content.appendChild(cloudStatus);
   content.appendChild(body);
   await load();
   await loadCloudStatus();
-  await loadRevenueStart();
 }
 
 function sameLocalDay(d1, d2) {
@@ -2709,7 +2888,7 @@ async function renderManagerPerformance(content) {
 
 // ---------------- Manager job-status board (used by both manager and owner) ----------------
 function renderDayNav(onChange) {
-  const dateInput = el("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
+  const dateInput = el("input", { type: "date", value: easternToday() });
   function fire() { onChange({ period: "day", date: dateInput.value }); }
   function shift(delta) {
     const d = new Date(dateInput.value + "T00:00:00Z");
@@ -2722,7 +2901,7 @@ function renderDayNav(onChange) {
   const next = el("button", { class: "ghost", text: "Next day >" });
   next.addEventListener("click", () => shift(1));
   const todayBtn = el("button", { class: "ghost", text: "Today" });
-  todayBtn.addEventListener("click", () => { dateInput.value = new Date().toISOString().slice(0, 10); fire(); });
+  todayBtn.addEventListener("click", () => { dateInput.value = easternToday(); fire(); });
   dateInput.addEventListener("change", fire);
   const wrap = el("div", { style: "display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap" }, [prev, dateInput, next, todayBtn]);
   return { el: wrap, getParams: () => ({ period: "day", date: dateInput.value }) };
@@ -3099,6 +3278,15 @@ async function renderManagerJobs(content) {
           session.role === "owner" ? el("button", { class: "ghost", style: "font-size:11px;padding:4px 10px", onclick: () => { splitNotice.textContent = ""; splitPanel.style.display = splitPanel.style.display === "none" ? "block" : "none"; }, text: "⎘ Split off earlier appointment" }) : null,
         ]),
         looksOverwritten ? el("div", { style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--red);border-radius:8px;color:var(--red);font-size:11.5px", text: "⚠ Marked as done, but the appointment is in the future. A newer booking may have overwritten an earlier job." + (session.role === "owner" ? " Use “Split off earlier appointment” to separate them." : " Ask the owner to check it.") }) : null,
+        // A job the old rule split off from an unfinished earlier one - if it's really just a reschedule, merge it back.
+        session.role === "owner" && job.earlierJob ? el("div", { style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--amber);border-radius:8px;font-size:11.5px" }, [
+          el("div", { text: `This job was split off from an earlier one for the same customer (${job.earlierJob.car}, ${formatDateTime(job.earlierJob.date)}, ${job.earlierJob.status}). If it's really just a reschedule, merge them back so it keeps the original closing time and doesn't count as a new close today.` }),
+          el("button", { class: "ghost", style: "margin-top:6px", text: "Merge back into the earlier job", onclick: async () => {
+            if (!confirm(`Merge this back into the earlier job (${job.earlierJob.car})? It keeps its original closing time, and this duplicate goes away.`)) return;
+            try { await api(`/api/owner/jobs/${job.id}/merge-earlier`, { method: "POST" }); load(); }
+            catch (err) { alert(err.message || "Couldn't merge these."); }
+          } }),
+        ]) : null,
         session.role === "owner" ? splitPanel : null,
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
         el("div", { style: "margin-bottom:10px" }, [
