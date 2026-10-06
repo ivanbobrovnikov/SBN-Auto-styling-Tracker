@@ -15,7 +15,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-06-resflag";
+const UI_BUILD = "2026-10-06-resched3";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1787,13 +1787,9 @@ async function renderCommissionAudit(content) {
           ]),
           el("div", { style: "text-align:right" }, [
             el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
-            el("button", { class: "ghost", style: "font-size:10px;padding:2px 7px;margin-top:4px", text: "Count as a close", onclick: async () => {
-              try { await api(`/api/manager/jobs/${c.saleId}`, { method: "PATCH", body: JSON.stringify({ isReschedule: false }) }); load(); }
-              catch (err) { alert(err.message || "Couldn't change that."); }
-            } }),
           ]),
         ])));
-        const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} rescheduled booking${n !== 1 ? "s" : ""} left out of closing activity (still paid when the client shows)`;
+        const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} rescheduled booking${n !== 1 ? "s" : ""} left out of closing activity (still paid when the client shows). Change it in the rep tracker's Cleanup tab.`;
         const toggle = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12px;margin-top:8px;color:var(--amber)", text: label(false), onclick: () => {
           const open = list.style.display !== "none";
           list.style.display = open ? "none" : "block";
@@ -1814,11 +1810,6 @@ async function renderCommissionAudit(content) {
                   ? el("div", { class: "mono", style: "color:var(--red);font-weight:600", text: "$0 — fix in Cleanup" })
                   : el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
                 el("div", { class: "muted", style: "font-size:10px", text: c.status === "arrived" ? "Arrived" : c.status === "no_show" ? "No-show" : "Pending" }),
-                el("button", { class: "ghost", style: "font-size:10px;padding:2px 7px;margin-top:4px", text: "↻ Reschedule: don't count", onclick: async () => {
-                  if (!confirm("Mark this as a reschedule?\n\nIt will be left out of the Commission Audit closing activity (and the closing numbers in the rep tracker and Statistics), because it's the same deal moved to a new day, not a new sale.\n\nIt stays fully in Payroll: the rep is still paid commission when the client shows up. You can undo this any time.")) return;
-                  try { await api(`/api/manager/jobs/${c.saleId}`, { method: "PATCH", body: JSON.stringify({ isReschedule: true }) }); load(); }
-                  catch (err) { alert(err.message || "Couldn't change that."); }
-                } }),
               ]),
             ])));
             const toggleBtn = el("button", {
@@ -3307,28 +3298,6 @@ async function renderManagerJobs(content) {
           session.role === "owner" ? el("button", { class: "ghost", style: "font-size:11px;padding:4px 10px", onclick: () => { splitNotice.textContent = ""; splitPanel.style.display = splitPanel.style.display === "none" ? "block" : "none"; }, text: "⎘ Split off earlier appointment" }) : null,
         ]),
         looksOverwritten ? el("div", { style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--red);border-radius:8px;color:var(--red);font-size:11.5px", text: "⚠ Marked as done, but the appointment is in the future. A newer booking may have overwritten an earlier job." + (session.role === "owner" ? " Use “Split off earlier appointment” to separate them." : " Ask the owner to check it.") }) : null,
-        // "This is a reschedule, not a new close": off the closing numbers, never off payroll. Reversible.
-        session.role === "owner" ? (() => {
-          const on = !!job.isReschedule;
-          return el("div", { style: "margin-bottom:10px" }, [el("button", {
-            class: "tab-btn" + (on ? " active" : ""), style: on ? "border-color:var(--amber);color:var(--amber)" : "",
-            text: on ? "↻ Reschedule: not counted as a close (tap to undo)" : "↻ This is a reschedule: don't count it as a new close",
-            onclick: async () => {
-              if (!confirm(on ? "Count this as a close again?" : "Mark this as a reschedule?\n\nIt will be left out of the Commission Audit closing activity (and the closing numbers in the rep tracker and Statistics), because it's the same deal moved to a new day, not a new sale.\n\nIt stays fully in Payroll: the rep is still paid commission when the client shows up. You can undo this any time.")) return;
-              try { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ isReschedule: !on }) }); load(); }
-              catch (err) { alert(err.message || "Couldn't change that."); }
-            },
-          })]);
-        })() : null,
-        // A job the old rule split off from an unfinished earlier one - if it's really just a reschedule, merge it back.
-        session.role === "owner" && job.earlierJob ? el("div", { style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--amber);border-radius:8px;font-size:11.5px" }, [
-          el("div", { text: `This job was split off from an earlier one for the same customer (${job.earlierJob.car}, ${formatDateTime(job.earlierJob.date)}, ${job.earlierJob.status}). If it's really just a reschedule, merge them back so it keeps the original closing time and doesn't count as a new close today.` }),
-          el("button", { class: "ghost", style: "margin-top:6px", text: "Merge back into the earlier job", onclick: async () => {
-            if (!confirm(`Merge this back into the earlier job (${job.earlierJob.car})? It keeps its original closing time, and this duplicate goes away.`)) return;
-            try { await api(`/api/owner/jobs/${job.id}/merge-earlier`, { method: "POST" }); load(); }
-            catch (err) { alert(err.message || "Couldn't merge these."); }
-          } }),
-        ]) : null,
         session.role === "owner" ? splitPanel : null,
         el("div", { style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
         el("div", { style: "margin-bottom:10px" }, [
