@@ -15,7 +15,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-06-pick";
+const UI_BUILD = "2026-10-06-board";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -210,6 +210,7 @@ function render() {
   const content = el("div", { id: "content" });
   app.appendChild(content);
   app.appendChild(renderBottomNav());
+  app.classList.remove("app-wide"); // every screen starts at the normal width; Job Status widens itself
   if (session.role === "owner") renderOwnerTabContent(content);
   else if (session.role === "manager") renderManagerTabContent(content);
   else if (session.role === "sales") renderSalesTabContent(content);
@@ -3006,18 +3007,15 @@ function isoToEasternLocal(iso) {
 }
 
 async function renderManagerJobs(content) {
-  // One time-ordered list of compact rows (not three tall columns), so any appointment is a glance away.
-  const listEl = el("div", { class: "appt-list" });
-  const clearAll = () => {
-    const h = listEl.offsetHeight; // hold the height steady across the rebuild so the page never jumps to the top
-    if (h > 0) listEl.style.minHeight = h + "px";
-    listEl.innerHTML = "";
-    requestAnimationFrame(() => requestAnimationFrame(() => { listEl.style.minHeight = ""; }));
-  };
-  const rows = []; // { job, el } for every appointment drawn
-  const openIds = new Set(); // which appointments are expanded - remembered across the refresh that follows every tap
+  // The board next to its panel needs room, so this one screen may use the full width of a computer or tablet.
+  document.getElementById("app").classList.add("app-wide");
+  // Status board + list, with one permanent panel for the selected job (its notes sit on the right).
+  const entries = []; // one per appointment: { job, panel, board, row, col }
+  let selectedId = null, panelOpen = false, panelTab = "job", boardTab = "coming", outOpen = false, lastRenderedId = null;
+  const editOpen = new Set(); // jobs whose "Edit details" is open - remembered across the refresh that follows every tap
+  let view = (() => { try { return localStorage.getItem("jobsView") === "list" ? "list" : "board"; } catch (e) { return "board"; } })();
   const filt = { text: "", status: "all", service: "all" };
-  let lastDay = null, didAutoScroll = false;
+  let lastDay = null, didAutoScroll = false, latestLoadId = 0;
   const tagPart = (name, node) => { node.setAttribute("data-part", name); return node; };
   const emptyMsg = el("div", { class: "muted", style: "display:none", text: "No jobs on this day." });
   const employees = await api("/api/manager/employees");
@@ -3075,70 +3073,143 @@ async function renderManagerJobs(content) {
   ]));
 
 
-  // ---------- compact appointment rows ----------
-  const composeApptRow = (job, builtCard, cardStyle) => {
-    const kids = Array.from(builtCard.children);
-    const part = (n) => kids.filter((k) => k.getAttribute("data-part") === n);
-    const main = kids.filter((k) => !k.getAttribute("data-part"));
-    // The things used all day (status, payment, techs, upsells, photos, notes) come first. The things changed rarely
-    // (title, service, price, date/time, rep, cancel/delete) wait behind one button.
-    const editWrap = el("div", { style: "display:none;margin-top:10px;padding:10px 12px;border:0.5px dashed var(--border);border-radius:8px" }, part("edit"));
-    const EDIT_LABEL = "✎ Edit details (title, service, price, time, rep, cancel / delete)";
-    const editBtn = el("button", { class: "ghost", style: "margin-top:10px;font-size:12px", text: EDIT_LABEL, onclick: () => {
-      const show = editWrap.style.display === "none";
-      editWrap.style.display = show ? "block" : "none";
-      editBtn.textContent = show ? "✕ Hide edit details" : EDIT_LABEL;
-    } });
-    const body = el("div", { class: "appt-body", style: "margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px;" + (openIds.has(job.id) ? "" : "display:none") },
-      [...part("warn"), ...part("head"), ...main, editBtn, editWrap]);
-
+  // ---------- columns ----------
+  const columnOf = (j) => (j.status === "no_show" || j.status === "cancelled") ? "out" : (j.completed && j.paid) ? "done" : j.status === "arrived" ? "here" : "coming";
+  const jobTags = (job, withStatus) => {
     const d = new Date(job.date);
-    const time = isNaN(d.getTime()) ? "" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-    const chip = (text, color) => el("span", { class: "appt-tag", style: `border-color:${color};color:${color}`, text });
-    const tags = [];
-    if (job.status === "cancelled") tags.push(chip("CANCELLED", "var(--red)"));
-    else if (job.status === "no_show") tags.push(chip("NO-SHOW", "var(--red)"));
-    else if (job.status === "unconfirmed") tags.push(chip("UNCONFIRMED", "var(--amber)"));
-    else if (job.status === "arrived") tags.push(chip("HERE", "var(--green)"));
-    else tags.push(chip("UPCOMING", "var(--sub)"));
-    if (job.completed) tags.push(chip("DONE", "var(--green)"));
-    if (job.paid) tags.push(chip("PAID", "var(--green)"));
-    else if ((job.status === "arrived" || job.completed) && job.status !== "no_show" && job.status !== "cancelled") tags.push(chip("UNPAID", "var(--red)"));
-    if (!(job.basePrice > 0)) tags.push(chip("NO PRICE", "var(--red)"));
-    if (job.status === "arrived" && (!job.employeeNames || job.employeeNames === "Unassigned")) tags.push(chip("NO TECH", "var(--red)"));
-    if ((job.status === "arrived" || job.status === "no_show" || job.paid || job.completed) && d.getTime() > Date.now() + 6 * 3600 * 1000) tags.push(chip("⚠ CHECK DATE", "var(--red)"));
-    const canQuickArrive = !["arrived", "no_show", "cancelled"].includes(job.status);
-    const serviceShort = { "Window Tint": "Tint", "Ceramic Coating": "Ceramic", "PPF": "PPF" }[serviceColumnFor(job.baseService)];
-    const summary = el("div", { class: "appt-sum" }, [
-      el("div", { class: "row", style: "align-items:flex-start" }, [
-        el("div", { style: "min-width:0;flex:1" }, [
-          el("div", { style: "display:flex;gap:8px;align-items:baseline" }, [
-            el("span", { class: "mono", style: "font-weight:600;flex:0 0 auto", text: time }),
-            el("span", { class: "appt-title", style: "font-weight:500", text: job.car || "(no title)" }),
-            el("span", { class: "appt-first", style: "flex:0 0 auto" }),
-          ]),
-          el("div", { class: "muted", style: "font-size:12px;margin-top:2px", text: [job.customerName, job.employeeNames && job.employeeNames !== "Unassigned" ? job.employeeNames : null, serviceShort].filter(Boolean).join(" · ") }),
-        ]),
-        el("div", { style: "text-align:right;flex:0 0 auto" }, [
-          el("div", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(job.total) }),
-          canQuickArrive ? el("button", { class: "tab-btn", style: "margin-top:4px;padding:5px 10px;font-size:12px", onclick: async (ev) => {
-            ev.stopPropagation();
-            await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ status: "arrived" }) });
-            load();
-          }, text: "Arrived" }) : null,
-        ]),
-      ]),
-      el("div", { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:6px" }, tags),
-    ]);
-    summary.addEventListener("click", () => {
-      const open = body.style.display === "none";
-      body.style.display = open ? "" : "none";
-      if (open) openIds.add(job.id); else openIds.delete(job.id);
-    });
-    return el("div", { class: "card appt", "data-job-id": job.id, style: (cardStyle || "") + ";padding:10px 12px;margin-bottom:8px" }, [summary, body]);
+    const tag = (text, color) => el("span", { class: "appt-tag", style: `border-color:${color};color:${color}`, text });
+    const out = [];
+    if (job.status === "cancelled") out.push(tag("CANCELLED", "var(--red)"));
+    else if (job.status === "no_show") out.push(tag("NO-SHOW", "var(--red)"));
+    else if (job.status === "unconfirmed") out.push(tag("UNCONFIRMED", "var(--amber)"));
+    else if (withStatus) out.push(tag(job.status === "arrived" ? "HERE" : "UPCOMING", job.status === "arrived" ? "var(--green)" : "var(--sub)"));
+    if (job.completed) out.push(tag("DONE", "var(--green)"));
+    if (job.paid) out.push(tag("PAID", "var(--green)"));
+    else if ((job.status === "arrived" || job.completed) && job.status !== "no_show" && job.status !== "cancelled") out.push(tag("UNPAID", "var(--red)"));
+    if (!(job.basePrice > 0)) out.push(tag("NO PRICE", "var(--red)"));
+    if (job.status === "arrived" && (!job.employeeNames || job.employeeNames === "Unassigned")) out.push(tag("NO TECH", "var(--red)"));
+    if ((job.status === "arrived" || job.status === "no_show" || job.paid || job.completed) && d.getTime() > Date.now() + 6 * 3600 * 1000) out.push(tag("⚠ CHECK DATE", "var(--red)"));
+    return out;
   };
 
-  // ---------- the sticky search + filter bar ----------
+  // ---------- the panel for the selected job ----------
+  const panelHost = el("div", { class: "jp-host" });
+  const placeholder = el("div", { class: "jp-panel muted", style: "text-align:center;padding:30px 16px", text: "Select an appointment to see its details and notes here." });
+  const renderPanel = () => {
+    const keep = panelHost.scrollTop;
+    const e = entries.find((x) => x.job.id === selectedId);
+    panelHost.innerHTML = "";
+    if (!e) { panelHost.appendChild(placeholder); panelHost.classList.remove("open"); lastRenderedId = null; return; }
+    e.panel.className = `jp-panel tab-${panelTab}`;
+    panelHost.appendChild(e.panel);
+    panelHost.classList.toggle("open", panelOpen);
+    entries.forEach((x) => { x.board.classList.toggle("sel", x === e); x.row.classList.toggle("sel", x === e); });
+    panelHost.scrollTop = lastRenderedId === selectedId ? keep : 0; // stay put across a refresh, start at the top for a different job
+    lastRenderedId = selectedId;
+  };
+  const select = (id) => { selectedId = id; panelOpen = true; renderPanel(); };
+  const focusPayment = (id) => {
+    const e = entries.find((x) => x.job.id === id);
+    if (!e) return;
+    panelTab = "job";
+    e.panel.className = "jp-panel tab-job";
+    const row = e.panel.querySelector('[data-part="actions"]');
+    if (row) { row.classList.add("jp-flash"); if (row.scrollIntoView) row.scrollIntoView({ block: "center" }); setTimeout(() => row.classList.remove("jp-flash"), 1600); }
+  };
+
+  const makeCard = (job, cardStyle, kind) => {
+    const d = new Date(job.date);
+    const time = isNaN(d.getTime()) ? "" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    const col = columnOf(job);
+    const needsPay = !job.paid && (job.status === "arrived" || job.completed) && col !== "out";
+    const serviceShort = { "Window Tint": "Tint", "Ceramic Coating": "Ceramic", "PPF": "PPF" }[serviceColumnFor(job.baseService)];
+    const quick = col === "coming"
+      ? el("button", { class: "tab-btn", style: "padding:5px 10px;font-size:12px;border-color:var(--green);color:var(--green)", text: "Arrived", onclick: async (ev) => {
+          ev.stopPropagation();
+          await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ status: "arrived" }) });
+          load();
+        } })
+      : (col === "here" && needsPay)
+      ? el("button", { class: "tab-btn", style: "padding:5px 10px;font-size:12px;border-color:var(--red);color:var(--red)", text: "Paid", onclick: (ev) => { ev.stopPropagation(); select(job.id); focusPayment(job.id); } })
+      : null;
+    const card = el("div", { class: "jb-card", "data-job-id": job.id, style: cardStyle || "" }, [
+      el("div", { style: "display:flex;justify-content:space-between;gap:8px;align-items:baseline" }, [
+        el("span", { style: "display:flex;gap:6px;align-items:baseline" }, [el("span", { class: "mono", style: "font-weight:600", text: time }), el("span", { class: "jb-first" })]),
+        el("span", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(job.total) }),
+      ]),
+      el("div", { class: "jb-title", style: "font-weight:500;margin:2px 0", text: job.car || "(no title)" }),
+      el("div", { class: "muted", style: "font-size:12px", text: [job.customerName, job.employeeNames && job.employeeNames !== "Unassigned" ? job.employeeNames : null, serviceShort].filter(Boolean).join(" · ") }),
+      el("div", { style: "display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:6px" }, [...jobTags(job, kind === "row"), quick ? el("span", { style: "margin-left:auto" }, [quick]) : null]),
+    ]);
+    card.addEventListener("click", () => select(job.id));
+    return card;
+  };
+
+  const EDIT_LABEL = "✎ Edit details (title, service, price, time, rep, cancel / delete)";
+  const buildEntry = (job, builtCard, cardStyle) => {
+    const kids = Array.from(builtCard.children);
+    const part = (n) => kids.filter((k) => k.getAttribute("data-part") === n);
+    const phoneDigits = String(job.customerPhone || "").replace(/\D/g, "");
+    const header = el("div", { class: "jp-head" }, [
+      el("div", { style: "display:flex;justify-content:space-between;gap:10px;align-items:flex-start" }, [
+        el("div", { style: "min-width:0" }, [
+          el("div", { style: "font-weight:600;font-size:15px;line-height:1.3", text: job.car || "(no title)" }),
+          el("div", { class: "muted", style: "margin-top:2px" }, [
+            el("span", { text: job.customerName || "No name on file" }),
+            phoneDigits ? el("a", { href: `tel:${phoneDigits}`, style: "color:var(--cyan);margin-left:8px", text: job.customerPhone }) : null,
+          ]),
+          el("div", { class: "muted", style: "font-size:12px", text: `${formatDateTime(job.date)} · ${job.baseService || "no service set"} · Rep: ${job.salesRepName || "none"}` }),
+        ]),
+        el("div", { style: "text-align:right;flex:0 0 auto" }, [
+          el("div", { class: "mono", style: "color:var(--amber);font-size:17px;font-weight:600", text: money(job.total) }),
+          el("div", { class: "muted", style: "font-size:11px", text: `Base ${money(job.basePrice)}${job.upsellTotal > 0 ? ` + upsells ${money(job.upsellTotal)}` : ""}` }),
+        ]),
+      ]),
+      el("div", { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:6px" }, jobTags(job, true)),
+    ]);
+    const sec = (tab, children) => el("div", { "data-tab": tab, class: "jp-sec" }, children);
+    const editGroup = el("div", { class: "jp-editgroup" + (editOpen.has(job.id) ? " open" : "") }, part("edit"));
+    const editToggle = el("button", { class: "ghost jp-edittoggle", text: editOpen.has(job.id) ? "✕ Hide edit details" : EDIT_LABEL, onclick: () => {
+      const on = !editGroup.classList.contains("open");
+      editGroup.classList.toggle("open", on);
+      if (on) editOpen.add(job.id); else editOpen.delete(job.id);
+      editToggle.textContent = on ? "✕ Hide edit details" : EDIT_LABEL;
+    } });
+    const tabBtn = (key, label) => el("button", { class: `tab-btn jp-tab jp-tab-${key}`, text: label, onclick: () => { panelTab = key; panel.className = `jp-panel tab-${key}`; } });
+    // Wide screens show every section stacked (the buttons, then Notes, then the rest); on a phone the tabs pick one.
+    const panel = el("div", { class: `jp-panel tab-${panelTab}` }, [
+      el("div", { class: "jp-top" }, [el("button", { class: "ghost jp-close", text: "‹ Back to the day", onclick: () => { panelOpen = false; panelHost.classList.remove("open"); } })]),
+      header,
+      el("div", { class: "jp-tabs" }, [tabBtn("job", "Job"), tabBtn("notes", (job.notes || []).length ? `Notes (${job.notes.length})` : "Notes"), tabBtn("edit", "Edit")]),
+      ...part("warn"),
+      sec("job", part("actions")),
+      sec("notes", part("notes")),
+      sec("job", part("people")),
+      sec("notes", part("photos")),
+      sec("edit", [editToggle, editGroup]),
+    ]);
+    return { job, panel, board: makeCard(job, cardStyle, "board"), row: makeCard(job, cardStyle, "row"), col: columnOf(job) };
+  };
+
+  // ---------- the board, the list, and the bar above them ----------
+  const colDefs = [["coming", "Coming"], ["here", "Here"], ["done", "Done"]];
+  const colEls = {};
+  const boardEl = el("div", { class: "jb-board show-coming" });
+  const boardTabs = el("div", { class: "jb-tabs" });
+  colDefs.forEach(([key, label]) => {
+    const head = el("div", { class: "jb-colhead", text: label });
+    const cards = el("div", {});
+    const tabBtn = el("button", { class: "tab-btn", text: label, onclick: () => { boardTab = key; boardEl.className = `jb-board show-${key}`; applyFilters(); } });
+    colEls[key] = { head, cards, tabBtn };
+    boardEl.appendChild(el("div", { class: `jb-col jb-col-${key}` }, [head, cards]));
+    boardTabs.appendChild(tabBtn);
+  });
+  const outCards = el("div", { class: "jb-out", style: "display:none;margin-top:8px" });
+  const outToggle = el("button", { class: "ghost", style: "width:100%;text-align:left;margin-top:6px;font-size:12px", onclick: () => { outOpen = !outOpen; applyFilters(); } });
+  const boardWrap = el("div", {}, [boardTabs, boardEl, outToggle, outCards]);
+  const listEl = el("div", { class: "jb-list" });
+  const emptyHint = emptyMsg;
+
   const STATUS_FILTERS = [
     ["all", "All", () => true],
     ["upcoming", "Upcoming", (j) => !["arrived", "no_show", "cancelled"].includes(j.status)],
@@ -3154,12 +3225,21 @@ async function renderManagerJobs(content) {
   ]);
   const chipBtns = {};
   STATUS_FILTERS.forEach(([key, label]) => {
-    chipBtns[key] = el("button", { class: "tab-btn appt-chip" + (key === "all" ? " active" : ""), onclick: () => { filt.status = key; applyFilters(); }, text: label });
+    chipBtns[key] = el("button", { class: "tab-btn appt-chip" + (key === "all" ? " active" : ""), onclick: () => { filt.status = key; if (key === "out") outOpen = true; applyFilters(); }, text: label });
   });
+  const viewBtns = {};
+  const setView = (v) => {
+    view = v;
+    try { localStorage.setItem("jobsView", v); } catch (e) { /* private mode: just don't remember it */ }
+    boardWrap.style.display = v === "board" ? "" : "none";
+    listEl.style.display = v === "list" ? "" : "none";
+    Object.entries(viewBtns).forEach(([k, b]) => b.classList.toggle("active", k === v));
+  };
+  [["board", "Board"], ["list", "List"]].forEach(([k, label]) => { viewBtns[k] = el("button", { class: "tab-btn" + (k === view ? " active" : ""), style: "padding:6px 14px", text: label, onclick: () => setView(k) }); });
   const summaryEl = el("div", { class: "muted", style: "font-size:12px;margin-top:2px" });
   const noMatch = el("div", { class: "muted", style: "display:none;margin:12px 2px", text: "No appointments match. Not on this day? Use the Search tab to look across all days." });
   const barEl = el("div", { class: "appt-bar" }, [
-    el("div", { style: "display:flex;gap:8px;margin-bottom:6px" }, [searchInput, serviceSel]),
+    el("div", { style: "display:flex;gap:8px;margin-bottom:6px;align-items:center;flex-wrap:wrap" }, [el("div", { style: "display:flex" }, [viewBtns.board, viewBtns.list]), searchInput, serviceSel]),
     el("div", { class: "appt-chips" }, Object.values(chipBtns)),
     summaryEl,
   ]);
@@ -3171,36 +3251,57 @@ async function renderManagerJobs(content) {
     const matchesText = (j) => {
       if (tokens.length === 0) return true;
       const hay = [j.car, j.customerName, j.customerPhone, j.employeeNames, j.managerHelperNames, j.salesRepName, j.baseService].filter(Boolean).join(" ").toLowerCase();
-      const phoneDigits = String(j.customerPhone || "").replace(/\D/g, "");
-      return tokens.every((t) => { const td = t.replace(/\D/g, ""); return hay.includes(t) || (td.length >= 3 && phoneDigits.includes(td)); });
+      const phone = String(j.customerPhone || "").replace(/\D/g, "");
+      return tokens.every((t) => { const td = t.replace(/\D/g, ""); return hay.includes(t) || (td.length >= 3 && phone.includes(td)); });
     };
     const matchesService = (j) => filt.service === "all" || serviceColumnFor(j.baseService) === filt.service;
-    const base = rows.filter((r) => matchesText(r.job) && matchesService(r.job)); // chip counts reflect the search, so they tell you what you'd find
+    const base = entries.filter((e) => matchesText(e.job) && matchesService(e.job)); // chip counts follow the search
     const active = STATUS_FILTERS.find(([k]) => k === filt.status) || STATUS_FILTERS[0];
     STATUS_FILTERS.forEach(([key, label, pred]) => {
-      chipBtns[key].textContent = `${label} (${base.filter((r) => pred(r.job)).length})`;
+      chipBtns[key].textContent = `${label} (${base.filter((e) => pred(e.job)).length})`;
       chipBtns[key].classList.toggle("active", key === filt.status);
     });
     let shown = 0;
-    rows.forEach((r) => { const show = base.includes(r) && active[2](r.job); r.el.style.display = show ? "" : "none"; if (show) shown += 1; });
-    summaryEl.textContent = rows.length === 0 ? "" : `Showing ${shown} of ${rows.length} appointment${rows.length !== 1 ? "s" : ""}`;
-    noMatch.style.display = rows.length > 0 && shown === 0 ? "" : "none";
+    const count = { coming: 0, here: 0, done: 0, out: 0 };
+    entries.forEach((e) => {
+      const show = base.includes(e) && active[2](e.job);
+      e.board.style.display = show ? "" : "none";
+      e.row.style.display = show ? "" : "none";
+      if (show) { shown += 1; count[e.col] += 1; }
+    });
+    colDefs.forEach(([key, label]) => {
+      colEls[key].head.textContent = `${label} ${count[key]}`;
+      colEls[key].tabBtn.textContent = `${label} ${count[key]}`;
+      colEls[key].tabBtn.classList.toggle("active", boardTab === key);
+    });
+    outToggle.textContent = `${outOpen ? "▾" : "▸"} No-show / cancelled (${count.out})`;
+    outToggle.style.display = entries.some((e) => e.col === "out") ? "" : "none";
+    outCards.style.display = outOpen ? "block" : "none";
+    summaryEl.textContent = entries.length === 0 ? "" : `Showing ${shown} of ${entries.length} appointment${entries.length !== 1 ? "s" : ""}`;
+    noMatch.style.display = entries.length > 0 && shown === 0 ? "" : "none";
   }
 
-  // The next appointment still to come today gets a marker, and the page scrolls to it the first time you open today.
+  const clearAll = () => {
+    const h = leftEl.offsetHeight; // hold the height steady across the rebuild so the page never jumps to the top
+    if (h > 0) leftEl.style.minHeight = h + "px";
+    Object.values(colEls).forEach((c) => { c.cards.innerHTML = ""; });
+    outCards.innerHTML = "";
+    listEl.innerHTML = "";
+    requestAnimationFrame(() => requestAnimationFrame(() => { leftEl.style.minHeight = ""; }));
+  };
+
+  // Draws everything from `entries`: columns, list, the NEXT UP marker, and re-attaches the selected job's panel.
   function finishRender() {
+    entries.forEach((e) => { (e.col === "out" ? outCards : colEls[e.col].cards).appendChild(e.board); listEl.appendChild(e.row); });
     const isToday = lastDay === easternToday();
-    const next = isToday ? rows.find((r) => !["arrived", "no_show", "cancelled"].includes(r.job.status) && new Date(r.job.date).getTime() >= Date.now() - 30 * 60 * 1000) : null;
-    if (next) {
-      const m = next.el.querySelector(".appt-first");
-      m.className = "appt-first appt-tag";
-      m.style.cssText = "flex:0 0 auto;border-color:var(--green);color:var(--green)";
-      m.textContent = "NEXT UP";
-    }
+    const next = isToday ? entries.find((e) => e.col === "coming" && new Date(e.job.date).getTime() >= Date.now() - 30 * 60 * 1000) : null;
+    if (next) [next.board, next.row].forEach((c) => { const m = c.querySelector(".jb-first"); m.className = "jb-first appt-tag"; m.style.cssText = "border-color:var(--green);color:var(--green)"; m.textContent = "NEXT UP"; });
     applyFilters();
+    if (selectedId && !entries.some((e) => e.job.id === selectedId)) { selectedId = null; panelOpen = false; }
+    renderPanel();
     if (!didAutoScroll) {
       didAutoScroll = true;
-      if (next && rows.indexOf(next) > 2 && !filt.text && next.el.scrollIntoView) next.el.scrollIntoView({ block: "center" });
+      if (view === "list" && next && entries.indexOf(next) > 2 && !filt.text && next.row.scrollIntoView) next.row.scrollIntoView({ block: "center" });
     }
   }
 
@@ -3208,12 +3309,14 @@ async function renderManagerJobs(content) {
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
+    const myLoad = ++latestLoadId;
     const jobs = await api(`/api/manager/jobs?${qs}`);
+    if (myLoad !== latestLoadId) return; // a newer refresh is already on its way; don't draw over it
     tipWidgetWrap.innerHTML = "";
     tipWidgetWrap.appendChild(renderTipWidget(jobs, () => load()));
     clearAll();
-    rows.length = 0;
-    if (p.date !== lastDay) { lastDay = p.date; didAutoScroll = false; }
+    entries.length = 0;
+    if (p.date !== lastDay) { lastDay = p.date; didAutoScroll = false; selectedId = null; panelOpen = false; }
     emptyMsg.style.display = jobs.length === 0 ? "" : "none";
     if (jobs.length === 0) { finishRender(); return; }
     jobs.sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((job) => {
@@ -3522,7 +3625,7 @@ async function renderManagerJobs(content) {
             el("option", { value: "__online__", text: "Online Booking (website, no rep)", ...(job.isOnlineBooking ? { selected: "true" } : {}) }),
           ]),
         ]),
-        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
+        el("div", { "data-part": "actions", style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
           statusBtn("arrived", "Arrived"),
           statusBtn("no_show", "No-show"),
           boolBtn("completed", "Service complete"),
@@ -3535,12 +3638,12 @@ async function renderManagerJobs(content) {
             text: (job.isWalkIn ? "✓ " : "") + "Walk-in (no rep commission)",
           }),
         ]),
-        job.paidCash ? el("div", { class: "row", style: "margin-bottom:10px;font-size:12px" }, [
+        job.paidCash ? el("div", { "data-part": "actions", class: "row", style: "margin-bottom:10px;font-size:12px" }, [
           el("span", { style: job.cashPaidAmount > 0 ? "color:var(--green)" : "color:var(--sub)", text: job.cashPaidAmount > 0 ? `Cash received: ${money(job.cashPaidAmount)}` : "Cash amount not logged" }),
           el("button", { class: "ghost", style: "font-size:10.5px;padding:3px 8px", onclick: openCashPanel, text: job.cashPaidAmount > 0 ? "Edit" : "Log amount" }),
         ]) : null,
-        cashPanel,
-        job.isWalkIn ? el("div", { style: "margin-bottom:10px" }, [
+        tagPart("actions", cashPanel),
+        job.isWalkIn ? el("div", { "data-part": "actions", style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: `WHO ACTUALLY CLOSED THIS WALK-IN? (currently: ${job.walkInClosedByName || "not set"})` }),
           el("select", {
             style: "max-width:220px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px",
@@ -3556,20 +3659,18 @@ async function renderManagerJobs(content) {
             ...managersList.map((m) => el("option", { value: `manager::${m.id}`, text: `${m.name} (manager)`, ...(job.walkInClosedById === m.id ? { selected: "true" } : {}) })),
           ]),
         ]) : null,
-        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `TECHS WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
-        assignWrap,
-        el("div", { class: "muted", style: "font-size:11.5px;margin:8px 0 2px", text: `MANAGERS WHO ALSO HELPED (currently: ${job.managerHelperNames || "none"})` }),
-        managerAssignWrap,
-        el("div", { style: "margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px" }, [
+        el("div", { "data-part": "people", class: "muted", style: "font-size:11.5px;margin-bottom:2px", text: `TECHS WHO WORKED THIS CAR (currently: ${job.employeeNames})` }),
+        tagPart("people", assignWrap),
+        el("div", { "data-part": "people", class: "muted", style: "font-size:11.5px;margin:8px 0 2px", text: `MANAGERS WHO ALSO HELPED (currently: ${job.managerHelperNames || "none"})` }),
+        tagPart("people", managerAssignWrap),
+        el("div", { "data-part": "people", style: "margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px" }, [
           upsellList,
           upsellForm,
         ]),
-        renderPhotoGrid(job, () => load()),
-        renderNotesSection(job, () => load()),
+        tagPart("photos", renderPhotoGrid(job, () => load())),
+        tagPart("notes", renderNotesSection(job, () => load())),
       ]);
-      const rowEl = composeApptRow(job, builtCard, cardStyle);
-      listEl.appendChild(rowEl);
-      rows.push({ job, el: rowEl });
+      entries.push(buildEntry(job, builtCard, cardStyle));
     });
     finishRender();
   }
@@ -3578,14 +3679,18 @@ async function renderManagerJobs(content) {
     tipWidgetWrap.style.display = showing ? "none" : "block";
     tipToggleBtn.textContent = showing ? "💵 Log a tip" : "− Hide tip form";
   } });
-  content.appendChild(nav.el);
-  content.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [addToggleBtn, tipToggleBtn]));
+  const leftEl = el("div", { class: "jp-left" }, [barEl, boardWrap, listEl, noMatch, emptyHint]);
+  nav.el.style.marginBottom = "0";
+  nav.el.classList.add("jp-daynav");
+  const dateIn = nav.el.querySelector('input[type="date"]');
+  if (dateIn) dateIn.style.cssText = "width:160px;flex:0 0 auto";
+  addToggleBtn.style.marginBottom = "0";
+  tipToggleBtn.style.marginBottom = "0";
+  content.appendChild(el("div", { style: "display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;margin-bottom:12px" }, [nav.el, el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [addToggleBtn, tipToggleBtn])]));
   content.appendChild(addFormWrap);
   content.appendChild(tipWidgetWrap);
-  content.appendChild(barEl);
-  content.appendChild(listEl);
-  content.appendChild(noMatch);
-  content.appendChild(emptyMsg);
+  content.appendChild(el("div", { class: "jp-main" }, [leftEl, panelHost]));
+  setView(view);
   await load();
 }
 
