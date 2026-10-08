@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-08-titleprice";
+const UI_BUILD = "2026-10-08-fillprice";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2891,7 +2891,7 @@ async function renderCleanup(content) {
     updateBulkBar();
     if (jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing to clean up — every job has a price and a sales rep or walk-in assignment." })); return; }
     jobs.forEach((job) => {
-      const priceInput = el("input", { type: "number", value: job.basePrice || "", placeholder: "Base price", style: "max-width:100px" });
+      const priceInput = el("input", { type: "number", value: job.basePrice || job.titlePrice || "", placeholder: "Base price", style: "max-width:100px" }); // a title price is offered, ready to save
       const serviceSelect = el("select", { style: "max-width:170px" }, [
         el("option", { value: "", text: "Set service..." }),
         el("option", { value: "Window Tint", text: "Window Tint", ...(job.baseService === "Window Tint" ? { selected: "true" } : {}) }),
