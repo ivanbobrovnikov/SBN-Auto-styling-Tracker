@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-08-titleprice";
+const BUILD = "2026-10-08-fillprice";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -207,10 +207,17 @@ function applyTitlePricing(db, sale, opts = {}) {
   sale.titlePrice = tp ? tp.total : null;
   sale.titleDeposit = tp ? tp.deposit : null;
   if (!tp) return false;
+  const missing = !((parseFloat(sale.basePrice) || 0) > 0);
   if (!opts.force) {
     if (sale.priceLocked) return false;
-    if ((sale.paid || sale.completed) && !opts.allowClosed) return false;
-    if (sale.status === "cancelled" || sale.status === "no_show") return false;
+    if (sale.status === "cancelled") return false;
+    // A price that's already there on a paid, completed or no-show job is history and stays. A price that is MISSING isn't
+    // history, it's a gap (the opportunity value was never filled in), so it is filled whatever state the job is in. This is
+    // what keeps those jobs out of Cleanup.
+    if (!missing) {
+      if ((sale.paid || sale.completed) && !opts.allowClosed) return false;
+      if (sale.status === "no_show") return false;
+    }
   }
   const prior = opts.priorPrice !== undefined ? opts.priorPrice : parseFloat(sale.basePrice) || 0;
   sale.priceSource = "title";
@@ -1598,7 +1605,7 @@ app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
     employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
-    basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
+    basePrice: s.basePrice || 0, titlePrice: s.titlePrice == null ? null : s.titlePrice, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
@@ -1654,7 +1661,7 @@ app.get("/api/cross-location/cleanup-list", (req, res) => {
       id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
       employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
       salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
-      basePrice: s.basePrice || 0, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
+      basePrice: s.basePrice || 0, titlePrice: s.titlePrice == null ? null : s.titlePrice, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
     })).sort((a, b) => (a.date < b.date ? 1 : -1)),
     possibleReschedules: findPossibleReschedules(db), leftOut: recentLeftOut(db), recentMerges: recentMerges(db),
   });
@@ -3248,10 +3255,19 @@ async function runTitleSync() {
   const db = loadDB();
   const now = new Date();
   const horizon = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000); // next 3 weeks
-  const candidates = db.sales.filter((s) =>
+  const upcoming = db.sales.filter((s) =>
     s.contactId && ["arrived", "no_show", "cancelled"].indexOf(s.status) === -1 &&
     !isNaN(new Date(s.date).getTime()) && new Date(s.date) >= now && new Date(s.date) <= horizon
   );
+  // Also any job still missing its price from the last 45 days, even if it has already happened: the team often puts the price in
+  // the GHL title only after the car has been serviced, and GHL never announces a title edit. Matching to the right appointment is
+  // as strict as ever (its own appointment id, or its exact start time), so a job it can't identify is simply left alone.
+  const lookback = new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000);
+  const unpriced = db.sales.filter((s) =>
+    s.contactId && s.status !== "cancelled" && !(parseFloat(s.basePrice) > 0) && !s.priceLocked &&
+    !isNaN(new Date(s.date).getTime()) && new Date(s.date) >= lookback && new Date(s.date) <= horizon
+  );
+  const candidates = Array.from(new Map(upcoming.concat(unpriced).map((s) => [s.id, s])).values());
   const byContact = {};
   candidates.forEach((s) => { (byContact[s.contactId] = byContact[s.contactId] || []).push(s); });
   let checked = 0, updated = 0, ambiguous = 0;

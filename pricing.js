@@ -25,6 +25,38 @@ function parseTitlePricing(title) {
     if (!(last.total >= 10 && last.total <= 250000 && last.deposit >= 0 && last.deposit <= last.total)) return null;
     return { total: round2(last.total), deposit: round2(last.deposit), balance: round2(last.total - last.deposit) };
   }
+  // The price near the front and the deposit stated separately later in the title, as in
+  //   "MR 2026 Tesla Y Performance - $279 - Sides and Rear (+Free Sunstrip Promotions) -$50Depo"
+  // A deposit is only believed when it is spelled out as one ("$50Depo", "50 depo", "$50 deposit", "deposit $50"), and the total is the
+  // first dollar amount in the title that isn't the deposit itself or an add-on written like "(+$20 ...)".
+  const deposits = [];
+  const depoAfter = new RegExp(`(^|[^\\w$.,])\\$?\\s*(${NUM})\\s*depo(?:sit)?\\b`, "gi");
+  for (let m = depoAfter.exec(t); m; m = depoAfter.exec(t)) deposits.push({ start: m.index + m[1].length, end: m.index + m[0].length, value: toNumber(m[2]) });
+  const depoBefore = new RegExp(`depo(?:sit)?\\s*:?\\s*\\$?\\s*(${NUM})`, "gi");
+  for (let m = depoBefore.exec(t); m; m = depoBefore.exec(t)) deposits.push({ start: m.index, end: m.index + m[0].length, value: toNumber(m[1]) });
+  if (deposits.length > 0) {
+    const dep = deposits.sort((a, b) => a.start - b.start)[deposits.length - 1];
+    const amounts = [];
+    const dollars = new RegExp(`\\$\\s*(${NUM})`, "g");
+    for (let m = dollars.exec(t); m; m = dollars.exec(t)) {
+      if (deposits.some((d) => m.index >= d.start && m.index < d.end)) continue;       // that's the deposit itself
+      if (/\+\s*$/.test(t.slice(0, m.index))) continue;                                  // "(+$20 sunstrip)" is an add-on, not the price
+      amounts.push(toNumber(m[1]));
+    }
+    if (amounts.length === 0) return null;
+    const total = amounts[0];
+    if (!(total >= 10 && total <= 250000 && dep.value >= 0 && dep.value <= total)) return null;
+    return { total: round2(total), deposit: round2(dep.value), balance: round2(total - dep.value) };
+  }
+  // A price that sits alone between dashes, with no deposit mentioned: "MR 2026 Tesla Y Performance - $279 - Sides and Rear".
+  // Standing on its own as a dash-separated piece is what makes it safe to believe; "$50 off" or "+ $50 sunstrip" never look like that.
+  const segment = new RegExp(`(?:^|\\s)[-–—]\\s*\\$\\s*(${NUM})\\s*[-–—](?=\\s|$)`, "g");
+  const seg = /depo/i.test(t) ? null : segment.exec(t); // the word "depo" with no amount means a deposit exists but we can't tell how much: say nothing
+  if (seg) {
+    const total = toNumber(seg[1]);
+    if (total >= 10 && total <= 250000) return { total: round2(total), deposit: 0, balance: round2(total) };
+    return null;
+  }
   // A price on its own at the very end: "... Sides $300"
   const single = t.match(new RegExp(`\\$\\s*(${NUM})\\s*\\.?\\s*$`));
   if (single) {
