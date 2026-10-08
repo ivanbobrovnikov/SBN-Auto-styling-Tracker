@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-07-board3";
+const BUILD = "2026-10-07-cash";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1296,31 +1296,54 @@ app.get("/api/owner/cash-entries", requireOwner, (req, res) => {
   // enters the drawer. Depositing that cash into the bank is a separate, later event, and
   // reduces cash on hand the same way an expense would, but gets tracked as its own real
   // number rather than lumped in with generic spending.
-  const totalCashIn = entries.filter((e) => e.type === "cashIn").reduce((a, e) => a + e.amount, 0);
-  const totalCashOut = entries.filter((e) => e.type === "cashOut").reduce((a, e) => a + e.amount, 0);
-  const totalCardExpense = entries.filter((e) => e.type === "cardExpense").reduce((a, e) => a + e.amount, 0);
-  const totalBankDeposits = entries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + e.amount, 0);
+  const totalCashIn = entries.filter((e) => e.type === "cashIn").reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const totalCashOut = entries.filter((e) => e.type === "cashOut").reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const totalCardExpense = entries.filter((e) => e.type === "cardExpense").reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const totalBankDeposits = entries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + (Number(e.amount) || 0), 0);
   const byCategory = {};
   entries.filter((e) => e.type !== "cashIn" && e.type !== "bankDeposit").forEach((e) => { byCategory[e.category] = (byCategory[e.category] || 0) + e.amount; });
   // Net Cash on Hand is a running balance - what's actually sitting in the drawer right
   // now - not a per-period metric. It's calculated from every entry ever logged, completely
-  // independent of whatever Day/Week/Month/Year is selected above. A big one-time catch-up
-  // deposit logged in one month shouldn't keep suppressing this number in every month after,
-  // the way it would if this were scoped to the same period as everything else on this page.
+  // independent of whatever Day/Week/Month/Year is selected above, plus an optional opening
+  // balance for cash that was already in the drawer before tracking began.
+  // It is deliberately NOT floored at zero. When deposits and cash-outs add up to more than the cash recorded as
+  // coming in (typically a catch-up deposit for cash from before tracking started), flooring it to $0 made the
+  // page look broken - "$550 in from customers, no deposits, $0 on hand" - with no way to see why. The honest
+  // number, plus the numbers behind it, lets the owner see and fix the cause (usually by setting the opening balance).
   const allEntries = db.cashEntries;
-  const allTimeCashIn = allEntries.filter((e) => e.type === "cashIn").reduce((a, e) => a + e.amount, 0);
-  const allTimeCashOut = allEntries.filter((e) => e.type === "cashOut").reduce((a, e) => a + e.amount, 0);
-  const allTimeBankDeposits = allEntries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + e.amount, 0);
+  const allTimeCashIn = allEntries.filter((e) => e.type === "cashIn").reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const allTimeCashOut = allEntries.filter((e) => e.type === "cashOut").reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const allTimeBankDeposits = allEntries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const openingBalance = Number(db.cashOpeningBalance) || 0;
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const inPeriod = new Set(entries.map((e) => e.id));
+  // Cash that left the drawer in some OTHER period than the one on screen - the usual reason on-hand looks lower than
+  // this period's numbers suggest.
+  const outflowsOutsidePeriod = allEntries
+    .filter((e) => (e.type === "cashOut" || e.type === "bankDeposit") && !inPeriod.has(e.id))
+    .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)).slice(0, 15)
+    .map((e) => ({ id: e.id, type: e.type, category: e.category, amount: e.amount, note: e.note || "", enteredByName: e.enteredByName || "", timestamp: e.timestamp }));
   res.json({
     entries: entries.slice(0, 200),
     totalCashIn, totalCashOut, totalCardExpense, totalBankDeposits,
-    // Floored at zero - if deposits ever exceed everything tracked as coming in (e.g. a
-    // catch-up deposit for cash that predates using this feature at all), the raw
-    // subtraction would go negative, which isn't a real number, just an artifact of where
-    // tracking started.
-    netCash: Math.max(0, allTimeCashIn - allTimeCashOut - allTimeBankDeposits),
+    netCash: round2(openingBalance + allTimeCashIn - allTimeCashOut - allTimeBankDeposits),
+    openingBalance, openingBalanceSetAt: db.cashOpeningSetAt || null,
+    allTime: { cashIn: round2(allTimeCashIn), cashOut: round2(allTimeCashOut), bankDeposits: round2(allTimeBankDeposits) },
+    outflowsOutsidePeriod,
     byCategory: Object.entries(byCategory).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total),
   });
+});
+
+// What was already in the drawer before cash started being tracked here. Without it, a catch-up bank deposit (or any
+// cash-out) for older cash makes the running balance go negative.
+app.post("/api/owner/cash-opening-balance", requireOwner, (req, res) => {
+  const amt = Number(req.body && req.body.amount);
+  if (!isFinite(amt) || amt < 0 || amt > 1000000) return res.status(400).json({ error: "Enter what was in the drawer before tracking started: a number, 0 or more." });
+  const db = loadDB();
+  db.cashOpeningBalance = Math.round(amt * 100) / 100;
+  db.cashOpeningSetAt = new Date().toISOString();
+  saveDB(db);
+  res.json({ ok: true, openingBalance: db.cashOpeningBalance });
 });
 
 app.get("/api/manager/attendance", requireManager, (req, res) => {
