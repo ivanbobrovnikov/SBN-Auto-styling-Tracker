@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-08-fillprice";
+const UI_BUILD = "2026-10-09-reschedword";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -540,7 +540,7 @@ const TAB_ICONS = {
   "owner-serviced": "✅", "owner-audit": "🕐", "owner-edit-history": "📝",
   "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
   "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
-  "manager-performance": "📈", "sales-schedule": "📋", "sales-fullschedule": "🗓",
+  "manager-performance": "📈", "manager-shop": "🏪", "sales-schedule": "📋", "sales-fullschedule": "🗓",
   "sales-performance": "📈", "schedule": "🗓", "performance": "📈",
 };
 
@@ -550,7 +550,7 @@ function renderBottomNav() {
     allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
-    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"]];
+    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
     primaryKeys = ["manager-jobs", "owner-attendance", "owner-search", "manager-performance"];
   } else if (session.role === "sales") {
     allTabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
@@ -916,6 +916,7 @@ async function renderManagerTabContent(content) {
   if (currentTab === "manager-cash") return renderCashLog(content);
   if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
   if (currentTab === "manager-performance") return renderManagerPerformance(content);
+  if (currentTab === "manager-shop") return renderShopPerformance(content);
   return renderManagerJobs(content);
 }
 
@@ -1987,7 +1988,7 @@ async function renderCommissionAudit(content) {
         const list = el("div", { style: "display:none;margin-top:6px;padding-left:8px;border-left:2px solid var(--amber)" }, activity.leftOut.map((c) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:6px" }, [
           el("div", {}, [
             el("div", { text: c.car || "(no car)" }),
-            el("div", { class: "muted", style: "font-size:10.5px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · closed ${formatDateTime(c.closedAt)} · scheduled ${formatDateTime(c.date)}` }),
+            el("div", { class: "muted", style: "font-size:10.5px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · closed ${formatDateTime(c.closedAt)} · scheduled ${formatDateTime(c.date)}${c.auto ? " · flagged automatically (the title says rescheduled)" : ""}` }),
           ]),
           el("div", { style: "text-align:right" }, [
             el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
@@ -3045,6 +3046,100 @@ async function renderSearch(content) {
 }
 
 // ---------------- Manager's own performance — managers upsell too ----------------
+// The whole shop's upsells and walk-ins, for every manager. Read-only. Pay and commission are deliberately not on it.
+async function renderShopPerformance(content) {
+  const body = el("div");
+  const picker = renderPeriodPicker((params) => load(params), "month");
+  const head = (text) => el("div", { class: "muted", style: "margin:16px 0 8px;font-weight:600;letter-spacing:0.04em", text });
+  const metric = (label, value, color) => el("div", { class: "metric" }, [el("div", { class: "metric-label", text: label }), el("div", { class: "metric-value mono", style: color ? `color:${color}` : "", text: value })]);
+  const tag = (text, color) => el("span", { style: `font-size:10px;font-weight:600;letter-spacing:0.04em;padding:1px 6px;border:0.5px solid ${color};color:${color};border-radius:4px;margin-left:6px;white-space:nowrap`, text });
+  const empty = (text) => el("div", { class: "muted", style: "font-size:12.5px;padding:4px 0", text });
+  async function load(params) {
+    const p = params || picker.getParams();
+    const d = await api(`/api/manager/shop-performance?${new URLSearchParams(p).toString()}`);
+    clearHeightLocked(body);
+    const u = d.upsells, w = d.walkIns;
+    const iAm = d.you && d.you.role === "manager" ? d.you.id : null;
+    const mine = (key) => iAm && key === "m:" + iAm;                 // a row in the upsell list
+    const mineClosing = (key) => iAm && key === "manager:" + iAm;    // a row in the walk-in closers list
+
+    body.appendChild(head("UPSELLS: WHOLE SHOP"));
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      metric("Upsells sold", money(u.soldRevenue), "var(--cyan)"),
+      metric("Number sold", String(u.soldCount)),
+      metric("Cars with an upsell", String(u.carsWithUpsell)),
+      metric("Attach rate", u.carsServiced > 0 ? `${Math.round(u.attachRate)}%` : "-"),
+      metric("Collected so far", money(u.collectedRevenue), "var(--green)"),
+    ]));
+    body.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin:-4px 0 10px", text: u.carsServiced > 0 ? `Attach rate is the share of the ${u.carsServiced} serviced car${u.carsServiced !== 1 ? "s" : ""} that had at least one upsell. "Collected" is the part on jobs already paid.` : "Attach rate shows once a car is marked service complete." }));
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:8px", text: "WHO SOLD THEM" }),
+      u.byPerson.length === 0 ? empty("No upsells in this period.") : null,
+      ...u.byPerson.map((r, i) => el("div", { class: "row", style: `align-items:flex-start;margin-bottom:4px;padding:6px;border-radius:6px;${mine(r.key) ? "background:var(--cardAlt)" : ""}` }, [
+        el("div", { style: r.revenue === 0 ? "color:var(--muted)" : "" }, [
+          el("div", {}, [el("span", { class: "mono muted", style: "display:inline-block;width:22px", text: r.revenue > 0 ? `${i + 1}.` : "" }), el("span", { style: "font-weight:500", text: r.name }), mine(r.key) ? tag("YOU", "var(--cyan)") : null]),
+          el("div", { class: "muted", style: "font-size:11px;margin-left:22px", text: [r.role, r.count > 0 ? `${r.cars} car${r.cars !== 1 ? "s" : ""}` : "nothing sold"].filter(Boolean).join(" · ") }),
+        ]),
+        el("div", { style: "text-align:right;white-space:nowrap;margin-left:10px" }, [el("div", { class: "mono", style: r.revenue === 0 ? "color:var(--muted)" : "font-weight:600", text: money(r.revenue) }), el("div", { class: "muted", style: "font-size:11px", text: `${r.count}x` })]),
+      ])),
+    ]));
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:8px", text: "WHAT SOLD" }),
+      u.byItem.length === 0 ? empty("Nothing yet.") : null,
+      ...u.byItem.map((r) => el("div", { class: "row", style: "margin-bottom:4px;align-items:flex-start" }, [el("span", { text: r.name }), el("span", { class: "mono muted", style: "white-space:nowrap;margin-left:10px", text: `${r.count}x · ${money(r.revenue)}` })])),
+    ]));
+
+    body.appendChild(head("WALK-INS: WHOLE SHOP"));
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      metric("Walk-ins", String(w.total)),
+      metric("Share of all jobs", w.allJobs > 0 ? `${Math.round(w.sharePercent)}%` : "-"),
+      metric("Arrived", String(w.arrived)),
+      metric("Paid", String(w.paid), "var(--green)"),
+      metric("Walk-in revenue", money(w.revenue), "var(--green)"),
+      metric("Average ticket", money(w.avgTicket)),
+    ]));
+    body.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin:-4px 0 10px", text: `Revenue is what walk-ins actually paid, upsells included (the same basis as the owner's dashboard). "My performance" shows base price only, because that's what your walk-in commission is figured on.` }));
+    if (w.needsCloser > 0) {
+      body.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
+        el("div", { style: "font-weight:600;color:var(--amber)", text: `${w.needsCloser} walk-in${w.needsCloser !== 1 ? "s have" : " has"} no closer recorded` }),
+        el("div", { class: "muted", style: "font-size:12px", text: "Open the job on Job Status and choose who closed it, so the right person gets the credit." }),
+      ]));
+    }
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:8px", text: "WHO CLOSED THEM" }),
+      w.byCloser.length === 0 ? empty("No walk-ins in this period.") : null,
+      ...w.byCloser.map((r) => el("div", { class: "row", style: `align-items:flex-start;margin-bottom:4px;padding:6px;border-radius:6px;${mineClosing(r.key) ? "background:var(--cardAlt)" : ""}` }, [
+        el("div", {}, [
+          el("div", {}, [el("span", { style: `font-weight:500;${r.name === "No closer recorded" ? "color:var(--amber)" : ""}`, text: r.name }), mineClosing(r.key) ? tag("YOU", "var(--cyan)") : null]),
+          el("div", { class: "muted", style: "font-size:11px", text: [r.role, `${r.closed} closed`, `${r.arrivedPaid} arrived + paid`].filter(Boolean).join(" · ") }),
+        ]),
+        el("div", { class: "mono", style: "white-space:nowrap;margin-left:10px;font-weight:600", text: money(r.revenue) }),
+      ])),
+    ]));
+    if (w.byService.length > 0) {
+      body.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "muted", style: "margin-bottom:8px", text: "BY SERVICE" }),
+        ...w.byService.map((r) => el("div", { class: "row", style: "margin-bottom:4px;align-items:flex-start" }, [el("span", { text: r.service }), el("span", { class: "mono muted", style: "white-space:nowrap;margin-left:10px", text: `${r.count} walk-in${r.count !== 1 ? "s" : ""} · ${money(r.revenue)}` })])),
+      ]));
+    }
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:8px", text: `WALK-INS IN THIS PERIOD${w.total > w.recent.length ? ` (latest ${w.recent.length} of ${w.total})` : ""}` }),
+      w.recent.length === 0 ? empty("None.") : null,
+      ...w.recent.map((r) => el("div", { style: "padding:6px 0;border-top:0.5px solid var(--border)" }, [
+        el("div", { class: "row" }, [
+          el("span", { style: "font-weight:500" }, [el("span", { text: r.car }), r.paid ? tag("PAID", "var(--green)") : r.status === "arrived" ? tag("ARRIVED", "var(--sub)") : r.status === "no_show" ? tag("NO-SHOW", "var(--red)") : tag("BOOKED", "var(--muted)")]),
+          el("span", { class: "mono", text: money(r.total) }),
+        ]),
+        el("div", { class: "muted", style: "font-size:11.5px", text: `${formatDateTime(r.date)}${r.service ? " · " + r.service : ""} · ${r.closerName ? "closed by " + r.closerName : "no closer recorded"}` }),
+      ])),
+    ]));
+  }
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:12px", text: "The whole shop's upsells and walk-ins, not just yours. Every manager sees the same numbers. Pay and commission stay private." }));
+  content.appendChild(picker.el);
+  content.appendChild(body);
+  await load();
+}
+
 async function renderManagerPerformance(content) {
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "month");
@@ -3134,6 +3229,7 @@ async function renderManagerPerformance(content) {
       });
     }
   }
+  content.appendChild(el("button", { class: "ghost", style: "width:100%;margin-bottom:12px;text-align:left", text: "See the whole shop's upsells and walk-ins →", onclick: () => { currentTab = "manager-shop"; localStorage.setItem("lastTab", currentTab); render(); } }));
   content.appendChild(picker.el);
   content.appendChild(body);
   await load();
