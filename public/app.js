@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-07-cash";
+const UI_BUILD = "2026-10-08-cashaudit";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -99,7 +99,7 @@ async function api(path, opts = {}) {
     ...opts,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  if (!res.ok) { const err = new Error(data.error || "Something went wrong."); err.data = data; err.status = res.status; throw err; }
   return data;
 }
 function money(n) { return "$" + (Math.round((n || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -1517,6 +1517,9 @@ function renderCashEntryForm(onSaved) {
   let selectedType = "cashOut";
   const amountInput = el("input", { type: "number", placeholder: "0.00", style: "max-width:140px" });
   const categorySelect = el("select", {}, CATEGORIES.map((c) => el("option", { value: c, text: c })));
+  // "Customer Payment" is the category for money coming IN. It used to be the first (default) choice for everything, so
+  // cash-outs and deposits were quietly filed under it. Money going out now starts on "Other".
+  categorySelect.value = "Other";
   const noteInput = el("input", { placeholder: "What was it for?", style: "width:100%" });
   const onlineCheck = el("input", { type: "checkbox" });
   const receiptInput = el("input", { type: "file", accept: "image/*", style: "display:none" });
@@ -1541,6 +1544,7 @@ function renderCashEntryForm(onSaved) {
       style: "flex:1",
       onclick: () => {
         selectedType = value;
+        categorySelect.value = value === "cashIn" ? "Customer Payment" : "Other";
         Object.values(typeBtns).forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
         updateFieldVisibility();
@@ -1572,9 +1576,22 @@ function renderCashEntryForm(onSaved) {
     ]),
     el("button", { class: "primary", onclick: async () => {
       if (!amountInput.value || parseFloat(amountInput.value) <= 0) { alert("Enter a real amount first."); return; }
-      const entry = await api("/api/manager/cash-entries", { method: "POST", body: JSON.stringify({
-        type: selectedType, amount: amountInput.value, category: categorySelect.value, note: noteInput.value, isOnline: onlineCheck.checked,
-      }) });
+      // The server pushes back on a deposit that looks like a repeat of one just logged, or that is bigger than all the cash
+      // recorded so far. Ask the person, and only save it if they say it's right.
+      let flags = {}, entry = null;
+      for (let attempt = 0; attempt < 3 && !entry; attempt++) {
+        try {
+          entry = await api("/api/manager/cash-entries", { method: "POST", body: JSON.stringify({
+            type: selectedType, amount: amountInput.value, category: selectedType === "bankDeposit" ? "Other" : categorySelect.value, note: noteInput.value, isOnline: onlineCheck.checked, ...flags,
+          }) });
+        } catch (err) {
+          const kind = err.data && err.data.needsConfirm;
+          if (!kind) { alert(err.message || "Couldn't save that."); return; }
+          if (!confirm(`${err.data.error}\n\nSave it anyway?`)) return;
+          flags = { ...flags, [kind === "duplicate" ? "confirmDuplicate" : "confirmOverdraw"]: true };
+        }
+      }
+      if (!entry) return;
       if (pendingReceiptFile) {
         const formData = new FormData();
         formData.append("receipt", pendingReceiptFile);
@@ -1709,6 +1726,75 @@ async function renderCashLog(content) {
   await loadMine();
 }
 
+
+// Shows the owner exactly which entries are making "cash on hand" wrong, each with a one-tap fix.
+function renderCashAudit(a, reload) {
+  const typeLabel = (t) => (t === "bankDeposit" ? "Bank deposit" : t === "cashIn" ? "Cash in" : "Cash out");
+  const run = (fn) => async () => { try { await fn(); reload(); } catch (e) { alert(e.message || "Couldn't do that."); } };
+  const btn = (text, onclick, danger) => el("button", { class: danger ? "icon-danger" : "ghost", style: "font-size:11.5px;padding:4px 9px", text, onclick: run(onclick) });
+  const section = (title, hint) => [el("div", { style: "font-weight:600;margin:14px 0 2px", text: title }), el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px", text: hint })];
+  const kids = [
+    el("div", { style: "font-weight:600;margin-bottom:2px", text: "Cash audit: entries worth a second look" }),
+    el("div", { class: "muted", style: "font-size:12.5px", text: `${a.entryCount} entries checked. ${a.deposits.overdrawnCount} bank deposit${a.deposits.overdrawnCount !== 1 ? "s were" : " was"} bigger than the cash that had been recorded when ${a.deposits.overdrawnCount !== 1 ? "they were" : "it was"} logged (${money(a.deposits.overdrawnTotal)} in total); ${a.duplicates.length} may have been entered twice; ${a.wrongDirection.length} may have been entered the wrong way round.` }),
+  ];
+  if (a.deposits.biggest.length > 0) {
+    kids.push(...section("Biggest bank deposits", "A deposit can't be bigger than the cash that was in the drawer. Red ones were bigger than the cash on record at that moment: a typo, or money that isn't drawer cash (card, Zelle, a bank transfer)."));
+    a.deposits.biggest.slice(0, 5).forEach((d) => kids.push(el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+      el("div", { class: "row", style: "align-items:flex-start" }, [
+        el("div", { style: "font-size:13px" }, [
+          el("div", { text: `${formatDateTime(d.timestamp)} · ${d.enteredByName || "Unknown"}${d.note ? " · " + d.note : ""}` }),
+          d.overdrawn ? el("div", { style: "color:var(--red);font-size:11.5px", text: `Bigger than the cash on record by ${money(d.overdrawsBy)}` }) : null,
+        ]),
+        el("div", { class: "mono", style: `font-weight:600;color:${d.overdrawn ? "var(--red)" : "inherit"}`, text: money(d.amount) }),
+      ]),
+      el("div", { style: "display:flex;gap:8px;margin-top:6px" }, [
+        btn("Fix the amount", async () => {
+          const v = prompt(`What should this ${money(d.amount)} deposit be?`, String(d.amount));
+          if (v === null) throw new Error("");
+          const n = parseFloat(v);
+          if (!(n > 0)) throw new Error("Enter a real amount.");
+          await api(`/api/manager/cash-entries/${d.id}`, { method: "PATCH", body: JSON.stringify({ amount: n }) });
+        }),
+        btn("Delete it", async () => { if (!confirm(`Delete this ${money(d.amount)} deposit? Cash on hand goes up by ${money(d.amount)}.`)) throw new Error(""); await api(`/api/manager/cash-entries/${d.id}`, { method: "DELETE" }); }, true),
+      ]),
+    ])));
+  }
+  if (a.duplicates.length > 0) {
+    kids.push(...section("Possibly entered twice", "The same amount, logged twice within a day and a half."));
+    a.duplicates.forEach((p) => kids.push(el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+      el("div", { class: "row", style: "align-items:flex-start" }, [
+        el("div", { style: "font-size:13px" }, [
+          el("div", { text: `${typeLabel(p.first.type)} of ${money(p.first.amount)} by ${p.first.enteredByName || "Unknown"} (${formatDateTime(p.first.timestamp)})` }),
+          el("div", { text: `...and again by ${p.second.enteredByName || "Unknown"} (${formatDateTime(p.second.timestamp)})` }),
+        ]),
+        el("div", { class: "mono", style: "font-weight:600", text: money(p.first.amount) }),
+      ]),
+      el("div", { style: "display:flex;gap:8px;margin-top:6px;flex-wrap:wrap" }, [
+        btn(`Delete ${p.second.enteredByName || "the"}'s later one`, async () => { if (!confirm(`Delete the second ${money(p.second.amount)} entry?`)) throw new Error(""); await api(`/api/manager/cash-entries/${p.second.id}`, { method: "DELETE" }); }, true),
+        btn("They're both real", () => api("/api/owner/cash-audit/dismiss", { method: "POST", body: JSON.stringify({ ids: [p.first.id, p.second.id] }) })),
+      ]),
+    ])));
+  }
+  if (a.wrongDirection.length > 0) {
+    kids.push(...section("Maybe entered the wrong way round", "Logged as cash OUT, but it looks like money that came IN. Putting a payment in as cash out takes it off twice."));
+    a.wrongDirection.forEach((e) => kids.push(el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+      el("div", { class: "row", style: "align-items:flex-start" }, [
+        el("div", { style: "font-size:13px" }, [
+          el("div", { text: `${formatDateTime(e.timestamp)} · ${e.enteredByName || "Unknown"} · ${e.category}${e.note ? " · " + e.note : ""}` }),
+          el("div", { class: "muted", style: "font-size:11.5px", text: e.reason }),
+        ]),
+        el("div", { class: "mono", style: "font-weight:600", text: money(e.amount) }),
+      ]),
+      el("div", { style: "display:flex;gap:8px;margin-top:6px;flex-wrap:wrap" }, [
+        btn("It's money IN: make it Cash in", async () => { if (!confirm(`Turn this ${money(e.amount)} cash-out into Cash in? Cash on hand goes up by ${money(e.amount * 2)}.`)) throw new Error(""); await api(`/api/manager/cash-entries/${e.id}`, { method: "PATCH", body: JSON.stringify({ type: "cashIn", category: "Customer Payment" }) }); }),
+        e.category === "Customer Payment" ? btn("It's an expense: set category to Other", () => api(`/api/manager/cash-entries/${e.id}`, { method: "PATCH", body: JSON.stringify({ category: "Other" }) })) : null,
+        btn("It's correct", () => api("/api/owner/cash-audit/dismiss", { method: "POST", body: JSON.stringify({ ids: [e.id] }) })),
+      ]),
+    ])));
+  }
+  return el("div", { class: "card", style: "border-color:var(--amber)" }, kids);
+}
+
 // Owner Cash & Expenses — full visibility across every manager, real totals, editable.
 async function renderOwnerCash(content) {
   const body = el("div");
@@ -1764,6 +1850,9 @@ async function renderOwnerCash(content) {
       outsideToggle,
       outsideCount ? outsideList : null,
     ]));
+    // The entries that are actually causing it, with one-tap fixes.
+    const audit = await api("/api/owner/cash-audit");
+    if (audit.deposits.overdrawnCount + audit.duplicates.length + audit.wrongDirection.length > 0) body.appendChild(renderCashAudit(audit, load));
     if (d.byCategory.length) {
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "muted", style: "margin-bottom:8px", text: "BY CATEGORY" }),
