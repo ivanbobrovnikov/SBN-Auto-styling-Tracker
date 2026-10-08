@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-08-cashaudit";
+const UI_BUILD = "2026-10-08-titleprice";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2948,7 +2948,36 @@ async function renderCleanup(content) {
   }
   content.appendChild(el("div", { class: "muted", style: "margin-bottom:14px", text: "Every job missing a base price or a sales rep, regardless of date. Fix what you can here — the rest can just stay as-is going forward." }));
   content.appendChild(bulkOnlineBar);
+  // Jobs whose title carries a price that the tracker isn't using: a price typed in by hand, or a job that's already paid.
+  const priceBox = el("div");
+  async function loadPriceMismatches() {
+    let rows;
+    try { rows = await api("/api/manager/price-mismatches"); } catch (e) { return; }
+    priceBox.innerHTML = "";
+    if (rows.length === 0) return;
+    const act = (id, body, ask) => async () => {
+      if (ask && !confirm(ask)) return;
+      try { await api(`/api/manager/jobs/${id}`, { method: "PATCH", body: JSON.stringify(body) }); await loadPriceMismatches(); }
+      catch (err) { alert(err.message || "Couldn't change that."); }
+    };
+    priceBox.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
+      el("div", { class: "muted", style: "margin-bottom:4px", text: `PRICE DOESN'T MATCH THE TITLE (${rows.length})` }),
+      el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: "The price at the end of the title (like $644-$50) is what the team keeps up to date. Open jobs follow it automatically; these didn't, because the price was typed in by hand or the job is already paid." }),
+      ...rows.map((r) => el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+        el("div", { style: "font-weight:500", text: r.car }),
+        el("div", { class: "muted", style: "font-size:11.5px", text: `${r.customerName ? r.customerName + " · " : ""}${formatDateTime(r.date)}` }),
+        el("div", { style: "font-size:12px", text: `Tracker has ${money(r.basePrice)} · the title says ${money(r.titlePrice)}${r.titleDeposit > 0 ? ` (${money(r.titleDeposit)} deposit)` : ""}${r.ghlValue != null ? ` · GHL ${money(r.ghlValue)}` : ""}` }),
+        el("div", { style: "font-size:11px;color:var(--amber)", text: [r.priceLocked ? "price typed in by hand" : null, r.closed ? "already paid or completed" : null].filter(Boolean).join(" · ") }),
+        el("div", { style: "display:flex;gap:8px;margin-top:6px;flex-wrap:wrap" }, [
+          el("button", { class: "primary", style: "font-size:12px;padding:6px 12px", text: `Use the title's price (${money(r.titlePrice)})`, onclick: act(r.id, { useTitlePrice: true }, r.closed ? "This job is already paid or completed. Changing its price changes revenue and commission for that period. Continue?" : null) }),
+          el("button", { class: "ghost", style: "font-size:12px", text: `Keep ${money(r.basePrice)}`, onclick: act(r.id, { dismissPriceMismatch: true }) }),
+        ]),
+      ])),
+    ]));
+  }
+  content.appendChild(priceBox);
   content.appendChild(body);
+  loadPriceMismatches();
   await load();
 }
 
@@ -3338,7 +3367,10 @@ async function renderManagerJobs(content) {
     const card = el("div", { class: "jb-card", "data-job-id": job.id, style: cardStyle || "" }, [
       el("div", { style: "display:flex;justify-content:space-between;gap:8px;align-items:baseline" }, [
         el("span", { style: "display:flex;gap:2px 6px;align-items:baseline;flex-wrap:wrap;min-width:0" }, [el("span", { class: "mono", style: "font-weight:600;white-space:nowrap", text: time }), el("span", { class: "jb-first" })]),
-        el("span", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(job.total) }),
+        el("span", { style: "text-align:right" }, [
+          el("div", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(job.total) }),
+          job.balanceDue != null && !job.paid && col !== "out" ? el("div", { class: "muted", style: "font-size:11px", text: `balance ${money(job.balanceDue)}` }) : null,
+        ]),
       ]),
       el("div", { class: "jb-title", style: "font-weight:500;margin:2px 0", text: job.car || "(no title)" }),
       el("div", { class: "muted", style: "font-size:12px", text: [job.customerName, job.employeeNames && job.employeeNames !== "Unassigned" ? job.employeeNames : null, serviceShort].filter(Boolean).join(" · ") }),
@@ -3362,10 +3394,17 @@ async function renderManagerJobs(content) {
             phoneDigits ? el("a", { href: `tel:${phoneDigits}`, style: "color:var(--cyan);margin-left:8px", text: job.customerPhone }) : null,
           ]),
           el("div", { class: "muted", style: "font-size:12px", text: `${formatDateTime(job.date)} · ${job.baseService || "no service set"} · Rep: ${job.salesRepName || "none"}` }),
+          // Where the price came from, whenever GHL's value disagrees with it.
+          job.priceSource === "title" && job.ghlValue != null && Math.abs(job.ghlValue - job.basePrice) >= 0.5
+            ? el("div", { style: "font-size:11.5px;color:var(--amber)", text: `Price is from the title. GHL's value says ${money(job.ghlValue)}.` }) : null,
+          job.priceLocked && job.titlePrice != null && Math.abs(job.titlePrice - job.basePrice) >= 0.5
+            ? el("div", { style: "font-size:11.5px;color:var(--amber)", text: `Price was typed in by hand. The title says ${money(job.titlePrice)}.` }) : null,
         ]),
         el("div", { style: "text-align:right;flex:0 0 auto" }, [
           el("div", { class: "mono", style: "color:var(--amber);font-size:17px;font-weight:600", text: money(job.total) }),
           el("div", { class: "muted", style: "font-size:11px", text: `Base ${money(job.basePrice)}${job.upsellTotal > 0 ? ` + upsells ${money(job.upsellTotal)}` : ""}` }),
+          job.depositAmount > 0 ? el("div", { style: "font-size:11.5px;color:var(--green);margin-top:2px", text: `Deposit paid ${money(job.depositAmount)}` }) : null,
+          job.depositAmount > 0 && !job.paid ? el("div", { class: "mono", style: "font-size:13px;font-weight:600;margin-top:1px", text: `Balance due ${money(job.balanceDue)}` }) : null,
         ]),
       ]),
       el("div", { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:6px" }, jobTags(job, true)),
@@ -3557,12 +3596,19 @@ async function renderManagerJobs(content) {
           load();
         } catch (err) { cashNotice.textContent = err.message || "Something went wrong."; cashNotice.style.color = "var(--red)"; }
       };
-      const fullCashBtn = el("button", { class: "primary", onclick: () => saveCash(job.total), text: job.total > 0 ? `Full amount — ${money(job.total)}` : "Full amount — no price set" });
-      if (!(job.total > 0)) fullCashBtn.disabled = true;
+      // A customer who put a deposit down already paid that part (online), so only the BALANCE is handed over at pickup.
+      // Logging the whole price as cash would overstate the cash in the drawer by the deposit on every such job.
+      const hasDeposit = job.balanceDue != null && job.depositAmount > 0;
+      const owed = hasDeposit ? job.balanceDue : job.total;
+      const fullCashBtn = el("button", { class: "primary", onclick: () => saveCash(owed), text: owed > 0 ? `${hasDeposit ? "Balance due" : "Full amount"} — ${money(owed)}` : "Full amount — no price set" });
+      if (!(owed > 0)) fullCashBtn.disabled = true;
       customCashInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") saveCash(parseFloat(customCashInput.value)); });
-      cashPanel.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: "How much was paid in cash? This goes straight into Cash & Expenses." }));
+      cashPanel.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: hasDeposit
+        ? `How much was paid in cash? The ${money(job.depositAmount)} deposit was paid earlier, so the balance is what's handed over. This goes straight into Cash & Expenses.`
+        : "How much was paid in cash? This goes straight into Cash & Expenses." }));
       cashPanel.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [
         fullCashBtn,
+        hasDeposit && job.total > 0 ? el("button", { class: "ghost", onclick: () => saveCash(job.total), text: `Whole price — ${money(job.total)}` }) : null,
         customCashInput,
         el("button", { class: "ghost", onclick: () => saveCash(parseFloat(customCashInput.value)), text: "Log custom" }),
         el("button", { class: "ghost", onclick: () => { cashPanel.style.display = "none"; }, text: "Cancel" }),
@@ -3683,6 +3729,19 @@ async function renderManagerJobs(content) {
 
       const priceInput = el("input", { type: "number", value: job.basePrice, style: "max-width:90px;text-align:right;font-family:monospace" });
       const priceNotice = el("span", { class: "muted", style: "font-size:10px" });
+      const priceHelp = el("div", { style: "font-size:11.5px;margin-top:6px;text-align:right" });
+      if (job.titlePrice != null) {
+        priceHelp.appendChild(el("div", { class: "muted", text: `The title says ${money(job.titlePrice)}${job.depositAmount > 0 ? ` with a ${money(job.depositAmount)} deposit` : ""}${job.ghlValue != null ? ` · GHL's value is ${money(job.ghlValue)}` : ""}.` }));
+        const row = el("div", { style: "display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px" });
+        if (job.priceLocked || Math.abs(job.titlePrice - job.basePrice) >= 0.5) row.appendChild(el("button", { class: "ghost", style: "font-size:11px;padding:3px 8px", text: `Use the title's price (${money(job.titlePrice)})`, onclick: async () => {
+          if ((job.paid || job.completed) && !confirm("This job is already paid or completed. Changing its price changes revenue and commission for that period. Continue?")) return;
+          try { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ useTitlePrice: true }) }); load(); } catch (err) { priceNotice.textContent = err.message; priceNotice.style.color = "var(--red)"; }
+        } }));
+        if (job.ghlValue != null && job.ghlValue > 0 && Math.abs(job.ghlValue - job.basePrice) >= 0.5) row.appendChild(el("button", { class: "ghost", style: "font-size:11px;padding:3px 8px", text: `Use GHL's value (${money(job.ghlValue)})`, onclick: async () => {
+          await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ basePrice: job.ghlValue }) }); load();
+        } }));
+        if (row.children.length) priceHelp.appendChild(row);
+      }
       const priceEditor = el("div", { style: "display:flex;align-items:center;gap:6px;justify-content:flex-end" }, [
         el("span", { class: "muted", style: "font-size:11px", text: "Base price:" }),
         priceInput,
@@ -3794,7 +3853,7 @@ async function renderManagerJobs(content) {
         ]),
         looksOverwritten ? el("div", { "data-part": "warn", style: "margin-bottom:10px;padding:8px 10px;border:0.5px solid var(--red);border-radius:8px;color:var(--red);font-size:11.5px", text: "⚠ Marked as done, but the appointment is in the future. A newer booking may have overwritten an earlier job." + (session.role === "owner" ? " Use “Split off earlier appointment” to separate them." : " Ask the owner to check it.") }) : null,
         session.role === "owner" ? tagPart("edit", splitPanel) : null,
-        el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [priceEditor, priceNotice]),
+        el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [priceEditor, priceNotice, priceHelp]),
         el("div", { "data-part": "edit", style: "margin-bottom:10px" }, [
           el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "DATE / TIME — for the rare case it needs a manual fix" }),
           (() => {
