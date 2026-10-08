@@ -10,8 +10,12 @@ const toNumber = (s) => parseFloat(String(s).replace(/,/g, ""));
 const round2 = (n) => Math.round(n * 100) / 100;
 
 function parseTitlePricing(title) {
-  const t = String(title || "");
+  let t = String(title || "");
   if (!t.trim()) return null;
+  // The dollar sign can come AFTER the number too ("299$-50$ depo"). Turn that into the usual "$299-$50 depo" so one set of rules reads both.
+  // A number is only changed when nothing letter-like sits right in front of it, so "F150$" or "Model3$" never becomes a price.
+  t = t.replace(/(\$\s*\d[\d,]*(?:\.\d{1,2})?)\s*\$/g, "$1");                       // "$299$" -> "$299"
+  t = t.replace(/(^|[^\w$.,])(\d[\d,]*(?:\.\d{1,2})?)\s*\$/g, "$1$$$2");            // "299$"  -> "$299"
   const found = [];
   // "$644-$50", "$249 - $50depo", "$644 - 50", "$644 minus $50"
   const dollarPair = new RegExp(`\\$\\s*(${NUM})\\s*(?:-|–|—|minus)\\s*\\$?\\s*(${NUM})`, "gi");
