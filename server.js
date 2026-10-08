@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-07-cash";
+const BUILD = "2026-10-08-cashaudit";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1211,6 +1211,19 @@ app.post("/api/manager/cash-entries", requireManager, (req, res) => {
   const amt = parseFloat(amount);
   if (!amt || amt <= 0) return res.status(400).json({ error: "A real amount is required." });
   const actor = actorInfo(req, db);
+  // Two mistakes that wrecked the cash numbers: the same deposit entered twice (by two people), and a deposit far bigger
+  // than the cash that has ever been recorded (a typo, or a total that isn't drawer cash). Neither is blocked outright,
+  // but the person has to say "yes, that's right" before it counts.
+  if (!req.body.confirmDuplicate && amt >= 100 && (type === "bankDeposit" || type === "cashOut")) {
+    const dayAgo36 = Date.now() - 36 * 3600 * 1000;
+    const twin = db.cashEntries.find((e) => e.type === type && !e.autoFromJob && Math.abs((Number(e.amount) || 0) - amt) < 0.005 && Date.parse(e.timestamp) >= dayAgo36);
+    if (twin) return res.status(409).json({ needsConfirm: "duplicate", error: `${twin.enteredByName || "Someone"} already logged ${type === "bankDeposit" ? "a deposit" : "a cash-out"} of exactly $${amt.toFixed(2)} ${new Date(twin.timestamp).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}. This may be the same one entered twice.` });
+  }
+  if (type === "bankDeposit" && !req.body.confirmOverdraw) {
+    const sum = (t) => db.cashEntries.filter((e) => e.type === t).reduce((a, e) => a + (Number(e.amount) || 0), 0);
+    const inDrawer = (Number(db.cashOpeningBalance) || 0) + sum("cashIn") - sum("cashOut") - sum("bankDeposit");
+    if (amt > Math.max(inDrawer, 0) + 0.005) return res.status(409).json({ needsConfirm: "overdraw", error: `A $${amt.toFixed(2)} deposit is more than the cash that has been recorded as coming in. Please check the amount for a typo, and that this is cash from the drawer.` });
+  }
   const entry = {
     id: newId(), type, amount: amt, category: category && CASH_CATEGORIES.includes(category) ? category : "Other",
     note: (note || "").trim(), isOnline: !!isOnline, receiptPhoto: null,
@@ -1240,8 +1253,22 @@ app.patch("/api/manager/cash-entries/:id", requireManager, (req, res) => {
   if (actor.type !== "owner" && !(entry.enteredByType === actor.type && entry.enteredById === actor.id)) {
     return res.status(403).json({ error: "You can only edit your own entries." });
   }
-  if (req.body.amount !== undefined) entry.amount = parseFloat(req.body.amount) || entry.amount;
-  if (req.body.category !== undefined && CASH_CATEGORIES.includes(req.body.category)) entry.category = req.body.category;
+  const logChange = (field, from, to) => { entry.editLog = entry.editLog || []; entry.editLog.push({ at: new Date().toISOString(), by: actor.name, field, from, to }); };
+  if (req.body.amount !== undefined) {
+    const newAmt = parseFloat(req.body.amount) || entry.amount;
+    if (newAmt !== entry.amount) { logChange("amount", entry.amount, newAmt); entry.amount = newAmt; }
+  }
+  if (req.body.type !== undefined && req.body.type !== entry.type) {
+    if (actor.type !== "owner") return res.status(403).json({ error: "Only the owner can change what kind of entry this is." });
+    if (!["cashIn", "cashOut", "cardExpense", "bankDeposit"].includes(req.body.type)) return res.status(400).json({ error: "Invalid entry type." });
+    if (entry.autoFromJob) return res.status(400).json({ error: "This cash-in belongs to a job on Job Status, so it can't be changed into something else here." });
+    logChange("type", entry.type, req.body.type);
+    entry.type = req.body.type;
+  }
+  if (req.body.category !== undefined && CASH_CATEGORIES.includes(req.body.category)) {
+    if (req.body.category !== entry.category) logChange("category", entry.category, req.body.category);
+    entry.category = req.body.category;
+  }
   if (req.body.note !== undefined) entry.note = req.body.note.trim();
   if (req.body.isOnline !== undefined) entry.isOnline = !!req.body.isOnline;
   saveDB(db);
@@ -1332,6 +1359,67 @@ app.get("/api/owner/cash-entries", requireOwner, (req, res) => {
     outflowsOutsidePeriod,
     byCategory: Object.entries(byCategory).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total),
   });
+});
+
+// Looks through every cash entry for the mistakes that make "cash on hand" wrong, and says exactly which entries they are:
+//  - a bank deposit bigger than the cash that had been recorded as coming in at that moment (typo, or not drawer cash)
+//  - the same amount entered twice within a day and a half
+//  - a cash-OUT whose note says "payment" (probably money that came IN, entered the wrong way round)
+function cashAuditFor(db) {
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const all = (db.cashEntries || []).map((e) => ({ ...e, amount: Number(e.amount) || 0 }));
+  const show = (e) => ({ id: e.id, type: e.type, amount: round2(e.amount), category: e.category, note: e.note || "", enteredByName: e.enteredByName || "", timestamp: e.timestamp, autoFromJob: !!e.autoFromJob });
+  // 1) walk through time, tracking what was in the drawer, and note each deposit against it
+  let balance = Number(db.cashOpeningBalance) || 0;
+  const deposits = [];
+  all.slice().sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0)).forEach((e) => {
+    if (e.type === "cashIn") balance += e.amount;
+    else if (e.type === "cashOut" || e.type === "bankDeposit") {
+      if (e.type === "bankDeposit") {
+        const over = Math.max(0, e.amount - Math.max(balance, 0));
+        deposits.push({ ...show(e), balanceBefore: round2(balance), overdrawn: over > 0.005, overdrawsBy: round2(over) });
+      }
+      balance -= e.amount;
+    }
+  });
+  const biggest = deposits.slice().sort((a, b) => b.amount - a.amount).slice(0, 8);
+  const overdrawn = deposits.filter((d) => d.overdrawn);
+  // 2) the same entry twice
+  const groups = {};
+  // Only deposits and larger cash-outs: two customers paying the same round amount in cash on one day is normal, so
+  // matching Cash-in amounts say nothing about a repeat.
+  all.filter((e) => !e.autoFromJob && !e.auditDismissed && ((e.type === "bankDeposit" && e.amount >= 25) || (e.type === "cashOut" && e.amount >= 250)))
+    .forEach((e) => { const k = `${e.type}|${e.amount.toFixed(2)}`; (groups[k] = groups[k] || []).push(e); });
+  const duplicates = [];
+  Object.values(groups).forEach((g) => {
+    g.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+    for (let i = 1; i < g.length; i++) if (Date.parse(g[i].timestamp) - Date.parse(g[i - 1].timestamp) <= 36 * 3600 * 1000) duplicates.push({ first: show(g[i - 1]), second: show(g[i]) });
+  });
+  duplicates.sort((a, b) => b.first.amount - a.first.amount);
+  // 3) cash-outs that look like money coming in
+  const wrongDirection = all.filter((e) => e.type === "cashOut" && !e.autoFromJob && !e.auditDismissed && !/refund/i.test(e.note || "")).map((e) => {
+    const noteSaysPayment = /\bpayment\b/i.test(e.note || "");
+    const filedAsPayment = e.category === "Customer Payment";
+    if (!noteSaysPayment && !filedAsPayment) return null;
+    return { ...show(e), confidence: noteSaysPayment ? "high" : "low", reason: noteSaysPayment ? "The note says payment, which sounds like money coming IN." : "Filed under Customer Payment, which is the category for money coming in." };
+  }).filter(Boolean).sort((a, b) => (a.confidence === b.confidence ? b.amount - a.amount : a.confidence === "high" ? -1 : 1)).slice(0, 15);
+  return {
+    entryCount: all.length,
+    deposits: { count: deposits.length, total: round2(deposits.reduce((a, d) => a + d.amount, 0)), overdrawnCount: overdrawn.length, overdrawnTotal: round2(overdrawn.reduce((a, d) => a + d.amount, 0)), biggest },
+    duplicates: duplicates.slice(0, 15),
+    wrongDirection,
+  };
+}
+app.get("/api/owner/cash-audit", requireOwner, (req, res) => res.json(cashAuditFor(loadDB())));
+// "That's fine, stop flagging it" - for entries the audit suspects but the owner knows are right.
+app.post("/api/owner/cash-audit/dismiss", requireOwner, (req, res) => {
+  const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : [];
+  if (ids.length === 0 || ids.length > 100) return res.status(400).json({ error: "Nothing to dismiss." });
+  const db = loadDB();
+  let n = 0;
+  db.cashEntries.forEach((e) => { if (ids.includes(e.id)) { e.auditDismissed = true; n += 1; } });
+  saveDB(db);
+  res.json({ ok: true, dismissed: n });
 });
 
 // What was already in the drawer before cash started being tracked here. Without it, a catch-up bank deposit (or any
