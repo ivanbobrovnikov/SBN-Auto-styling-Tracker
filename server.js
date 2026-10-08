@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-08-cashaudit";
+const BUILD = "2026-10-08-titleprice";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -189,8 +189,43 @@ function inRange(dateStr, start, end) {
 function saleUpsellTotal(sale) {
   return (sale.upsells || []).reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
 }
+const { parseTitlePricing } = require("./pricing");
 function saleTotal(sale) {
   return (parseFloat(sale.basePrice) || 0) + saleUpsellTotal(sale);
+}
+// The deposit typed at the end of the title ("$644-$50" means $50 was already paid), and what is still owed after it.
+// Only the deposit is subtracted: a customer who paid $50 down online only hands over the rest at pickup.
+function depositOf(sale) { return Math.max(0, parseFloat(sale.titleDeposit) || 0); }
+function balanceDueOf(sale) { return Math.max(0, Math.round((saleTotal(sale) - depositOf(sale)) * 100) / 100); }
+// The price is typed into the appointment title far more reliably than GHL's opportunity value gets updated, so when the
+// title has one, it is the job's price. The order is: a price someone typed in here by hand (never overwritten) > the price
+// in the title > GHL's opportunity value (kept on record as ghlValue so a disagreement is visible).
+// A job that is already paid or completed keeps its price, since that's history that payroll and revenue already rest on.
+function applyTitlePricing(db, sale, opts = {}) {
+  const tp = parseTitlePricing(sale.car);
+  if ((tp ? tp.total : null) !== (sale.titlePrice == null ? null : sale.titlePrice)) sale.priceMismatchDismissed = false; // a new price in the title is worth another look
+  sale.titlePrice = tp ? tp.total : null;
+  sale.titleDeposit = tp ? tp.deposit : null;
+  if (!tp) return false;
+  if (!opts.force) {
+    if (sale.priceLocked) return false;
+    if ((sale.paid || sale.completed) && !opts.allowClosed) return false;
+    if (sale.status === "cancelled" || sale.status === "no_show") return false;
+  }
+  const prior = opts.priorPrice !== undefined ? opts.priorPrice : parseFloat(sale.basePrice) || 0;
+  sale.priceSource = "title";
+  if (Math.abs((parseFloat(sale.basePrice) || 0) - tp.total) >= 0.005) sale.basePrice = tp.total;
+  if (!opts.silent && Math.abs(prior - sale.basePrice) >= 0.005) {
+    if (!db.auditLog) db.auditLog = [];
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (price from the title)", saleId: sale.id, car: sale.car, field: "Base price", oldValue: prior, newValue: sale.basePrice });
+    db.auditLog = db.auditLog.slice(0, 1000);
+  }
+  return Math.abs(prior - sale.basePrice) >= 0.005;
+}
+function backfillTitlePricing(db) {
+  let changed = 0;
+  db.sales.forEach((sale) => { if (applyTitlePricing(db, sale)) changed += 1; });
+  return changed;
 }
 function money2(n) {
   return (Math.round((n || 0) * 100) / 100).toFixed(2);
@@ -521,7 +556,14 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
   else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
   sale.baseService = baseService || sale.baseService || "";
-  sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
+  // GHL's opportunity value is kept on record, but it never overwrites a price someone typed in by hand, and the price in the
+  // title (see applyTitlePricing) takes priority over it.
+  const priceBeforeUpdate = parseFloat(sale.basePrice) || 0;
+  if (basePrice !== undefined) sale.ghlValue = parseFloat(basePrice) || 0;
+  if (!sale.priceLocked) sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
+  else sale.basePrice = sale.basePrice || 0;
+  sale.priceSource = sale.priceLocked ? "manual" : "ghl";
+  applyTitlePricing(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true }); // a real GHL update for this booking: the title's price wins, paid or not
   sale.calendarId = calendarId || sale.calendarId || null;
   sale.syncedFromGHL = true;
   if (!sale.status) sale.status = "pending";
@@ -992,7 +1034,11 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   const pool = pending.length ? pending : matches;
   const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
-  if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
+  if (basePrice !== undefined) {
+    sale.ghlValue = parseFloat(basePrice) || 0;
+    if (!sale.priceLocked) sale.basePrice = sale.ghlValue; // a price typed by hand is not replaced by GHL's value
+    applyTitlePricing(db, sale, { priorPrice: before.basePrice });
+  }
   const attribution = resolveSalesRepAttribution(db, salesRepName, sale.car);
   if (attribution) {
     sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
@@ -1124,6 +1170,10 @@ app.post("/api/sales", requireManager, (req, res) => {
     completed: false,
     paid: false,
   };
+  // Left blank, the price comes from the title ("... $644-$50"); a price typed in here is used exactly as typed.
+  if ((parseFloat(basePrice) || 0) > 0) { sale.priceLocked = true; sale.priceSource = "manual"; }
+  else { const tp = parseTitlePricing(sale.car); if (tp) sale.basePrice = tp.total; }
+  applyTitlePricing(db, sale, { silent: true }); // also records the deposit and the title's price
   db.sales.push(sale);
   saveDB(db);
   res.json({ ok: true, id: sale.id });
@@ -1524,6 +1574,22 @@ app.get("/api/manager/unmarked-appointments", requireManager, (req, res) => {
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
+// Jobs whose title carries a price that is different from the one the tracker is using. Open jobs fix themselves (unless the
+// price was typed by hand); these are the ones that didn't: a price set by hand, or a job that is already paid or completed.
+app.get("/api/manager/price-mismatches", requireManager, (req, res) => {
+  const db = loadDB();
+  const since = Date.now() - 45 * 24 * 3600 * 1000;
+  const rows = db.sales.filter((s) => {
+    if (s.status === "cancelled" || s.status === "no_show" || s.priceMismatchDismissed) return false;
+    const tp = parseTitlePricing(s.car);
+    return tp && Math.abs((parseFloat(s.basePrice) || 0) - tp.total) >= 0.5 && Date.parse(s.date) >= since;
+  }).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60).map((s) => {
+    const tp = parseTitlePricing(s.car);
+    return { id: s.id, car: s.car, customerName: s.customerName || "", date: s.date, basePrice: parseFloat(s.basePrice) || 0, titlePrice: tp.total, titleDeposit: tp.deposit, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceLocked: !!s.priceLocked, closed: !!(s.paid || s.completed) };
+  });
+  res.json(rows);
+});
+
 app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   const db = loadDB();
   const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
@@ -1602,7 +1668,7 @@ app.post("/api/cross-location/cleanup-fix", (req, res) => {
   const sale = db.sales.find((s) => s.id === req.body.saleId);
   if (!sale) return res.status(404).json({ error: "Job not found." });
   const { basePrice, baseService, isWalkIn, isOnlineBooking, salesRepId } = req.body;
-  if (basePrice !== undefined) sale.basePrice = parseFloat(basePrice) || 0;
+  if (basePrice !== undefined) { sale.basePrice = parseFloat(basePrice) || 0; if (sale.basePrice > 0) { sale.priceLocked = true; sale.priceSource = "manual"; } }
   if (baseService !== undefined) sale.baseService = baseService;
   if (isWalkIn !== undefined) sale.isWalkIn = !!isWalkIn;
   if (isOnlineBooking !== undefined) sale.isOnlineBooking = !!isOnlineBooking;
@@ -1663,8 +1729,11 @@ app.post("/api/cross-location/job-add", (req, res) => {
   if (!apptIso) return res.status(400).json({ error: "Enter the appointment date and time." });
   const closedIso = closedAt ? normalizeDate(closedAt) : new Date().toISOString();
   if (!closedIso) return res.status(400).json({ error: "That closing time isn't a valid date and time." });
-  const price = basePrice === undefined || basePrice === null || basePrice === "" ? 0 : parseFloat(basePrice);
-  if (!(price >= 0)) return res.status(400).json({ error: "Price must be a number, 0 or more." });
+  const typedPrice = basePrice === undefined || basePrice === null || basePrice === "" ? 0 : parseFloat(basePrice);
+  if (!(typedPrice >= 0)) return res.status(400).json({ error: "Price must be a number, 0 or more." });
+  // Left blank, the price comes from the title ("... $644-$50"); a price typed here is used as typed.
+  const titlePricing = parseTitlePricing(car);
+  const price = typedPrice > 0 ? typedPrice : (titlePricing ? titlePricing.total : 0);
   const st = status || "pending";
   if (!["pending", "arrived", "no_show"].includes(st)) return res.status(400).json({ error: "Unknown status." });
   let rep = null;
@@ -1691,6 +1760,8 @@ app.post("/api/cross-location/job-add", (req, res) => {
   if (isWalkIn) { sale.isWalkIn = true; sale.salesRepName = "Walk-in (booked by staff)"; }
   else if (isOnlineBooking) { sale.isOnlineBooking = true; sale.salesRepName = "Online Booking"; }
   else if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
+  if (typedPrice > 0) { sale.priceLocked = true; sale.priceSource = "manual"; } // typed in the add form: used exactly as typed
+  applyTitlePricing(db, sale, { silent: true }); // records the deposit and the title's price too
   db.sales.push(sale);
   if (!db.auditLog) db.auditLog = [];
   db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Rep tracker (owner)", saleId: sale.id, car: sale.car, field: "Job added", oldValue: null, newValue: `${sale.salesRepName} · $${sale.basePrice}` });
@@ -1859,9 +1930,10 @@ function reconcileCashPayment(db, req, sale, requestedAmount) {
     }
     return;
   }
-  // Newly marked with no amount given (e.g. the quick button on Unpaid Arrivals) defaults to
-  // the full job total; an unrelated update to an already-logged job keeps what's there.
-  const amount = requestedAmount !== undefined ? requestedAmount : existing ? existing.amount : Math.round(saleTotal(sale) * 100) / 100;
+  // Newly marked with no amount given (e.g. the quick button on Unpaid Arrivals) defaults to what is still owed after the
+  // deposit (the whole total when there was none), because a deposit was paid earlier, not handed over in cash at pickup.
+  // An unrelated update to an already-logged job keeps what's there.
+  const amount = requestedAmount !== undefined ? requestedAmount : existing ? existing.amount : balanceDueOf(sale);
   if (!(amount > 0)) return; // a job with no price yet has no cash amount to log
   if (existing) {
     if (linked.length > 1) db.cashEntries = db.cashEntries.filter((e) => !(e.autoFromJob && e.saleId === sale.id && e !== existing));
@@ -1947,6 +2019,7 @@ function mergeJobPair(db, req, liveId, earlierId) {
   if (live.car) earlier.car = live.car;
   if (live.baseService) earlier.baseService = live.baseService;
   if ((parseFloat(live.basePrice) || 0) > 0) earlier.basePrice = live.basePrice;
+  applyTitlePricing(db, earlier, { silent: true });
   if (earlier.status === "no_show" || earlier.status === "cancelled") earlier.status = "pending"; // it's a live booking again
   if (!earlier.salesRepId && live.salesRepId) { earlier.salesRepId = live.salesRepId; earlier.salesRepName = live.salesRepName; }
   if (!(earlier.employeeIds || []).length && (live.employeeIds || []).length) { earlier.employeeIds = live.employeeIds; earlier.employeeNames = live.employeeNames; }
@@ -2073,6 +2146,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
+    titlePrice: s.titlePrice == null ? null : s.titlePrice, depositAmount: depositOf(s), balanceDue: depositOf(s) > 0 ? balanceDueOf(s) : null, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceSource: s.priceSource || null, priceLocked: !!s.priceLocked,
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
     photos: s.photos || { before: {}, after: {} }, notes: s.notes || [],
   })));
@@ -2105,6 +2179,18 @@ function patchJobHandler(req, res) {
     const newPrice = parseFloat(req.body.basePrice) || 0;
     logAudit(db, req, sale, "Base price", sale.basePrice, newPrice);
     sale.basePrice = newPrice;
+    // Typed in by hand: from now on neither GHL's value nor the title overrides it (until "Use the title's price" is tapped).
+    sale.priceLocked = true;
+    sale.priceSource = "manual";
+  }
+  if (req.body.dismissPriceMismatch === true) sale.priceMismatchDismissed = true;
+  if (req.body.useTitlePrice === true) {
+    const tp = parseTitlePricing(sale.car);
+    if (!tp) return res.status(400).json({ error: "There's no price in this job's title to use." });
+    const before = parseFloat(sale.basePrice) || 0;
+    sale.priceLocked = false;
+    applyTitlePricing(db, sale, { force: true, silent: true });
+    if (Math.abs(before - sale.basePrice) >= 0.005) logAudit(db, req, sale, "Base price (from the title)", before, sale.basePrice);
   }
   // Which service this actually is — needed for the Window Tint / Ceramic Coating / PPF
   // column split, and previously had no way to set or fix it anywhere in the app.
@@ -2123,6 +2209,7 @@ function patchJobHandler(req, res) {
       // A title someone corrected by hand is theirs: neither the background sync nor a later GHL event may change it back.
       // (A title picked straight from GHL's own appointment list isn't hand-typed, so it stays free to follow GHL.)
       sale.titleLocked = !req.body.titleFromGhl;
+      applyTitlePricing(db, sale);
     } else if (req.body.titleFromGhl) {
       sale.titleLocked = false;
     }
@@ -3186,6 +3273,7 @@ async function runTitleSync() {
         if (title && title !== sale.car) {
           const before = sale.car;
           sale.car = title;
+          applyTitlePricing(db, sale);
           if (!db.auditLog) db.auditLog = [];
           db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
           db.auditLog = db.auditLog.slice(0, 1000);
@@ -3197,8 +3285,9 @@ async function runTitleSync() {
       // one bad lookup shouldn't stop the whole run - just skip it and keep going
     }
   }
-  if (updated > 0) saveDB(db);
-  return { skipped: false, candidateCount: candidates.length, checked, updated, ambiguous };
+  const repriced = backfillTitlePricing(db); // every job picks up the price its title carries, even if the title didn't change
+  if (updated > 0 || repriced > 0) saveDB(db);
+  return { skipped: false, candidateCount: candidates.length, checked, updated, ambiguous, repriced };
 }
 
 // Lets a manager see EXACTLY what GHL has for this job's customer, so the right title (and time) can be applied with one
@@ -3869,6 +3958,9 @@ const server = app.listen(PORT, () => {
   // directly, on its own, every 30 minutes, no manual click required.
   setTimeout(runTitleSync, 30 * 1000);
   setInterval(runTitleSync, 30 * 60 * 1000);
+  // Jobs already in the tracker pick up the price their title carries right away (open, unlocked jobs only; paid and completed
+  // jobs keep their price, and are listed in Cleanup if the title disagrees).
+  try { const db = loadDB(); if (backfillTitlePricing(db) > 0) saveDB(db); } catch (e) { console.error("title price backfill failed:", e.message); }
 });
 // A walk-around video can take a while to upload on a slow shop wifi or mobile connection —
 // Node's default request timeout is too tight for that, so this gives uploads real room.
