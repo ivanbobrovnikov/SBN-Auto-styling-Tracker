@@ -1,3 +1,78 @@
+// The Job Status page's styling travels WITH the page code. If a deployment ever updates this file but leaves an older
+// style.css in place (or a browser keeps showing a stale copy of it), the page would otherwise render as unstyled stacked
+// text. Putting the rules here means the page and its styling can never be out of step.
+(function installJobStatusStyles() {
+  if (document.getElementById("jobs-css")) return;
+  const style = document.createElement("style");
+  style.id = "jobs-css";
+  style.textContent = `
+/* Job Status: compact, searchable appointment rows */
+.appt-bar { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 8px 0 4px; margin-bottom: 8px; border-bottom: 0.5px solid var(--borderSoft); }
+.appt-chips { display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 4px; }
+.appt-chip { flex: 0 0 auto; padding: 6px 11px; font-size: 12.5px; white-space: nowrap; }
+.appt-sum { cursor: pointer; }
+.appt-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.appt-tag { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; padding: 2px 6px; border-radius: 5px; border: 0.5px solid var(--border); white-space: nowrap; text-decoration: none; }
+
+/* Job Status: status board / list with a permanent job panel (notes on the right).
+   Three tiers: phones (under 700px) get a sheet that slides in from the right; 700px and up gets the panel beside the
+   board, with one board column at a time; 1000px and up gets all three board columns side by side. */
+.jp-main { display: block; }
+.jb-board { display: block; }
+.jb-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.jb-col { display: none; }
+.jb-colhead { display: none; font-size: 12.5px; font-weight: 600; padding: 4px 2px 6px; border-top: 2px solid var(--border); margin-bottom: 8px; color: var(--sub); }
+.jb-col-here .jb-colhead { border-top-color: var(--green); color: var(--green); }
+.jb-board.show-coming .jb-col-coming, .jb-board.show-here .jb-col-here, .jb-board.show-done .jb-col-done { display: block; }
+.jb-card { background: var(--card); border: 0.5px solid var(--border); border-radius: 9px; padding: 9px 10px; margin-bottom: 8px; cursor: pointer; }
+.jb-card.sel { border-color: var(--amber); background: var(--cardAlt); }
+.jb-card .tab-btn { padding: 8px 14px; }
+.jb-title { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.jp-host { min-width: 0; }
+.jp-panel { background: var(--card); border: 0.5px solid var(--border); border-radius: 10px; padding: 14px; }
+.jp-sec { margin-bottom: 14px; }
+.jp-top, .jp-tabs, .jp-close { display: none; }
+.jp-editgroup { display: none; margin-top: 8px; padding: 10px 12px; border: 0.5px dashed var(--border); border-radius: 8px; }
+.jp-editgroup.open { display: block; }
+.jp-flash { outline: 1.5px solid var(--green); outline-offset: 3px; border-radius: 8px; }
+.appt-bar input[type="search"] { order: 3; flex: 1 1 100%; min-width: 140px; }
+
+@media (min-width: 700px) {
+  #app.app-wide { max-width: 1500px; }
+  .jp-main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 14px; align-items: start; }
+  .jp-host { position: sticky; top: 8px; max-height: calc(100vh - 16px); overflow-y: auto; }
+}
+@media (min-width: 1000px) {
+  .jb-board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: start; }
+  .jb-board .jb-col { display: block; }
+  .jb-colhead { display: block; }
+  .jb-tabs { display: none; }
+  .jb-card .tab-btn { padding: 5px 10px; }
+  .appt-bar input[type="search"] { order: 0; flex: 1 1 140px; }
+}
+@media (min-width: 1150px) {
+  .jp-main { grid-template-columns: minmax(0, 1fr) 410px; }
+}
+@media (max-width: 699px) {
+  #app.app-wide { padding: 12px; }
+  .jp-host { position: fixed; top: 0; right: 0; bottom: 0; width: 100%; z-index: 70; background: var(--bg); overflow-y: auto; padding: 10px 10px 90px; box-sizing: border-box; transform: translateX(105%); visibility: hidden; transition: transform 0.2s ease; }
+  .jp-host.open { transform: translateX(0); visibility: visible; }
+  .jp-top { display: block; margin-bottom: 8px; }
+  .jp-close { display: inline-block; }
+  .jp-tabs { display: flex; gap: 6px; margin: 10px 0 12px; }
+  .jp-panel [data-tab] { display: none; }
+  .jp-panel.tab-job [data-tab="job"], .jp-panel.tab-notes [data-tab="notes"], .jp-panel.tab-edit [data-tab="edit"] { display: block; }
+  .jp-panel.tab-job .jp-tab-job, .jp-panel.tab-notes .jp-tab-notes, .jp-panel.tab-edit .jp-tab-edit { background: var(--cardAlt); color: var(--amber); border-color: var(--amber); }
+  .jp-editgroup { display: block; margin-top: 0; }
+  .jp-edittoggle { display: none; }
+  .jp-daynav { gap: 6px !important; flex-wrap: nowrap !important; }
+  .jp-daynav button { padding: 6px 8px; font-size: 12.5px; white-space: nowrap; }
+  .jp-daynav input[type="date"] { width: 124px !important; }
+}
+`;
+  document.head.appendChild(style);
+})();
+
 const el = (tag, attrs = {}, children = []) => {
   const e = document.createElement(tag);
   // Every button defaults to type="button" unless explicitly overridden. Without this, a
@@ -15,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-06-board";
+const UI_BUILD = "2026-10-07-board3";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3134,7 +3209,7 @@ async function renderManagerJobs(content) {
       : null;
     const card = el("div", { class: "jb-card", "data-job-id": job.id, style: cardStyle || "" }, [
       el("div", { style: "display:flex;justify-content:space-between;gap:8px;align-items:baseline" }, [
-        el("span", { style: "display:flex;gap:6px;align-items:baseline" }, [el("span", { class: "mono", style: "font-weight:600", text: time }), el("span", { class: "jb-first" })]),
+        el("span", { style: "display:flex;gap:2px 6px;align-items:baseline;flex-wrap:wrap;min-width:0" }, [el("span", { class: "mono", style: "font-weight:600;white-space:nowrap", text: time }), el("span", { class: "jb-first" })]),
         el("span", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(job.total) }),
       ]),
       el("div", { class: "jb-title", style: "font-weight:500;margin:2px 0", text: job.car || "(no title)" }),
@@ -3218,7 +3293,7 @@ async function renderManagerJobs(content) {
     ["done", "Done", (j) => !!(j.completed && j.paid)],
     ["out", "No-show / Cancelled", (j) => j.status === "no_show" || j.status === "cancelled"],
   ];
-  const searchInput = el("input", { type: "search", placeholder: "Search customer, car, phone, tech or rep…", style: "flex:1;min-width:140px" });
+  const searchInput = el("input", { type: "search", placeholder: "Search customer, car, phone, tech or rep…" }); // its size is set by the stylesheet, per screen size
   const serviceSel = el("select", { style: "max-width:130px;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px" }, [
     el("option", { value: "all", text: "All services" }), el("option", { value: "Window Tint", text: "Tint" }),
     el("option", { value: "Ceramic Coating", text: "Ceramic" }), el("option", { value: "PPF", text: "PPF" }),
