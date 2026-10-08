@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-07-board3";
+const UI_BUILD = "2026-10-07-cash";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1718,12 +1718,51 @@ async function renderOwnerCash(content) {
     const qs = new URLSearchParams(p).toString();
     const d = await api(`/api/owner/cash-entries?${qs}`);
     clearHeightLocked(body);
+    const signed = (n) => (n < 0 ? "−" + money(-n) : money(n));
+    body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text: "Cash in, Cash out, Card expenses and Bank deposits follow the period you pick above. Net cash on hand is everything, all time." }));
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash in (from customers)" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.totalCashIn) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash out" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCashOut) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Card expenses" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCardExpense) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Bank deposits" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(d.totalBankDeposits) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Net cash on hand" }), el("div", { class: "metric-value mono", style: `color:${d.netCash >= 0 ? "var(--green)" : "var(--red)"}`, text: money(d.netCash) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Net cash on hand (all time)" }), el("div", { class: "metric-value mono", style: `color:${d.netCash >= 0 ? "var(--green)" : "var(--red)"}`, text: signed(d.netCash) })]),
+    ]));
+    // Show the math behind "cash on hand", so it is never a mystery number.
+    const line = (label, value, strong) => el("div", { class: "row", style: `font-size:13px;margin-bottom:4px;${strong ? "font-weight:600;border-top:0.5px solid var(--border);padding-top:6px;margin-top:6px" : ""}` }, [el("span", { text: label }), el("span", { class: "mono", text: value })]);
+    const openingInput = el("input", { type: "number", step: "0.01", min: "0", placeholder: "0.00", value: d.openingBalance ? String(d.openingBalance) : "", style: "max-width:140px" });
+    const openingNote = el("div", { style: "font-size:12px;margin-top:4px" });
+    const saveOpening = el("button", { class: "ghost", style: "font-size:12px", text: "Save opening balance", onclick: async () => {
+      openingNote.textContent = ""; openingNote.style.color = "";
+      try { await api("/api/owner/cash-opening-balance", { method: "POST", body: JSON.stringify({ amount: openingInput.value === "" ? 0 : Number(openingInput.value) }) }); load(); }
+      catch (err) { openingNote.style.color = "var(--red)"; openingNote.textContent = err.message || "Couldn't save that."; }
+    } });
+    const outsideCount = (d.outflowsOutsidePeriod || []).length;
+    const outsideList = el("div", { style: `margin-top:8px;display:${d.netCash < 0 ? "block" : "none"}` }, (d.outflowsOutsidePeriod || []).map((e) => el("div", { class: "row", style: "font-size:12px;padding:4px 0;border-top:0.5px solid var(--border)" }, [
+      el("span", { text: `${formatDateTime(e.timestamp)} · ${e.type === "bankDeposit" ? "Bank deposit" : "Cash out"} · ${e.category}${e.enteredByName ? " · " + e.enteredByName : ""}${e.note ? " · " + e.note : ""}` }),
+      el("span", { class: "mono", text: money(e.amount) }),
+    ])));
+    const outsideToggle = outsideCount ? el("button", { class: "ghost", style: "font-size:12px;margin-top:8px", text: `${d.netCash < 0 ? "▾" : "▸"} Cash out and deposits from OTHER periods (${outsideCount})`, onclick: () => {
+      const open = outsideList.style.display !== "none";
+      outsideList.style.display = open ? "none" : "block";
+      outsideToggle.textContent = `${open ? "▸" : "▾"} Cash out and deposits from OTHER periods (${outsideCount})`;
+    } }) : null;
+    if (d.netCash < 0) {
+      body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [
+        el("div", { style: "font-weight:600;color:var(--red);margin-bottom:4px", text: `Cash out and deposits add up to ${money(-d.netCash)} MORE than the cash recorded as coming in` }),
+        el("div", { class: "muted", style: "font-size:12.5px", text: "That usually means a bank deposit or expense was logged for cash that came in before cash was being tracked here. Set the opening balance below to what was in the drawer when tracking began, or find and fix the entry that doesn't belong." }),
+      ]));
+    }
+    body.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted", style: "margin-bottom:8px", text: "HOW CASH ON HAND ADDS UP (all time, not just this period)" }),
+      line("Opening balance (in the drawer before tracking started)", money(d.openingBalance)),
+      line("+ All cash in from customers", money(d.allTime.cashIn)),
+      line("− All cash out", money(d.allTime.cashOut)),
+      line("− All bank deposits", money(d.allTime.bankDeposits)),
+      line("= Cash on hand", signed(d.netCash), true),
+      el("div", { style: "display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap" }, [el("span", { class: "muted", style: "font-size:12px", text: "Opening balance $" }), openingInput, saveOpening]),
+      openingNote,
+      outsideToggle,
+      outsideCount ? outsideList : null,
     ]));
     if (d.byCategory.length) {
       body.appendChild(el("div", { class: "card" }, [
