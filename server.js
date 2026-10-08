@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-08-fillprice";
+const BUILD = "2026-10-09-reschedword";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -190,6 +190,7 @@ function saleUpsellTotal(sale) {
   return (sale.upsells || []).reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
 }
 const { parseTitlePricing } = require("./pricing");
+const { titleSaysReschedule } = require("./titlewords");
 function saleTotal(sale) {
   return (parseFloat(sale.basePrice) || 0) + saleUpsellTotal(sale);
 }
@@ -571,6 +572,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   else sale.basePrice = sale.basePrice || 0;
   sale.priceSource = sale.priceLocked ? "manual" : "ghl";
   applyTitlePricing(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true }); // a real GHL update for this booking: the title's price wins, paid or not
+  autoFlagRescheduleFromTitle(db, sale); // the title says rescheduled, and there is an earlier dead booking: not a new close
   sale.calendarId = calendarId || sale.calendarId || null;
   sale.syncedFromGHL = true;
   if (!sale.status) sale.status = "pending";
@@ -1634,7 +1636,7 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
   const relevant = closedBasis ? inRangeJobs.filter((s) => !s.isReschedule) : inRangeJobs;
   const leftOut = closedBasis ? inRangeJobs.filter((s) => s.isReschedule).map((s) => {
     const r = db.salesReps.find((x) => x.id === s.salesRepId);
-    return { id: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending", repName: r ? r.name : "Removed rep" };
+    return { id: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending", repName: r ? r.name : "Removed rep" };
   }) : [];
   const byRep = {};
   relevant.forEach((s) => {
@@ -2061,21 +2063,32 @@ function recentMerges(db, days = 14) {
 // A safety net for anything the automatic matching still misses: recent closes where the SAME customer already has an
 // earlier, unfinished booking for the same car/service. These are what a reschedule that slipped through looks like,
 // so the owner can flag them from Cleanup in one tap. Dismissed ones (marked "not a reschedule") never come back.
+const customerKeyOf = (s) => s.contactId || String(s.customerPhone || "").replace(/\D/g, "") || String(s.customerName || "").trim().toLowerCase();
+function customerIndex(db) {
+  const byKey = {};
+  db.sales.forEach((s) => { const k = customerKeyOf(s); if (k) (byKey[k] = byKey[k] || []).push(s); });
+  return byKey;
+}
+// The earlier booking this one is probably a reschedule of: the same customer's, for the same car and service, that was never
+// finished and is no longer going to happen (cancelled, a no-show, left unconfirmed, or a day that passed with nobody coming).
+// A booking that is still upcoming, or one that was finished, is never the partner: that would be a second appointment.
+function reschedulePartnerOf(db, j, byKey) {
+  const k = customerKeyOf(j);
+  if (!k) return null;
+  const closedMs = Date.parse(j.closedAt || j.date);
+  return (byKey[k] || [])
+    .filter((e) => e.id !== j.id && !isServiced(e) && isDeadBooking(e) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
+    .sort((a, b) => (a.date < b.date ? 1 : -1))[0] || null;
+}
 function findPossibleReschedules(db, days = 7) {
   const cutoff = Date.now() - days * 86400000;
-  const keyOf = (s) => s.contactId || String(s.customerPhone || "").replace(/\D/g, "") || String(s.customerName || "").trim().toLowerCase();
-  const byKey = {};
-  db.sales.forEach((s) => { const k = keyOf(s); if (k) (byKey[k] = byKey[k] || []).push(s); });
+  const byKey = customerIndex(db);
   const out = [];
   db.sales.forEach((j) => {
     if (j.isReschedule || j.rescheduleDismissed || j.status === "cancelled" || !j.salesRepId || !afterRevenueStart(j, db)) return;
     const closedMs = Date.parse(j.closedAt || j.date);
     if (!(closedMs >= cutoff)) return;
-    const k = keyOf(j);
-    if (!k) return;
-    const earlier = (byKey[k] || [])
-      .filter((e) => e.id !== j.id && !isServiced(e) && isDeadBooking(e) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
-      .sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    const earlier = reschedulePartnerOf(db, j, byKey);
     if (!earlier) return;
     const rep = db.salesReps.find((r) => r.id === j.salesRepId);
     out.push({
@@ -2086,12 +2099,37 @@ function findPossibleReschedules(db, days = 7) {
   });
   return out.sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
 }
+// The team types "RESCHEDULED" into the title of a booking that replaces an earlier one. That is a person telling us what it is, so
+// when the same customer really does have an earlier dead booking for the same car, flag it as "not a new close" right away instead of
+// waiting for the owner to tap it in Cleanup. Both things are required: with the word but NO earlier booking it is just an
+// appointment that was moved (one record, and the genuine close), and flagging that would wrongly erase a real sale. Anything the
+// owner has already looked at is left alone: a booking marked "not a reschedule" is never flagged, and one put back as a close stays that way.
+// It never merges or deletes anything.
+function autoFlagRescheduleFromTitle(db, onlyJob) {
+  const cutoff = Date.now() - 14 * 86400000;
+  const byKey = customerIndex(db);
+  let flagged = 0;
+  (onlyJob ? [onlyJob] : db.sales).forEach((j) => {
+    if (j.isReschedule || j.rescheduleDismissed || j.status === "cancelled" || !j.salesRepId || !afterRevenueStart(j, db)) return;
+    if (!titleSaysReschedule(j.car)) return;
+    if (!(Date.parse(j.closedAt || j.date) >= cutoff)) return;
+    const partner = reschedulePartnerOf(db, j, byKey);
+    if (!partner) return;
+    j.isReschedule = true;
+    j.rescheduleAutoFlagged = true;
+    if (!db.auditLog) db.auditLog = [];
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (title says rescheduled)", saleId: j.id, car: j.car, field: "Reschedule (not a new close)", oldValue: false, newValue: true });
+    db.auditLog = db.auditLog.slice(0, 1000);
+    flagged += 1;
+  });
+  return flagged;
+}
 // Bookings already marked as reschedules in the last month, so there's always a way to put one back.
 function recentLeftOut(db, days = 30) {
   const cutoff = Date.now() - days * 86400000;
   return db.sales.filter((s) => s.isReschedule && Date.parse(s.closedAt || s.date) >= cutoff).map((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
-    return { saleId: s.id, car: s.car, customerName: s.customerName, repName: rep ? rep.name : (s.salesRepName || "Unassigned"), closedAt: s.closedAt || s.date, date: s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending" };
+    return { saleId: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, repName: rep ? rep.name : (s.salesRepName || "Unassigned"), closedAt: s.closedAt || s.date, date: s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending" };
   }).sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
 }
 app.get("/api/owner/possible-reschedules", requireOwner, (req, res) => {
@@ -2170,6 +2208,9 @@ function patchJobHandler(req, res) {
     if (req.auth.role !== "owner") return res.status(403).json({ error: "Only the owner can change this." });
     const flag = !!req.body.isReschedule;
     logAudit(db, req, sale, "Reschedule (not a new close)", !!sale.isReschedule, flag);
+    // Put back as a close after the tracker flagged it by itself: that is the owner's decision, so the title is never allowed to flag it again.
+    if (!flag && sale.rescheduleAutoFlagged) sale.rescheduleDismissed = true;
+    sale.rescheduleAutoFlagged = false;
     sale.isReschedule = flag;
   }
   // "Not a reschedule": the owner looked at a Cleanup suggestion and says it's a genuinely separate deal.
@@ -2217,6 +2258,7 @@ function patchJobHandler(req, res) {
       // (A title picked straight from GHL's own appointment list isn't hand-typed, so it stays free to follow GHL.)
       sale.titleLocked = !req.body.titleFromGhl;
       applyTitlePricing(db, sale);
+      autoFlagRescheduleFromTitle(db, sale);
     } else if (req.body.titleFromGhl) {
       sale.titleLocked = false;
     }
@@ -2567,6 +2609,76 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   });
 });
 
+// The whole shop's upsell and walk-in performance, for every manager (the screen above this one shows only a manager's own).
+// Deliberately NOT included: commission, pay, tips or any other person's earnings. That stays private to each person and the owner.
+// Revenue figures use the same basis as the owner's Dashboard so the numbers agree: upsells are counted as SOLD on any non-cancelled job
+// (with how much of it has been collected shown separately), and walk-in revenue is what the customer actually paid, upsells included.
+app.get("/api/manager/shop-performance", requireManager, (req, res) => {
+  const db = loadDB();
+  const { start, end } = dateRangeFor(req.query);
+  const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db);
+  const r2 = (n) => Math.round((n || 0) * 100) / 100;
+  const price = (u) => parseFloat(u.price) || 0;
+
+  // ---- upsells, credited to whoever sold them (a tech, a manager or a sales rep) ----
+  const people = {}, items = {};
+  const person = (key, name, role) => (people[key] = people[key] || { key, name, role, count: 0, revenue: 0, carIds: new Set() });
+  db.managers.forEach((m) => person("m:" + m.id, m.name, "Manager"));
+  db.employees.forEach((e) => person("e:" + e.id, e.name, "Tech"));
+  let soldRevenue = 0, soldCount = 0, collectedRevenue = 0;
+  sales.forEach((s) => (s.upsells || []).forEach((u) => {
+    soldRevenue += price(u); soldCount += 1; if (s.paid) collectedRevenue += price(u);
+    let p;
+    if (u.managerId) p = person("m:" + u.managerId, (db.managers.find((m) => m.id === u.managerId) || {}).name || "Removed manager", "Manager");
+    else if (u.employeeId) p = person("e:" + u.employeeId, (db.employees.find((e) => e.id === u.employeeId) || {}).name || "Removed employee", "Tech");
+    else if (u.salesRepId) p = person("r:" + u.salesRepId, u.salesRepName || "Removed rep", "Sales rep");
+    else p = person("none", "Unassigned", "");
+    p.count += 1; p.revenue += price(u); p.carIds.add(s.id);
+    const k = String(u.name || "").trim().toLowerCase();
+    items[k] = items[k] || { name: String(u.name || "").trim(), count: 0, revenue: 0 };
+    items[k].count += 1; items[k].revenue += price(u);
+  }));
+  const completed = sales.filter((s) => s.completed);
+  const carsWithUpsell = sales.filter((s) => (s.upsells || []).length > 0).length;
+  const upsells = {
+    soldRevenue: r2(soldRevenue), soldCount, collectedRevenue: r2(collectedRevenue), carsWithUpsell,
+    carsServiced: completed.length,
+    attachRate: completed.length ? (completed.filter((s) => (s.upsells || []).length > 0).length / completed.length) * 100 : 0,
+    byPerson: Object.values(people).map((p) => ({ key: p.key, name: p.name, role: p.role, count: p.count, revenue: r2(p.revenue), cars: p.carIds.size }))
+      .sort((a, b) => b.revenue - a.revenue || b.count - a.count || a.name.localeCompare(b.name)),
+    byItem: Object.values(items).map((i) => ({ name: i.name, count: i.count, revenue: r2(i.revenue) })).sort((a, b) => b.revenue - a.revenue || b.count - a.count),
+  };
+
+  // ---- walk-ins ----
+  const walk = sales.filter((s) => s.isWalkIn);
+  const paidWalk = walk.filter((s) => s.paid);
+  const walkRevenue = paidWalk.reduce((a, s) => a + saleTotal(s), 0);
+  const closers = {}, services = {};
+  walk.forEach((s) => {
+    const key = s.walkInClosedById ? `${s.walkInClosedByType}:${s.walkInClosedById}` : "none";
+    const c = (closers[key] = closers[key] || { key, name: s.walkInClosedById ? (s.walkInClosedByName || "Unknown") : "No closer recorded", role: s.walkInClosedByType === "manager" ? "Manager" : s.walkInClosedByType === "employee" ? "Tech" : "", closed: 0, arrivedPaid: 0, revenue: 0 });
+    c.closed += 1;
+    if (s.status === "arrived" && s.paid) c.arrivedPaid += 1;
+    if (s.paid) c.revenue += saleTotal(s);
+    const svc = s.baseService || "No service set";
+    const v = (services[svc] = services[svc] || { service: svc, count: 0, revenue: 0 });
+    v.count += 1; if (s.paid) v.revenue += saleTotal(s);
+  });
+  const walkIns = {
+    total: walk.length, arrived: walk.filter((s) => s.status === "arrived").length, paid: paidWalk.length,
+    revenue: r2(walkRevenue), avgTicket: paidWalk.length ? r2(walkRevenue / paidWalk.length) : 0,
+    sharePercent: sales.length ? (walk.length / sales.length) * 100 : 0, allJobs: sales.length,
+    needsCloser: walk.filter((s) => !s.walkInClosedById).length,
+    byCloser: Object.values(closers).map((c) => ({ ...c, revenue: r2(c.revenue) })).sort((a, b) => b.closed - a.closed || b.revenue - a.revenue),
+    byService: Object.values(services).map((v) => ({ ...v, revenue: r2(v.revenue) })).sort((a, b) => b.count - a.count || b.revenue - a.revenue),
+    recent: walk.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 30).map((s) => ({
+      id: s.id, date: s.date, car: s.car, customerName: s.customerName || "", service: s.baseService || "", total: r2(saleTotal(s)),
+      status: s.status || "pending", paid: !!s.paid, completed: !!s.completed, closerName: s.walkInClosedById ? (s.walkInClosedByName || "Unknown") : null,
+    })),
+  };
+  res.json({ you: { role: req.auth.role, id: req.auth.id }, upsells, walkIns });
+});
+
 // ---------- sales rep — read-only view of their own bookings. Commission depends on the
 // manager's arrived/no-show mark, so a sales rep can never touch status themselves; this
 // role only has GET routes, no PATCH access to anything. ----------
@@ -2666,7 +2778,7 @@ app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
   const relevant = revenueEligible(inClosingRange.filter((s) => !s.isReschedule), db);
   const leftOut = revenueEligible(inClosingRange.filter((s) => s.isReschedule), db).map((s) => {
     const r = db.salesReps.find((x) => x.id === s.salesRepId);
-    return { saleId: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, repName: r ? r.name : "Removed rep", status: s.status || "pending" };
+    return { saleId: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, repName: r ? r.name : "Removed rep", status: s.status || "pending" };
   });
   const byRep = {};
   relevant.forEach((s) => {
@@ -3302,8 +3414,9 @@ async function runTitleSync() {
     }
   }
   const repriced = backfillTitlePricing(db); // every job picks up the price its title carries, even if the title didn't change
-  if (updated > 0 || repriced > 0) saveDB(db);
-  return { skipped: false, candidateCount: candidates.length, checked, updated, ambiguous, repriced };
+  const reflagged = autoFlagRescheduleFromTitle(db); // a title that now says rescheduled, or an earlier booking that has just turned dead
+  if (updated > 0 || repriced > 0 || reflagged > 0) saveDB(db);
+  return { skipped: false, candidateCount: candidates.length, checked, updated, ambiguous, repriced, reflagged };
 }
 
 // Lets a manager see EXACTLY what GHL has for this job's customer, so the right title (and time) can be applied with one
@@ -3976,7 +4089,7 @@ const server = app.listen(PORT, () => {
   setInterval(runTitleSync, 30 * 60 * 1000);
   // Jobs already in the tracker pick up the price their title carries right away (open, unlocked jobs only; paid and completed
   // jobs keep their price, and are listed in Cleanup if the title disagrees).
-  try { const db = loadDB(); if (backfillTitlePricing(db) > 0) saveDB(db); } catch (e) { console.error("title price backfill failed:", e.message); }
+  try { const db = loadDB(); const a = backfillTitlePricing(db), b = autoFlagRescheduleFromTitle(db); if (a + b > 0) saveDB(db); } catch (e) { console.error("title price / reschedule backfill failed:", e.message); }
 });
 // A walk-around video can take a while to upload on a slow shop wifi or mobile connection —
 // Node's default request timeout is too tight for that, so this gives uploads real room.
