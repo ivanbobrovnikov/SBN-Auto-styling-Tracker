@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-09-dollarafter";
+const UI_BUILD = "2026-10-10-redo";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -145,7 +145,19 @@ function nearestValidPayPeriodEnd(referenceDateStr, anchorOverride) {
   return end.toISOString().slice(0, 10);
 }
 
-function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) {
+// teamSchedule (techs and managers only) is the server's pay schedule: { periods, currentIndex }. Without it, or for sales reps (who pass their own
+// anchor), the picker behaves exactly as it always did.
+function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor, teamSchedule) {
+  const teamMode = !payPeriodAnchor && !!(teamSchedule && teamSchedule.periods && teamSchedule.periods.length);
+  // "Current": on the Payroll screen (mode "runnable") that is the earliest period that is over and not yet run, otherwise the period we are in; on Attendance
+  // (mode "containing") always the period we are in. Worked out fresh each time, so it moves on after a period is run.
+  const teamCurrent = () => {
+    const ps = teamSchedule.periods, t = teamSchedule.today;
+    if (teamSchedule.mode === "runnable") { const f = ps.findIndex((p) => p.kind !== "old" && !p.closedRunId); if (f >= 0 && ps[f].end < t) return f; }
+    const inside = ps.findIndex((p) => p.start <= t && t <= p.end);
+    return inside >= 0 ? inside : Math.max(0, ps.findIndex((p) => p.start > t));
+  };
+  let teamIdx = teamMode ? Math.max(0, Math.min(teamSchedule.periods.length - 1, teamSchedule.currentIndex)) : 0;
   let period = defaultPeriod;
   const today = easternToday();
   const vis = (key) => (period === key ? "" : "display:none");
@@ -153,7 +165,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
   const weekInput = el("input", { type: "date", value: today, style: vis("week") });
   const monthInput = el("input", { type: "month", value: today.slice(0, 7), style: vis("month") });
   const yearInput = el("input", { type: "number", value: today.slice(0, 4), style: vis("year") + ";max-width:100px" });
-  let payPeriodEnd = nearestValidPayPeriodEnd(today, payPeriodAnchor);
+  let payPeriodEnd = teamMode ? teamSchedule.periods[teamIdx].end : nearestValidPayPeriodEnd(today, payPeriodAnchor);
   const payPeriodLabel = el("div", { class: "muted", style: `font-size:11.5px;${vis("payperiod")}` });
   const payPeriodStepper = el("div", { style: `display:flex;gap:8px;align-items:center;${vis("payperiod")}` });
   const customStartInput = el("input", { type: "date", value: today, style: "max-width:150px" });
@@ -164,9 +176,14 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
   ]);
 
   function shiftPayPeriod(deltaDays) {
-    const d = new Date(payPeriodEnd + "T00:00:00Z");
-    d.setUTCDate(d.getUTCDate() + deltaDays);
-    payPeriodEnd = d.toISOString().slice(0, 10);
+    if (teamMode) {
+      teamIdx = Math.max(0, Math.min(teamSchedule.periods.length - 1, teamIdx + (deltaDays > 0 ? 1 : -1)));
+      payPeriodEnd = teamSchedule.periods[teamIdx].end;
+    } else {
+      const d = new Date(payPeriodEnd + "T00:00:00Z");
+      d.setUTCDate(d.getUTCDate() + deltaDays);
+      payPeriodEnd = d.toISOString().slice(0, 10);
+    }
     updatePayPeriodLabel();
     fire();
   }
@@ -184,21 +201,32 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
     const start = new Date(end);
     start.setUTCDate(start.getUTCDate() - 13); // matches the server's non-overlapping 14-day span exactly
     const fmt = (d) => formatPlainDate(d.toISOString().slice(0, 10)); // read the calendar date straight from UTC, never through local-timezone display
-    payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)} (payroll processed ${fmt(end)})`;
+    const fmtDay = (ymd) => `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(ymd + "T00:00:00Z").getUTCDay()]} ${formatPlainDate(ymd)}`;
+    if (teamMode) {
+      const p = teamSchedule.periods[teamIdx];
+      payPeriodLabel.textContent = p.kind === "old"
+        ? `Covers ${formatPlainDate(p.start)} – ${formatPlainDate(p.end)} (payroll processed ${formatPlainDate(p.end)}) · old Wed–Tue cycle`
+        : `Covers ${formatPlainDate(p.start)} – ${formatPlainDate(p.end)} · ${p.name} · submit ${fmtDay(p.submit)} · paid ${fmtDay(p.paid)}${p.note ? ` (${p.note})` : ""}${p.closedRunId ? (p.skipped ? " · ✓ paid another way" : " · ✓ payroll run") : ""}`;
+    } else {
+      payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)} (payroll processed ${fmt(end)})`;
+    }
   }
 
   function currentParams() {
     if (period === "day") return { period, date: dayInput.value };
     if (period === "week") return { period, date: weekInput.value };
     if (period === "year") return { period, date: `${yearInput.value}-01-01` };
-    if (period === "payperiod") return { period, date: payPeriodEnd };
+    if (period === "payperiod") {
+      if (teamMode) { const p = teamSchedule.periods[teamIdx]; return p.kind === "old" ? { period, date: p.end } : { period: "custom", startDate: p.start, endDate: p.end }; } // the short periods are not 14 days, so they go in as exact dates
+      return { period, date: payPeriodEnd };
+    }
     if (period === "custom") return { period, startDate: customStartInput.value, endDate: customEndInput.value };
     return { period: "month", month: monthInput.value };
   }
   function fire() { onChange(currentParams()); }
 
   payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => shiftPayPeriod(-14), text: "◀ Prev" }));
-  payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => { payPeriodEnd = nearestValidPayPeriodEnd(today); updatePayPeriodLabel(); fire(); }, text: "Current" }));
+  payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => { if (teamMode) { teamIdx = teamCurrent(); payPeriodEnd = teamSchedule.periods[teamIdx].end; } else payPeriodEnd = nearestValidPayPeriodEnd(today, payPeriodAnchor); updatePayPeriodLabel(); fire(); }, text: "Current" })); // uses this picker's own cycle (sales reps used to be sent to the techs' cycle here)
   payPeriodStepper.appendChild(el("button", { class: "tab-btn", onclick: () => shiftPayPeriod(14), text: "Next ▶" }));
 
   const periodTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" });
@@ -234,7 +262,11 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor) 
     dayInput, weekInput, monthInput, yearInput, payPeriodStepper,
     payPeriodLabel, customWrap,
   ]);
-  return { el: wrap, getParams: currentParams };
+  return {
+    el: wrap, getParams: currentParams,
+    // techs and managers only: lets the Payroll screen read the period that is showing, move on to the next one, and refresh the label after a run
+    team: teamMode ? { period: () => teamSchedule.periods[teamIdx], index: () => teamIdx, next: () => shiftPayPeriod(14), prev: () => shiftPayPeriod(-14), refresh: updatePayPeriodLabel, goTo: (id) => { const i = teamSchedule.periods.findIndex((p) => p.id === id); if (i >= 0) { teamIdx = i; payPeriodEnd = teamSchedule.periods[i].end; updatePayPeriodLabel(); fire(); } } } : null,
+  };
 }
 
 let session = { role: null };
@@ -949,9 +981,22 @@ async function renderOwnerTabContent(content) {
 
 // Payroll — every person's own upsells grouped together, their commission owed, and the
 // shop-wide combined total for comparison. This is the page built specifically for running pay.
+// ---- small helpers for the payroll run card ----
+const PAY_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const ymdShort = (ymd) => `${PAY_MONTHS[Number(ymd.slice(5, 7)) - 1]} ${Number(ymd.slice(8, 10))}`;
+const ymdPlus = (ymd, n) => { const d = new Date(ymd + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const ymdDay = (ymd) => `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(ymd + "T12:00:00Z").getUTCDay()]} ${ymdShort(ymd)}`;
+const payPluralJs = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+const moneySigned = (n) => `${n < 0 ? "−" : "+"}${money(Math.abs(n))}`;
+function clearEl(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
 async function renderOwnerPayroll(content) {
   const body = el("div");
-  const picker = renderPeriodPicker((params) => load(params), "payperiod");
+  // techs and managers follow the server's pay schedule (the 4-day and 8-day transition periods, then regular two-week periods); the page opens on
+  // the period that is ready to run, or on the one we're in. Sales reps have their own section below and are not part of this.
+  let teamSchedule;
+  try { const sc = await api("/api/owner/pay-schedule"); teamSchedule = { periods: sc.periods, today: sc.today, mode: "runnable", currentIndex: sc.runnableIndex >= 0 ? sc.runnableIndex : sc.containingIndex }; } catch (e) { teamSchedule = undefined; }
+  const picker = renderPeriodPicker((params) => load(params), "payperiod", undefined, teamSchedule);
   const payrollEmployees = await api("/api/employees");
   const payrollManagers = await api("/api/managers");
   const payrollSalesReps = await api("/api/salesreps");
@@ -1098,10 +1143,188 @@ async function renderOwnerPayroll(content) {
     ]);
   }
 
+  // ===== PAYROLL RUN: techs and managers (sales reps keep their own section below, untouched) =====
+  const runCard = el("div");
+  async function renderRunCard(params) {
+    clearEl(runCard);
+    if (!teamSchedule || !params || params.period !== "custom") return;
+    const idx = teamSchedule.periods.findIndex((x) => x.kind !== "old" && x.start === params.startDate && x.end === params.endDate);
+    if (idx < 0) return;
+    const period = teamSchedule.periods[idx];
+    let st;
+    try { st = await api(`/api/owner/payroll-run-status?start=${period.start}&end=${period.end}`); } catch (e) { return; }
+    if (!st.period) return;
+    clearEl(runCard);
+    const rangeText = `${ymdShort(period.start)} – ${ymdShort(period.end)}`;
+    const again = () => renderRunCard(params);
+    const markClosed = (periodId, run) => { const i = teamSchedule.periods.findIndex((x) => x.id === periodId); if (i >= 0) { teamSchedule.periods[i].closedRunId = run.id; teamSchedule.periods[i].skipped = !!run.skipped; } if (picker.team) picker.team.refresh(); };
+    const badge = st.run ? (st.run.skipped ? ["PAID ANOTHER WAY", "var(--sub)"] : ["RUN", "var(--green)"]) : st.runnable ? ["READY TO RUN", "var(--cyan)"] : st.blockedBy ? ["WAITING", "var(--amber)"] : ["NOT OVER YET", "var(--muted)"];
+    const card = el("div", { class: "card", style: "border-color:var(--cyan);margin-bottom:12px" });
+    card.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin-bottom:6px", text: "PAYROLL RUN · TECHS AND MANAGERS" }));
+    card.appendChild(el("div", { class: "row", style: "align-items:flex-start;gap:10px" }, [
+      el("div", {}, [
+        el("div", { style: "font-weight:600", text: `${rangeText} · ${period.name}` }),
+        el("div", { class: "muted", style: "font-size:12px", text: `${period.workDays} work days · submit ${ymdDay(period.submit)} · paid ${ymdDay(period.paid)}${period.note ? ` (${period.note})` : ""}` }),
+      ]),
+      el("span", { style: `font-size:10.5px;font-weight:600;letter-spacing:0.04em;padding:2px 8px;border:0.5px solid ${badge[1]};color:${badge[1]};border-radius:5px;white-space:nowrap`, text: badge[0] }),
+    ]));
+    const nextP = teamSchedule.periods[idx + 1];
+    const nextBtn = nextP ? el("button", { class: "primary", style: "margin-top:12px", text: `Next: ${ymdShort(nextP.start)} – ${ymdShort(nextP.end)} ▶`, onclick: () => { if (picker.team) picker.team.next(); } }) : null;
+    const note = (text, extra) => el("div", { class: "muted", style: `font-size:12.5px;margin:8px 0;${extra || ""}`, text });
+
+    // ---- extra pay or corrections that go on this check ----
+    function adjustmentsBox() {
+      const box = el("div", { style: "margin-top:12px;border-top:0.5px solid var(--border);padding-top:10px" });
+      box.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin-bottom:4px", text: "ADJUSTMENTS ON THIS CHECK" }));
+      box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Extra pay or corrections to add to this check, like a true-up or a correction carried over from the last one. A minus amount reduces someone's pay, so only do that with their OK." }));
+      if (st.pending.length === 0) box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px", text: "None waiting." }));
+      st.pending.forEach((a) => box.appendChild(el("div", { class: "row", style: "font-size:12.5px;margin-bottom:4px" }, [
+        el("span", {}, [el("span", { text: a.personName }), el("span", { class: "muted", text: ` · ${a.note}${a.source === "carried" ? " (carried from an earlier check)" : ""}` })]),
+        el("span", {}, [
+          el("span", { class: "mono", style: `color:${a.amount < 0 ? "var(--red)" : "var(--green)"}`, text: moneySigned(a.amount) }),
+          el("button", { class: "icon-danger", style: "margin-left:8px;font-size:11px;padding:2px 7px", text: "×", onclick: async () => { try { await api(`/api/owner/payroll-adjustments/${a.id}`, { method: "DELETE" }); again(); } catch (e) { alert(e.message || "Couldn't remove that."); } } }),
+        ]),
+      ])));
+      const who = el("select", { style: "max-width:150px" }, [el("option", { value: "", text: "Who?" }), ...payrollEmployees.map((e) => el("option", { value: `employee::${e.id}`, text: e.name })), ...payrollManagers.map((m) => el("option", { value: `manager::${m.id}`, text: `${m.name} (manager)` }))]);
+      const amount = el("input", { type: "number", step: "0.01", placeholder: "+ or − amount", style: "max-width:120px" });
+      const why = el("input", { placeholder: "What it's for", style: "flex:1;min-width:120px" });
+      const msg = el("div", { style: "font-size:12px;margin-top:4px" });
+      box.appendChild(el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center" }, [who, amount, why, el("button", { class: "ghost", text: "Add", onclick: async () => {
+        msg.textContent = "";
+        const [pt, pid] = who.value ? who.value.split("::") : ["", ""];
+        try { await api("/api/owner/payroll-adjustments", { method: "POST", body: JSON.stringify({ personType: pt, personId: pid, amount: amount.value === "" ? 0 : Number(amount.value), note: why.value }) }); again(); }
+        catch (e) { msg.style.color = "var(--red)"; msg.textContent = e.message || "Couldn't add that."; }
+      } })]));
+      box.appendChild(msg);
+      return box;
+    }
+
+    // ---- the one-time look back at the check paid just before this schedule began ----
+    function trueUpBox() {
+      const tu = st.trueUp;
+      const label = (open) => `Check the ${ymdShort(tu.start)} – ${ymdShort(tu.end)} payroll (paid ${ymdShort(tu.paidOn)}) ${open ? "▾" : "▸"}`;
+      const panel = el("div", { style: "display:none;margin-top:8px;padding:10px;border:0.5px solid var(--border);border-radius:var(--radius)" });
+      let loaded = false;
+      const toggle = el("button", { class: "ghost", text: label(false), onclick: async () => {
+        const open = panel.style.display === "none";
+        panel.style.display = open ? "block" : "none";
+        toggle.textContent = label(open);
+        if (open && !loaded) { loaded = true; await fill(); }
+      } });
+      async function fill() {
+        const d = await api(`/api/owner/payroll?period=custom&startDate=${tu.start}&endDate=${tu.end}`);
+        const people = [...d.employees.map((e) => ({ type: "employee", ...e })), ...d.managers.map((m) => ({ type: "manager", ...m }))].filter((p) => p.payType);
+        panel.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: `The tracker's total for each person for ${ymdShort(tu.start)} – ${ymdShort(tu.end)} as it stands now. Type what each person was actually paid on ${ymdShort(tu.paidOn)} (gross). Anyone underpaid can be added to this check. Anyone who looks overpaid is only flagged, never deducted.` }));
+        const rows = people.map((p) => {
+          const paid = el("input", { type: "number", step: "0.01", placeholder: "Paid", style: "max-width:100px" });
+          const out = el("span", { style: "font-size:12px" });
+          paid.addEventListener("input", () => {
+            if (paid.value === "") { out.textContent = ""; return; }
+            const diff = Math.round((p.totalPay - Number(paid.value)) * 100) / 100;
+            out.style.color = diff > 0.004 ? "var(--green)" : diff < -0.004 ? "var(--amber)" : "var(--sub)";
+            out.textContent = diff > 0.004 ? `underpaid ${money(diff)}` : diff < -0.004 ? `paid ${money(-diff)} MORE (not deducted)` : "matches";
+          });
+          panel.appendChild(el("div", { class: "row", style: "gap:8px;margin-bottom:6px;flex-wrap:wrap" }, [el("span", { style: "min-width:90px", text: p.name }), el("span", { class: "mono muted", text: `tracker ${money(p.totalPay)}` }), paid, out]));
+          return { p, paid };
+        });
+        const msg = el("div", { style: "font-size:12px;margin-top:6px" });
+        panel.appendChild(el("button", { class: "primary", style: "margin-top:6px", text: "Add the underpayments as adjustments", onclick: async () => {
+          msg.textContent = ""; let added = 0;
+          try {
+            for (const r of rows) {
+              if (r.paid.value === "") continue;
+              const diff = Math.round((r.p.totalPay - Number(r.paid.value)) * 100) / 100;
+              if (diff > 0.004) { await api("/api/owner/payroll-adjustments", { method: "POST", body: JSON.stringify({ personType: r.p.type, personId: r.p.id, amount: diff, note: `${ymdShort(tu.start)} – ${ymdShort(tu.end)} true-up` }) }); added += 1; }
+            }
+            if (added === 0) { msg.style.color = "var(--sub)"; msg.textContent = "Nobody is underpaid, so nothing was added."; return; }
+            again();
+          } catch (e) { msg.style.color = "var(--red)"; msg.textContent = e.message || "Couldn't add those."; }
+        } }));
+        panel.appendChild(msg);
+      }
+      return el("div", { style: "margin-top:12px" }, [toggle, panel]);
+    }
+
+    if (st.run && st.run.skipped) {
+      card.appendChild(note(`Marked as paid another way on ${formatDateTime(st.run.closedAt)}. No numbers were saved for this period.`));
+      if (nextBtn) card.appendChild(nextBtn);
+    } else if (st.run) {
+      // ---- already run: the saved register, and anything that has changed since ----
+      const run = st.run;
+      card.appendChild(note(`Run ${formatDateTime(run.closedAt)} by ${run.closedBy}${run.ranWithWarnings && run.ranWithWarnings.length ? " (with items still to check)" : ""}. This register is saved and won't change.`));
+      const cols = "minmax(70px,1.2fr) minmax(78px,1.1fr) repeat(5, minmax(54px,1fr))"; // Total sits right next to the name so it is always on screen, even on a phone
+      const cell = (t, o = {}) => el("div", { class: o.name ? "" : "mono", style: `font-size:11.5px;${o.name ? "" : "text-align:right;"}${o.head ? "color:var(--muted);" : ""}${o.bold ? "font-weight:600;" : ""}`, text: t });
+      const rowOf = (c, t) => el("div", { style: `display:grid;grid-template-columns:${cols};gap:6px;padding:4px 0;border-top:0.5px solid var(--border)` }, c);
+      const reg = [rowOf(["Name", "Total", "Base", "Upsell", "Walk-in", "Tips", "Adjust"].map((h, i) => cell(h, { head: true, name: i === 0 })))];
+      run.lines.slice().sort((x, y) => x.name.localeCompare(y.name)).forEach((l) => {
+        reg.push(rowOf([cell(l.name, { name: true }), cell(money(l.total), { bold: true }), cell(money(l.base)), cell(money(l.upsellCommission)), cell(money(l.walkInCommission)), cell(money(l.tips)), cell(l.adjustmentsTotal ? moneySigned(l.adjustmentsTotal) : "—")]));
+        (l.adjustments || []).forEach((adj) => reg.push(el("div", { class: "muted", style: "font-size:11px;padding:0 0 4px 10px", text: `• ${adj.note} (${moneySigned(adj.amount)})` })));
+      });
+      const t = run.totals;
+      reg.push(rowOf([cell("TOTAL", { name: true, bold: true }), cell(money(t.total), { bold: true }), cell(money(t.base), { bold: true }), cell(money(t.upsellCommission), { bold: true }), cell(money(t.walkInCommission), { bold: true }), cell(money(t.tips), { bold: true }), cell(t.adjustments ? moneySigned(t.adjustments) : "—", { bold: true })]));
+      card.appendChild(el("div", { style: "overflow-x:auto" }, [el("div", { style: "min-width:470px" }, reg)]));
+      const copyBtn = el("button", { class: "ghost", style: "margin-top:10px", text: "Copy for payroll provider", onclick: async () => {
+        const lines = [`Payroll register: ${rangeText} (${period.name}) · paid ${ymdDay(period.paid)}`, ["Name", "Base", "Upsell commission", "Walk-in commission", "Tips", "Adjustments", "Total"].join("\t")];
+        run.lines.slice().sort((x, y) => x.name.localeCompare(y.name)).forEach((l) => lines.push([l.name, l.base.toFixed(2), l.upsellCommission.toFixed(2), l.walkInCommission.toFixed(2), l.tips.toFixed(2), l.adjustmentsTotal.toFixed(2), l.total.toFixed(2)].join("\t")));
+        lines.push(["TOTAL", t.base.toFixed(2), t.upsellCommission.toFixed(2), t.walkInCommission.toFixed(2), t.tips.toFixed(2), t.adjustments.toFixed(2), t.total.toFixed(2)].join("\t"));
+        try { await navigator.clipboard.writeText(lines.join("\n")); copyBtn.textContent = "Copied ✓"; } catch (e) { window.prompt("Copy this:", lines.join("\n")); }
+      } });
+      card.appendChild(copyBtn);
+      const d = st.diff || { under: [], over: [] };
+      if (d.under.length || d.over.length) {
+        const box = el("div", { style: "margin-top:12px;padding:10px;border:1px solid var(--amber);border-radius:var(--radius)" });
+        box.appendChild(el("div", { style: "font-weight:600;color:var(--amber);font-size:13px", text: "Changes since this payroll was run" }));
+        box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin:2px 0 6px", text: "Something was corrected after you ran it (attendance, a job marked paid, a tip). The saved register above hasn't changed." }));
+        d.under.forEach((x) => box.appendChild(el("div", { class: "row", style: "font-size:12.5px;margin-bottom:3px" }, [el("span", { text: `${x.name}: calculated ${money(x.calculated)}, now ${money(x.now)}` }), el("span", { class: "mono", style: "color:var(--green)", text: `${moneySigned(x.delta)} owed` })])));
+        if (d.under.length) box.appendChild(el("button", { class: "primary", style: "margin:6px 0", text: "Add the underpayments to the next check", onclick: async () => { try { await api(`/api/owner/payroll-run/${run.id}/carry-forward`, { method: "POST", body: "{}" }); again(); } catch (e) { alert(e.message || "Couldn't do that."); } } }));
+        d.over.forEach((x) => box.appendChild(el("div", { class: "row", style: "font-size:12.5px;margin-bottom:3px" }, [el("span", { text: `${x.name}: calculated ${money(x.calculated)}, now ${money(x.now)}` }), el("span", { class: "mono", style: "color:var(--red)", text: `${moneySigned(x.delta)} looks overpaid` })])));
+        if (d.over.length) box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:4px", text: "Nothing is deducted automatically. If someone was overpaid, sort it out with them first (many states need written permission to deduct); you can add an adjustment on the next check once you've agreed." }));
+        card.appendChild(box);
+      }
+      if (st.pending.length > 0) card.appendChild(note(`${payPluralJs(st.pending.length, "adjustment")} waiting for the next check: ${st.pending.map((a) => `${a.personName} ${moneySigned(a.amount)}`).join(", ")}.`, "color:var(--cyan);"));
+      if (nextBtn) card.appendChild(nextBtn);
+    } else if (!st.over) {
+      card.appendChild(note(`Not over yet. This period ends ${ymdDay(period.end)}, so you can run it from ${ymdDay(ymdPlus(period.end, 1))} (submit by ${ymdDay(period.submit)}).`));
+      if (!st.blockedBy) { card.appendChild(adjustmentsBox()); if (st.trueUp) card.appendChild(trueUpBox()); }
+    } else if (st.blockedBy) {
+      const b = st.blockedBy;
+      card.appendChild(note(`Run ${ymdShort(b.start)} – ${ymdShort(b.end)} first. Pay periods are run in order.`));
+      card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:6px" }, [
+        el("button", { class: "primary", text: `Go to ${ymdShort(b.start)} – ${ymdShort(b.end)}`, onclick: () => { if (picker.team) picker.team.goTo(b.id); } }),
+        el("button", { class: "ghost", text: "That one was paid another way: mark it done", onclick: async () => {
+          if (!confirm(`Mark ${ymdShort(b.start)} – ${ymdShort(b.end)} as already paid another way? Nothing is calculated or saved for it.`)) return;
+          try { const r = await api("/api/owner/payroll-run/skip", { method: "POST", body: JSON.stringify({ start: b.start, end: b.end }) }); markClosed(b.id, r); again(); } catch (e) { alert(e.message || "Couldn't do that."); }
+        } }),
+      ]));
+    } else {
+      // ---- ready: the checklist, then the button ----
+      const warnings = st.preview.warnings;
+      if (warnings.length === 0) card.appendChild(note("✓ Attendance is complete, jobs are marked paid, and nothing is missing a price or rep.", "color:var(--green);"));
+      warnings.forEach((w) => card.appendChild(el("div", { style: "margin:8px 0" }, [
+        el("div", { style: "color:var(--amber);font-size:12.5px;font-weight:600", text: `⚠ ${w.text}` }),
+        ...w.items.map((i) => el("div", { class: "muted", style: "font-size:11.5px;margin-left:16px", text: i })),
+      ])));
+      const runBtn = el("button", { class: "primary", style: "margin-top:8px", text: warnings.length ? `Run payroll anyway: ${rangeText}` : `Run payroll: ${rangeText}`, onclick: async () => {
+        if (warnings.length && !confirm(`${payPluralJs(warnings.length, "thing")} still to check:\n\n${warnings.map((w) => `• ${w.text}`).join("\n")}\n\nRun payroll anyway?`)) return;
+        runBtn.disabled = true;
+        try {
+          const run = await api("/api/owner/payroll-run", { method: "POST", body: JSON.stringify({ start: period.start, end: period.end, confirmWarnings: warnings.length > 0 }) });
+          markClosed(period.id, run);
+          again();
+        } catch (e) { alert(e.message || "Couldn't run payroll."); runBtn.disabled = false; }
+      } });
+      card.appendChild(runBtn);
+      card.appendChild(adjustmentsBox());
+      if (st.trueUp) card.appendChild(trueUpBox());
+    }
+    runCard.appendChild(card);
+  }
+
   async function load(params) {
     const p = params || picker.getParams();
     const qs = new URLSearchParams(p).toString();
     const d = await api(`/api/owner/payroll?${qs}`);
+    renderRunCard(p);
     clearHeightLocked(body);
 
     body.appendChild(el("div", { class: "metric-grid" }, [
@@ -1187,6 +1410,7 @@ async function renderOwnerPayroll(content) {
     });
   }
   content.appendChild(picker.el);
+  content.appendChild(runCard);
   content.appendChild(body);
   content.appendChild(el("div", { class: "muted", style: "margin:20px 0 8px;font-size:11.5px;letter-spacing:0.04em;border-top:0.5px solid var(--border);padding-top:16px", text: "SALES REPS — SEPARATE PAY PERIOD (THU–WED)" }));
   content.appendChild(salesRepPicker.el);
@@ -2765,7 +2989,9 @@ async function renderAttendance(content) {
   }
 
   const summaryBody = el("div");
-  const summaryPicker = renderPeriodPicker((params) => loadSummary(params), "payperiod");
+  let attSchedule;
+  if (session.role === "owner") { try { const sc = await api("/api/owner/pay-schedule"); attSchedule = { periods: sc.periods, today: sc.today, mode: "containing", currentIndex: sc.containingIndex }; } catch (e) { attSchedule = undefined; } }
+  const summaryPicker = renderPeriodPicker((params) => loadSummary(params), "payperiod", undefined, attSchedule);
   async function loadSummary(params) {
     const p = params || summaryPicker.getParams();
     const qs = new URLSearchParams(p).toString();
@@ -2791,7 +3017,7 @@ async function renderAttendance(content) {
   content.appendChild(nav.el);
   content.appendChild(dayBody);
   await loadDay();
-  await loadSummary();
+  try { await loadSummary(); } catch (e) { if (session.role === "owner") throw e; } // the summary is owner-only data; for a manager it just stays empty, as it always did
 }
 
 // ---------------- Cleanup — find and fix every job missing a price or a sales rep ----------------
@@ -3402,7 +3628,7 @@ async function renderManagerJobs(content) {
 
 
   // ---------- columns ----------
-  const columnOf = (j) => (j.status === "no_show" || j.status === "cancelled") ? "out" : (j.completed && j.paid) ? "done" : j.status === "arrived" ? "here" : "coming";
+  const columnOf = (j) => (j.status === "no_show" || j.status === "cancelled") ? "out" : (j.completed && (j.paid || j.noPaymentNeeded)) ? "done" : j.status === "arrived" ? "here" : "coming";
   const jobTags = (job, withStatus) => {
     const d = new Date(job.date);
     const tag = (text, color) => el("span", { class: "appt-tag", style: `border-color:${color};color:${color}`, text });
@@ -3412,9 +3638,11 @@ async function renderManagerJobs(content) {
     else if (job.status === "unconfirmed") out.push(tag("UNCONFIRMED", "var(--amber)"));
     else if (withStatus) out.push(tag(job.status === "arrived" ? "HERE" : "UPCOMING", job.status === "arrived" ? "var(--green)" : "var(--sub)"));
     if (job.completed) out.push(tag("DONE", "var(--green)"));
+    if (job.isRedo) out.push(tag("REDO", "var(--cyan)"));
     if (job.paid) out.push(tag("PAID", "var(--green)"));
+    else if (job.noPaymentNeeded) out.push(tag("NO CHARGE", "var(--green)"));   // a free redo owes nothing, so it is never "UNPAID" or "NO PRICE"
     else if ((job.status === "arrived" || job.completed) && job.status !== "no_show" && job.status !== "cancelled") out.push(tag("UNPAID", "var(--red)"));
-    if (!(job.basePrice > 0)) out.push(tag("NO PRICE", "var(--red)"));
+    if (!(job.basePrice > 0) && !job.noPaymentNeeded) out.push(tag("NO PRICE", "var(--red)"));
     if (job.status === "arrived" && (!job.employeeNames || job.employeeNames === "Unassigned")) out.push(tag("NO TECH", "var(--red)"));
     if ((job.status === "arrived" || job.status === "no_show" || job.paid || job.completed) && d.getTime() > Date.now() + 6 * 3600 * 1000) out.push(tag("⚠ CHECK DATE", "var(--red)"));
     return out;
@@ -3449,7 +3677,7 @@ async function renderManagerJobs(content) {
     const d = new Date(job.date);
     const time = isNaN(d.getTime()) ? "" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     const col = columnOf(job);
-    const needsPay = !job.paid && (job.status === "arrived" || job.completed) && col !== "out";
+    const needsPay = !job.paid && !job.noPaymentNeeded && (job.status === "arrived" || job.completed) && col !== "out";
     const serviceShort = { "Window Tint": "Tint", "Ceramic Coating": "Ceramic", "PPF": "PPF" }[serviceColumnFor(job.baseService)];
     const quick = col === "coming"
       ? el("button", { class: "tab-btn", style: "padding:5px 10px;font-size:12px;border-color:var(--green);color:var(--green)", text: "Arrived", onclick: async (ev) => {
@@ -3499,6 +3727,7 @@ async function renderManagerJobs(content) {
         el("div", { style: "text-align:right;flex:0 0 auto" }, [
           el("div", { class: "mono", style: "color:var(--amber);font-size:17px;font-weight:600", text: money(job.total) }),
           el("div", { class: "muted", style: "font-size:11px", text: `Base ${money(job.basePrice)}${job.upsellTotal > 0 ? ` + upsells ${money(job.upsellTotal)}` : ""}` }),
+          job.noPaymentNeeded ? el("div", { style: "font-size:11.5px;color:var(--green);margin-top:2px", text: "Redo: no charge" }) : null,
           job.depositAmount > 0 ? el("div", { style: "font-size:11.5px;color:var(--green);margin-top:2px", text: `Deposit paid ${money(job.depositAmount)}` }) : null,
           job.depositAmount > 0 && !job.paid ? el("div", { class: "mono", style: "font-size:13px;font-weight:600;margin-top:1px", text: `Balance due ${money(job.balanceDue)}` }) : null,
         ]),
@@ -3551,9 +3780,9 @@ async function renderManagerJobs(content) {
   const STATUS_FILTERS = [
     ["all", "All", () => true],
     ["upcoming", "Upcoming", (j) => !["arrived", "no_show", "cancelled"].includes(j.status)],
-    ["here", "Here", (j) => j.status === "arrived" && !(j.completed && j.paid)],
-    ["unpaid", "Unpaid", (j) => (j.status === "arrived" || j.completed) && !j.paid && j.status !== "no_show" && j.status !== "cancelled"],
-    ["done", "Done", (j) => !!(j.completed && j.paid)],
+    ["here", "Here", (j) => j.status === "arrived" && !(j.completed && (j.paid || j.noPaymentNeeded))],
+    ["unpaid", "Unpaid", (j) => (j.status === "arrived" || j.completed) && !j.paid && !j.noPaymentNeeded && j.status !== "no_show" && j.status !== "cancelled"],
+    ["done", "Done", (j) => !!(j.completed && (j.paid || j.noPaymentNeeded))],
     ["out", "No-show / Cancelled", (j) => j.status === "no_show" || j.status === "cancelled"],
   ];
   const searchInput = el("input", { type: "search", placeholder: "Search customer, car, phone, tech or rep…" }); // its size is set by the stylesheet, per screen size
@@ -3987,8 +4216,15 @@ async function renderManagerJobs(content) {
           statusBtn("arrived", "Arrived"),
           statusBtn("no_show", "No-show"),
           boolBtn("completed", "Service complete"),
-          paymentBtn("paidCash", "Paid — Cash"),
-          paymentBtn("paidCard", "Paid — Card"),
+          ...(job.noPaymentNeeded
+            ? [el("span", { class: "muted", style: "align-self:center;font-size:12px", text: "Redo: no payment needed" })]
+            : [paymentBtn("paidCash", "Paid — Cash"), paymentBtn("paidCard", "Paid — Card")]),
+          el("button", {
+            class: "tab-btn" + (job.isRedo ? " active" : ""),
+            style: "border-color:" + (job.isRedo ? "var(--cyan)" : "var(--border)") + ";color:" + (job.isRedo ? "var(--cyan)" : "var(--sub)"),
+            onclick: async () => { await api(`/api/manager/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify({ isRedo: !job.isRedo }) }); load(); },
+            text: (job.isRedo ? "✓ " : "") + "Redo (no charge)",
+          }),
           el("button", {
             class: "tab-btn" + (job.isWalkIn ? " active" : ""),
             style: "border-color:" + (job.isWalkIn ? "var(--amber)" : "var(--border)") + ";color:" + (job.isWalkIn ? "var(--amber)" : "var(--sub)"),
