@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-09-dollarafter";
+const BUILD = "2026-10-10-redo";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -190,7 +190,7 @@ function saleUpsellTotal(sale) {
   return (sale.upsells || []).reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
 }
 const { parseTitlePricing } = require("./pricing");
-const { titleSaysReschedule } = require("./titlewords");
+const { titleSaysReschedule, titleSaysRedo } = require("./titlewords");
 function saleTotal(sale) {
   return (parseFloat(sale.basePrice) || 0) + saleUpsellTotal(sale);
 }
@@ -230,9 +230,44 @@ function applyTitlePricing(db, sale, opts = {}) {
   }
   return Math.abs(prior - sale.basePrice) >= 0.005;
 }
+// ---- REDO jobs ----
+// A title that says "redo" means the work is being done again at no charge. Such a job is flagged automatically and is FREE (price $0, whatever GHL's
+// opportunity value says) UNLESS the title carries a priced extra service ("... REDO + sunstrip $50"), a price was typed in by hand, or an upsell was
+// added: then it's an ordinary paid job and everything works as usual. A free redo never needs a payment, so it is left out of Unpaid Arrivals and
+// Cleanup, it isn't counted as a new close, and it still appears on Job Status.
+// A job that has already been paid is never zeroed: real money is on it.
+function redoFree(s) { return !!s.isRedo && saleTotal(s) <= 0; }
+function applyRedoRules(db, sale, opts = {}) {
+  let changed = false;
+  const log = (field, oldValue, newValue, actor) => {
+    if (opts.silent) return;
+    if (!db.auditLog) db.auditLog = [];
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor, saleId: sale.id, car: sale.car, field, oldValue, newValue });
+    db.auditLog = db.auditLog.slice(0, 1000);
+  };
+  if (!sale.isRedo && !sale.redoDismissed && titleSaysRedo(sale.car)) {
+    sale.isRedo = true; sale.redoAuto = true; changed = true;
+    log("Redo (no charge)", false, true, "Auto (title says redo)");
+  }
+  if (!sale.isRedo) return changed;
+  const priced = !!parseTitlePricing(sale.car);
+  const was = parseFloat(sale.basePrice) || 0;
+  const mayZero = opts.force ? !sale.paid : (!sale.paid && !sale.completed);   // a quiet background pass never rewrites a finished job
+  if (!priced && !sale.priceLocked && was > 0 && mayZero) {
+    sale.basePrice = 0; sale.priceSource = "redo"; changed = true;
+    log("Base price", was, 0, "Auto (redo, no charge)");
+  }
+  return changed;
+}
+// Every place a title arrives or changes runs the price rules and then the redo rules.
+function applyTitleRules(db, sale, opts = {}) {
+  const priceChanged = applyTitlePricing(db, sale, opts);
+  const redoChanged = applyRedoRules(db, sale, opts);
+  return priceChanged || redoChanged;
+}
 function backfillTitlePricing(db) {
   let changed = 0;
-  db.sales.forEach((sale) => { if (applyTitlePricing(db, sale)) changed += 1; });
+  db.sales.forEach((sale) => { if (applyTitleRules(db, sale)) changed += 1; });
   return changed;
 }
 function money2(n) {
@@ -571,7 +606,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   if (!sale.priceLocked) sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
   else sale.basePrice = sale.basePrice || 0;
   sale.priceSource = sale.priceLocked ? "manual" : "ghl";
-  applyTitlePricing(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true }); // a real GHL update for this booking: the title's price wins, paid or not
+  applyTitleRules(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true }); // a real GHL update for this booking: the title's price wins, paid or not
   autoFlagRescheduleFromTitle(db, sale); // the title says rescheduled, and there is an earlier dead booking: not a new close
   sale.calendarId = calendarId || sale.calendarId || null;
   sale.syncedFromGHL = true;
@@ -1046,7 +1081,7 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   if (basePrice !== undefined) {
     sale.ghlValue = parseFloat(basePrice) || 0;
     if (!sale.priceLocked) sale.basePrice = sale.ghlValue; // a price typed by hand is not replaced by GHL's value
-    applyTitlePricing(db, sale, { priorPrice: before.basePrice });
+    applyTitleRules(db, sale, { priorPrice: before.basePrice });
   }
   const attribution = resolveSalesRepAttribution(db, salesRepName, sale.car);
   if (attribution) {
@@ -1182,7 +1217,7 @@ app.post("/api/sales", requireManager, (req, res) => {
   // Left blank, the price comes from the title ("... $644-$50"); a price typed in here is used exactly as typed.
   if ((parseFloat(basePrice) || 0) > 0) { sale.priceLocked = true; sale.priceSource = "manual"; }
   else { const tp = parseTitlePricing(sale.car); if (tp) sale.basePrice = tp.total; }
-  applyTitlePricing(db, sale, { silent: true }); // also records the deposit and the title's price
+  applyTitleRules(db, sale, { silent: true }); // also records the deposit and the title's price (and notices a redo)
   db.sales.push(sale);
   saveDB(db);
   res.json({ ok: true, id: sale.id });
@@ -1556,7 +1591,7 @@ app.get("/api/owner/attendance-summary", requireOwner, (req, res) => {
 // to catch anything that's fallen through the cracks regardless of when it happened.
 app.get("/api/manager/unpaid-arrived", requireManager, (req, res) => {
   const db = loadDB();
-  const jobs = db.sales.filter((s) => s.status === "arrived" && !s.paid);
+  const jobs = db.sales.filter((s) => s.status === "arrived" && !s.paid && !redoFree(s)); // a free redo never needs paying
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, car: s.car, customerName: s.customerName, customerPhone: s.customerPhone,
     baseService: s.baseService, basePrice: s.basePrice || 0, total: saleTotal(s), employeeNames: s.employeeNames || "Unassigned",
@@ -1589,7 +1624,7 @@ app.get("/api/manager/price-mismatches", requireManager, (req, res) => {
   const db = loadDB();
   const since = Date.now() - 45 * 24 * 3600 * 1000;
   const rows = db.sales.filter((s) => {
-    if (s.status === "cancelled" || s.status === "no_show" || s.priceMismatchDismissed) return false;
+    if (s.status === "cancelled" || s.status === "no_show" || s.priceMismatchDismissed || redoFree(s)) return false; // a free redo is meant to be $0
     const tp = parseTitlePricing(s.car);
     return tp && Math.abs((parseFloat(s.basePrice) || 0) - tp.total) >= 0.5 && Date.parse(s.date) >= since;
   }).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60).map((s) => {
@@ -1601,7 +1636,7 @@ app.get("/api/manager/price-mismatches", requireManager, (req, res) => {
 
 app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   const db = loadDB();
-  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && !redoFree(s) && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
     employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
@@ -1633,7 +1668,7 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
   const inRangeJobs = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(dateBasis(s), start, end)), db);
   // On the closing view a booking marked as a reschedule isn't a new close. On the appointment view (the one that
   // matches Payroll) it stays, so the rep is still paid when the client shows up.
-  const relevant = closedBasis ? inRangeJobs.filter((s) => !s.isReschedule) : inRangeJobs;
+  const relevant = (closedBasis ? inRangeJobs.filter((s) => !s.isReschedule) : inRangeJobs).filter((s) => !redoFree(s)); // on BOTH bases a free redo is not a sale, so this agrees with Payroll
   const leftOut = closedBasis ? inRangeJobs.filter((s) => s.isReschedule).map((s) => {
     const r = db.salesReps.find((x) => x.id === s.salesRepId);
     return { id: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending", repName: r ? r.name : "Removed rep" };
@@ -1656,7 +1691,7 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
 app.get("/api/cross-location/cleanup-list", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  const jobs = db.sales.filter((s) => s.status !== "cancelled" && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
+  const jobs = db.sales.filter((s) => s.status !== "cancelled" && !redoFree(s) && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
   res.json({
     locationLabel: SHOP_LOCATION_LABEL,
     jobs: jobs.map((s) => ({
@@ -1770,7 +1805,7 @@ app.post("/api/cross-location/job-add", (req, res) => {
   else if (isOnlineBooking) { sale.isOnlineBooking = true; sale.salesRepName = "Online Booking"; }
   else if (rep) { sale.salesRepId = rep.id; sale.salesRepName = rep.name; }
   if (typedPrice > 0) { sale.priceLocked = true; sale.priceSource = "manual"; } // typed in the add form: used exactly as typed
-  applyTitlePricing(db, sale, { silent: true }); // records the deposit and the title's price too
+  applyTitleRules(db, sale, { silent: true }); // records the deposit and the title's price too (and notices a redo)
   db.sales.push(sale);
   if (!db.auditLog) db.auditLog = [];
   db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Rep tracker (owner)", saleId: sale.id, car: sale.car, field: "Job added", oldValue: null, newValue: `${sale.salesRepName} · $${sale.basePrice}` });
@@ -2028,7 +2063,7 @@ function mergeJobPair(db, req, liveId, earlierId) {
   if (live.car) earlier.car = live.car;
   if (live.baseService) earlier.baseService = live.baseService;
   if ((parseFloat(live.basePrice) || 0) > 0) earlier.basePrice = live.basePrice;
-  applyTitlePricing(db, earlier, { silent: true });
+  applyTitleRules(db, earlier, { silent: true });
   if (earlier.status === "no_show" || earlier.status === "cancelled") earlier.status = "pending"; // it's a live booking again
   if (!earlier.salesRepId && live.salesRepId) { earlier.salesRepId = live.salesRepId; earlier.salesRepName = live.salesRepName; }
   if (!(earlier.employeeIds || []).length && (live.employeeIds || []).length) { earlier.employeeIds = live.employeeIds; earlier.employeeNames = live.employeeNames; }
@@ -2191,7 +2226,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
-    titlePrice: s.titlePrice == null ? null : s.titlePrice, depositAmount: depositOf(s), balanceDue: depositOf(s) > 0 ? balanceDueOf(s) : null, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceSource: s.priceSource || null, priceLocked: !!s.priceLocked,
+    isRedo: !!s.isRedo, redoAuto: !!s.redoAuto, noPaymentNeeded: redoFree(s), titlePrice: s.titlePrice == null ? null : s.titlePrice, depositAmount: depositOf(s), balanceDue: depositOf(s) > 0 ? balanceDueOf(s) : null, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceSource: s.priceSource || null, priceLocked: !!s.priceLocked,
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
     photos: s.photos || { before: {}, after: {} }, notes: s.notes || [],
   })));
@@ -2231,6 +2266,28 @@ function patchJobHandler(req, res) {
     sale.priceLocked = true;
     sale.priceSource = "manual";
   }
+  if (req.body.isRedo !== undefined) {
+    const flag = !!req.body.isRedo;
+    logAudit(db, req, sale, "Redo (no charge)", !!sale.isRedo, flag);
+    sale.isRedo = flag; sale.redoAuto = false;
+    if (flag) {
+      sale.redoDismissed = false;
+      applyRedoRules(db, sale, { force: true, silent: true });
+      // Pressing the Redo button yourself is an explicit decision, so it wins even when the title carries a price (almost every title does):
+      // the job becomes free and stays free (its price is held at $0 until someone unmarks it). A job that has already been paid is never zeroed.
+      if (!sale.paid && !sale.priceLocked && (parseFloat(sale.basePrice) || 0) > 0) {
+        sale.basePrice = 0; sale.priceLocked = true; sale.redoPriceLocked = true; sale.priceSource = "redo";
+      }
+    } else {
+      sale.redoDismissed = true;                       // the word in the title is never allowed to flag it again
+      if (sale.priceSource === "redo" && (!sale.priceLocked || sale.redoPriceLocked)) {        // put back the price the redo rule took away
+        if (sale.redoPriceLocked) { sale.priceLocked = false; sale.redoPriceLocked = false; }
+        const tp = parseTitlePricing(sale.car);
+        sale.basePrice = tp ? tp.total : (sale.ghlValue != null ? sale.ghlValue : 0);
+        sale.priceSource = tp ? "title" : "ghl";
+      }
+    }
+  }
   if (req.body.dismissPriceMismatch === true) sale.priceMismatchDismissed = true;
   if (req.body.useTitlePrice === true) {
     const tp = parseTitlePricing(sale.car);
@@ -2257,7 +2314,7 @@ function patchJobHandler(req, res) {
       // A title someone corrected by hand is theirs: neither the background sync nor a later GHL event may change it back.
       // (A title picked straight from GHL's own appointment list isn't hand-typed, so it stays free to follow GHL.)
       sale.titleLocked = !req.body.titleFromGhl;
-      applyTitlePricing(db, sale);
+      applyTitleRules(db, sale);
       autoFlagRescheduleFromTitle(db, sale);
     } else if (req.body.titleFromGhl) {
       sale.titleLocked = false;
@@ -2775,7 +2832,7 @@ app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
   // of closing activity (it's listed separately as "left out", with a way to undo). It is NOT left out of payroll or
   // the appointment lists: when the client shows up, the rep is paid exactly as normal.
   const inClosingRange = db.sales.filter((s) => s.salesRepId && inRange(s.closedAt || s.date, start, end));
-  const relevant = revenueEligible(inClosingRange.filter((s) => !s.isReschedule), db);
+  const relevant = revenueEligible(inClosingRange.filter((s) => !s.isReschedule && !redoFree(s)), db);
   const leftOut = revenueEligible(inClosingRange.filter((s) => s.isReschedule), db).map((s) => {
     const r = db.salesReps.find((x) => x.id === s.salesRepId);
     return { saleId: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, repName: r ? r.name : "Removed rep", status: s.status || "pending" };
@@ -2992,9 +3049,9 @@ function calculateBasePay(person, attendanceRecords, sales) {
   return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted, dailyRate: 0, configured: true, carDetails: [] };
 }
 
-app.get("/api/owner/payroll", requireOwner, (req, res) => {
-  const db = loadDB();
-  const { start, end } = dateRangeFor(req.query);
+// The payroll calculation, lifted out of the route so a payroll RUN uses exactly the same numbers the Payroll screen shows.
+function buildPayroll(db, query) {
+  const { start, end } = dateRangeFor(query);
   const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db);
   const shopTotalUpsellRevenue = sales.reduce((a, s) => a + saleUpsellTotal(s), 0);
   const duplicateSaleIds = findDuplicateSaleIds(sales);
@@ -3077,7 +3134,7 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
   // Sales reps are a different pay structure entirely — commission on the base sale, only
   // when the manager marked it arrived. Not tied to upsells at all.
   const salesReps = db.salesReps.map((rep) => {
-    const mine = sales.filter((s) => s.salesRepId === rep.id);
+    const mine = sales.filter((s) => s.salesRepId === rep.id && !redoFree(s));
     const showed = mine.filter((s) => s.status === "arrived");
     const noShow = mine.filter((s) => s.status === "no_show");
     const resolved = showed.length + noShow.length; // excludes still-pending future bookings
@@ -3098,7 +3155,226 @@ app.get("/api/owner/payroll", requireOwner, (req, res) => {
     return { id: rep.id, name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, totalBooked: mine.length, showedCount: showed.length, showedValue, duringHoursCount, afterHoursCount, commission, noShowCount: noShow.length, noShowRate, duplicateWarnings, arrivedDetails, noShowDetails };
   });
 
-  res.json({ shopTotalUpsellRevenue, employees, managers, salesReps });
+  return { shopTotalUpsellRevenue, employees, managers, salesReps };
+}
+app.get("/api/owner/payroll", requireOwner, (req, res) => res.json(buildPayroll(loadDB(), req.query)));
+
+// =====================================================================================================================================
+// PAYROLL RUNS for techs and managers (sales reps are not part of this and are left exactly as they were).
+// One schedule (see payschedule.js), one button. "Run payroll" works out everyone for a period using the SAME calculation the Payroll
+// screen shows, saves a frozen register of what was calculated, and the screen moves on to the next period. Periods are run in order.
+// Nothing runs by itself: a day nobody marked pays $0, so a person looks at the checklist and presses the button.
+// =====================================================================================================================================
+const paySchedule = require("./payschedule");
+function trackerToday() { return process.env.TRACKER_TODAY || EASTERN_DAY_FMT.format(new Date()); } // the override exists only so tests can set the date
+const payRound = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const payRuns = (db) => (db.payrollRuns = db.payrollRuns || []);
+const payAdjustments = (db) => (db.payrollAdjustments = db.payrollAdjustments || []);
+const payKey = (type, id) => `${type}:${id}`;
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const payShortDate = (ymd) => `${MONTHS_SHORT[Number(ymd.slice(5, 7)) - 1]} ${Number(ymd.slice(8, 10))}`;
+const payPlural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
+
+// Every tech and manager's pay for a period: exactly what the Payroll screen shows, split into the pieces a payroll provider asks for.
+function teamPayrollLines(db, period) {
+  const data = buildPayroll(db, { period: "custom", startDate: period.start, endDate: period.end });
+  const line = (type, p) => {
+    const upsell = payRound(p.commission), walkIn = payRound(p.walkInCommission), tips = payRound(p.tipsTotal);
+    const subtotal = payRound(p.totalPay);                     // the same total the Payroll screen shows for this person
+    const base = payRound(subtotal - upsell - walkIn - tips);   // a stray cent of rounding lands here, so the pieces always add up to the total
+    return { key: payKey(type, p.id), personType: type, personId: p.id, name: p.name, payType: p.payType || null, base, upsellCommission: upsell, walkInCommission: walkIn, tips, subtotal,
+      daysPresent: p.basePay.daysPresent || 0, daysHalf: p.basePay.daysHalf || 0, daysAbsent: p.basePay.daysAbsent || 0, hours: payRound(p.basePay.hoursCounted || 0) };
+  };
+  return [...data.employees.map((e) => line("employee", e)), ...data.managers.map((m) => line("manager", m))];
+}
+
+// What to look at before pressing the button.
+function payrollPreview(db, period) {
+  const warnings = [];
+  const days = [];
+  for (let d = period.start; d <= period.end; d = paySchedule.add(d, 1)) if (paySchedule.dow(d) !== 0) days.push(d);   // closed Sundays
+  const people = [...db.employees.map((p) => ({ type: "employee", p })), ...db.managers.map((p) => ({ type: "manager", p }))].filter((x) => x.p.payType === "salary" || x.p.payType === "hourly");
+  const gaps = [];
+  people.forEach(({ type, p }) => {
+    const have = new Set(db.attendance.filter((a) => a.personType === type && a.personId === p.id && a.status).map((a) => a.date));
+    const missing = days.filter((d) => !have.has(d));
+    if (missing.length) gaps.push({ name: p.name, days: missing });
+  });
+  if (gaps.length) {
+    const total = gaps.reduce((a, g) => a + g.days.length, 0);
+    warnings.push({ code: "attendance", count: total, text: `${payPlural(total, "work day")} with no attendance marked (${payPlural(gaps.length, "person", "people")}). A day nobody marked pays $0.`, items: gaps.slice(0, 12).map((g) => `${g.name}: ${g.days.slice(0, 8).map(payShortDate).join(", ")}${g.days.length > 8 ? "…" : ""}`) });
+  }
+  const range = dateRangeFor({ period: "custom", startDate: period.start, endDate: period.end });
+  const jobs = revenueEligible(db.sales.filter((s) => inRange(s.date, range.start, range.end)), db);
+  const jobLine = (s) => `${s.car} (${String(s.date).slice(0, 10)})`;
+  const unpaid = jobs.filter((s) => s.status === "arrived" && !s.paid && !redoFree(s));
+  if (unpaid.length) warnings.push({ code: "unpaid", count: unpaid.length, text: `${payPlural(unpaid.length, "job")} dated in this period arrived but ${unpaid.length === 1 ? "isn't" : "aren't"} marked paid. Commissions only count paid jobs.`, items: unpaid.slice(0, 8).map(jobLine) });
+  const unmarked = jobs.filter((s) => !s.status || s.status === "pending" || s.status === "unconfirmed");
+  if (unmarked.length) warnings.push({ code: "unmarked", count: unmarked.length, text: `${payPlural(unmarked.length, "job")} dated in this period ${unmarked.length === 1 ? "was" : "were"} never marked arrived or no-show.`, items: unmarked.slice(0, 8).map(jobLine) });
+  const messy = jobs.filter((s) => !redoFree(s) && (!s.basePrice || !s.baseService || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking)));
+  if (messy.length) warnings.push({ code: "cleanup", count: messy.length, text: `${payPlural(messy.length, "job")} ${messy.length === 1 ? "is" : "are"} missing a price, service or sales rep (see Cleanup).`, items: messy.slice(0, 8).map(jobLine) });
+  // Corrections made to an EARLIER check after it was run that nobody has put on a check yet: say so now, so an underpayment isn't forgotten.
+  payRuns(db).filter((r) => !r.skipped && r.end < period.start).sort((x, y) => (x.start < y.start ? -1 : 1)).forEach((r) => {
+    const d = payrollDiff(db, r);
+    if (d.under.length) warnings.push({ code: "corrections", count: d.under.length, text: `${payShortDate(r.start)} - ${payShortDate(r.end)} payroll has ${payPlural(d.under.length, "correction")} since it was run that no check has picked up yet. Go back to that period and press "Add the underpayments to the next check".`, items: d.under.map((x) => `${x.name}: +$${x.delta.toFixed(2)}`) });
+  });
+  return { warnings, workDays: days.length };
+}
+
+function payrollStatus(db, period) {
+  const runs = payRuns(db), today = trackerToday();
+  const run = runs.find((r) => r.periodId === period.id) || null;
+  const over = period.end < today;
+  const blockedBy = paySchedule.isRunnableKind(period)
+    ? paySchedule.periods().find((p) => paySchedule.isRunnableKind(p) && p.start < period.start && !runs.some((r) => r.periodId === p.id)) || null
+    : null;
+  return { run, over, blockedBy, runnable: paySchedule.isRunnableKind(period) && !run && over && !blockedBy };
+}
+
+// After a period has been run, things can still change (attendance corrected, a job marked paid late, a tip added). This is what is
+// different now compared with what was calculated, per person. Anything already carried forward to a later check is not counted again.
+function payrollDiff(db, run) {
+  if (run.skipped) return { under: [], over: [] };
+  const period = paySchedule.periodByRange(run.start, run.end);
+  const live = new Map(teamPayrollLines(db, period).map((l) => [l.key, l]));
+  const exists = new Set([...db.employees.map((e) => payKey("employee", e.id)), ...db.managers.map((m) => payKey("manager", m.id))]);
+  const snap = new Map(run.lines.map((l) => [l.key, l]));
+  const out = { under: [], over: [] };
+  new Set([...snap.keys(), ...live.keys()]).forEach((k) => {
+    if (!exists.has(k)) return;                                   // someone removed since: nothing to pay or flag
+    const l = live.get(k), sn = snap.get(k), ref = l || sn;
+    const delta = payRound((l ? l.subtotal : 0) - (sn ? sn.subtotal : 0) - ((run.carried && run.carried[k]) || 0));
+    if (Math.abs(delta) < 0.01) return;
+    (delta > 0 ? out.under : out.over).push({ key: k, personType: ref.personType, personId: ref.personId, name: ref.name, calculated: sn ? sn.subtotal : 0, now: l ? l.subtotal : 0, delta });
+  });
+  return out;
+}
+
+app.get("/api/owner/pay-schedule", requireOwner, (req, res) => {
+  const db = loadDB(), today = trackerToday(), runs = payRuns(db);
+  const periods = paySchedule.periods().map((p) => { const r = runs.find((x) => x.periodId === p.id); return { ...p, closedRunId: r ? r.id : null, skipped: !!(r && r.skipped) }; });
+  const inside = periods.findIndex((p) => p.start <= today && today <= p.end);
+  const first = periods.findIndex((p) => paySchedule.isRunnableKind(p) && !p.closedRunId);
+  res.json({ today, periods, containingIndex: inside >= 0 ? inside : periods.findIndex((p) => p.start > today), runnableIndex: first >= 0 && periods[first].end < today ? first : -1 });
+});
+
+app.get("/api/owner/payroll-run-status", requireOwner, (req, res) => {
+  const db = loadDB();
+  const period = paySchedule.periodByRange(req.query.start, req.query.end);
+  if (!period || !paySchedule.isRunnableKind(period)) return res.json({ period: null });
+  const st = payrollStatus(db, period);
+  const pending = payAdjustments(db).filter((a) => !a.appliedRunId);
+  const body = {
+    period, today: trackerToday(), over: st.over, runnable: st.runnable,
+    blockedBy: st.blockedBy ? { id: st.blockedBy.id, start: st.blockedBy.start, end: st.blockedBy.end, name: st.blockedBy.name } : null,
+    run: st.run, pending,
+  };
+  if (!st.run) {
+    body.preview = payrollPreview(db, period);
+    const firstRunnable = paySchedule.periods().find(paySchedule.isRunnableKind);
+    if (firstRunnable && firstRunnable.id === period.id) body.trueUp = paySchedule.FIRST_TRUE_UP;
+  } else if (!st.run.skipped) body.diff = payrollDiff(db, st.run);
+  res.json(body);
+});
+
+app.post("/api/owner/payroll-run", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end, confirmWarnings } = req.body || {};
+  const period = paySchedule.periodByRange(start, end);
+  if (!period || !paySchedule.isRunnableKind(period)) return res.status(400).json({ error: "That isn't one of the pay periods on the schedule." });
+  const st = payrollStatus(db, period);
+  if (st.run) return res.status(409).json({ error: `Payroll for ${payShortDate(period.start)} - ${payShortDate(period.end)} was already run.` });
+  if (!st.over) return res.status(400).json({ error: `This pay period isn't over yet. It ends ${payShortDate(period.end)}, so it can be run from ${payShortDate(paySchedule.add(period.end, 1))}.` });
+  if (st.blockedBy) return res.status(400).json({ error: `Run ${payShortDate(st.blockedBy.start)} - ${payShortDate(st.blockedBy.end)} first. Pay periods are run in order.` });
+  const preview = payrollPreview(db, period);
+  if (preview.warnings.length > 0 && !confirmWarnings) return res.status(409).json({ needsConfirm: true, error: "There are things to check before running this payroll.", warnings: preview.warnings });
+
+  const lines = teamPayrollLines(db, period).map((l) => ({ ...l, adjustments: [], adjustmentsTotal: 0, total: l.subtotal }));
+  const byKey = new Map(lines.map((l) => [l.key, l]));
+  const applied = [];
+  payAdjustments(db).filter((a) => !a.appliedRunId).forEach((a) => {
+    const k = payKey(a.personType, a.personId);
+    let l = byKey.get(k);
+    if (!l) { l = { key: k, personType: a.personType, personId: a.personId, name: a.personName, payType: null, base: 0, upsellCommission: 0, walkInCommission: 0, tips: 0, subtotal: 0, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hours: 0, adjustments: [], adjustmentsTotal: 0, total: 0 }; lines.push(l); byKey.set(k, l); }
+    l.adjustments.push({ id: a.id, note: a.note, amount: a.amount, source: a.source });
+    l.adjustmentsTotal = payRound(l.adjustmentsTotal + a.amount);
+    l.total = payRound(l.subtotal + l.adjustmentsTotal);
+    applied.push(a);
+  });
+  const kept = lines.filter((l) => l.subtotal !== 0 || l.adjustments.length > 0 || l.payType);
+  const sum = (f) => payRound(kept.reduce((a, l) => a + f(l), 0));
+  const run = {
+    id: newId(), periodId: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind, workDays: period.workDays,
+    submit: period.submit, paid: period.paid, ...(period.note ? { note: period.note } : {}),
+    closedAt: new Date().toISOString(), closedBy: "Owner", ranWithWarnings: preview.warnings.map((w) => w.code),
+    lines: kept,
+    totals: { base: sum((l) => l.base), upsellCommission: sum((l) => l.upsellCommission), walkInCommission: sum((l) => l.walkInCommission), tips: sum((l) => l.tips), adjustments: sum((l) => l.adjustmentsTotal), total: sum((l) => l.total) },
+    carried: {},
+  };
+  applied.forEach((a) => { a.appliedRunId = run.id; });
+  payRuns(db).unshift(run);
+  saveDB(db);
+  res.json(run);
+});
+
+// "We paid this period another way, outside the tracker": lets the next one be run (periods go in order) without making up numbers.
+app.post("/api/owner/payroll-run/skip", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { start, end } = req.body || {};
+  const period = paySchedule.periodByRange(start, end);
+  if (!period || !paySchedule.isRunnableKind(period)) return res.status(400).json({ error: "That isn't one of the pay periods on the schedule." });
+  const st = payrollStatus(db, period);
+  if (st.run) return res.status(409).json({ error: "That period was already run." });
+  if (!st.over) return res.status(400).json({ error: "That pay period isn't over yet." });
+  if (st.blockedBy) return res.status(400).json({ error: `Deal with ${payShortDate(st.blockedBy.start)} - ${payShortDate(st.blockedBy.end)} first. Pay periods go in order.` });
+  const run = { id: newId(), periodId: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind, workDays: period.workDays, submit: period.submit, paid: period.paid, closedAt: new Date().toISOString(), closedBy: "Owner", skipped: true, lines: [], totals: { base: 0, upsellCommission: 0, walkInCommission: 0, tips: 0, adjustments: 0, total: 0 }, carried: {} };
+  payRuns(db).unshift(run);
+  saveDB(db);
+  res.json(run);
+});
+
+// Anything that turned out UNDERPAID since a period was run goes on the next check as an adjustment. Anything that looks OVERPAID is only flagged:
+// it is never deducted automatically (many states require written permission to deduct from pay).
+app.post("/api/owner/payroll-run/:id/carry-forward", requireOwner, (req, res) => {
+  const db = loadDB();
+  const run = payRuns(db).find((r) => r.id === req.params.id);
+  if (!run || run.skipped) return res.status(404).json({ error: "Payroll run not found." });
+  const diff = payrollDiff(db, run);
+  if (diff.under.length === 0) return res.status(400).json({ error: "Nobody is owed anything extra for this period right now." });
+  run.carried = run.carried || {};
+  const created = diff.under.map((d) => {
+    run.carried[d.key] = payRound((run.carried[d.key] || 0) + d.delta);
+    const adj = { id: newId(), personType: d.personType, personId: d.personId, personName: d.name, amount: d.delta, note: `Change since ${payShortDate(run.start)} - ${payShortDate(run.end)} payroll was run`, source: "carried", fromRunId: run.id, createdAt: new Date().toISOString(), createdBy: "Owner", appliedRunId: null };
+    payAdjustments(db).push(adj);
+    return adj;
+  });
+  saveDB(db);
+  res.json({ created, stillOver: diff.over });
+});
+
+app.post("/api/owner/payroll-adjustments", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { personType, personId, amount, note } = req.body || {};
+  const person = personType === "employee" ? db.employees.find((e) => e.id === personId) : personType === "manager" ? db.managers.find((m) => m.id === personId) : null;
+  if (!person) return res.status(400).json({ error: "Choose a tech or manager." });
+  const amt = Number(amount);
+  if (!isFinite(amt) || amt === 0 || Math.abs(amt) > 100000) return res.status(400).json({ error: "Enter an amount (plus or minus), not zero." });
+  const text = String(note || "").trim();
+  if (!text || text.length > 200) return res.status(400).json({ error: "Add a short note saying what this is for (up to 200 characters)." });
+  const adj = { id: newId(), personType, personId, personName: person.name, amount: payRound(amt), note: text, source: "manual", createdAt: new Date().toISOString(), createdBy: "Owner", appliedRunId: null };
+  payAdjustments(db).push(adj);
+  saveDB(db);
+  res.json(adj);
+});
+
+app.delete("/api/owner/payroll-adjustments/:id", requireOwner, (req, res) => {
+  const db = loadDB();
+  const adj = payAdjustments(db).find((a) => a.id === req.params.id);
+  if (!adj) return res.status(404).json({ error: "Adjustment not found." });
+  if (adj.appliedRunId) return res.status(400).json({ error: "That adjustment is already on a payroll that was run, so it can't be removed." });
+  db.payrollAdjustments = payAdjustments(db).filter((a) => a.id !== adj.id);
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 // Full raw backup — everyone's data, as a downloadable file the owner can save anywhere
@@ -3376,7 +3652,7 @@ async function runTitleSync() {
   // as strict as ever (its own appointment id, or its exact start time), so a job it can't identify is simply left alone.
   const lookback = new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000);
   const unpriced = db.sales.filter((s) =>
-    s.contactId && s.status !== "cancelled" && !(parseFloat(s.basePrice) > 0) && !s.priceLocked &&
+    s.contactId && s.status !== "cancelled" && !s.isRedo && !(parseFloat(s.basePrice) > 0) && !s.priceLocked &&
     !isNaN(new Date(s.date).getTime()) && new Date(s.date) >= lookback && new Date(s.date) <= horizon
   );
   const candidates = Array.from(new Map(upcoming.concat(unpriced).map((s) => [s.id, s])).values());
@@ -3401,7 +3677,7 @@ async function runTitleSync() {
         if (title && title !== sale.car) {
           const before = sale.car;
           sale.car = title;
-          applyTitlePricing(db, sale);
+          applyTitleRules(db, sale);
           if (!db.auditLog) db.auditLog = [];
           db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
           db.auditLog = db.auditLog.slice(0, 1000);
@@ -3815,7 +4091,7 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
   // Sales reps get commission on the BASE sale, only when it showed (manager-marked) —
   // completely separate from upsell commission the techs/managers earn.
   const perSalesRep = db.salesReps.map((rep) => {
-    const mine = sales.filter((s) => s.salesRepId === rep.id);
+    const mine = sales.filter((s) => s.salesRepId === rep.id && !redoFree(s));
     const showed = mine.filter((s) => s.status === "arrived");
     const showedValue = showed.reduce((a, s) => a + (parseFloat(s.basePrice) || 0), 0);
     const commission = showed.reduce((a, s) => a + salesRepCommissionForSale(rep, s).amount, 0);
@@ -3870,7 +4146,7 @@ function statsHeadline(db, start, end) {
   const arrived = sales.filter((s) => s.status === "arrived").length;
   const noShow = sales.filter((s) => s.status === "no_show").length;
   const cancelled = db.sales.filter((s) => inP(s.date) && s.status === "cancelled" && afterRevenueStart(s, db)).length;
-  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && !redoFree(s) && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
   const dealValue = statSum(closed, (s) => parseFloat(s.basePrice) || 0);
   return {
     revenue: statRound(revenue), paidJobs: paid.length, avgTicket: statRound(paid.length ? revenue / paid.length : 0),
@@ -3907,7 +4183,7 @@ function statsRecords(db, today) {
     if (s.paid) revenue[d] = (revenue[d] || 0) + saleTotal(s);
     if (s.completed) cars[d] = (cars[d] || 0) + 1;
   });
-  db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && afterRevenueStart(s, db)).forEach((s) => {
+  db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && !redoFree(s) && afterRevenueStart(s, db)).forEach((s) => {
     const d = ymdOf(s.closedAt || s.date);
     const c = (closed[d] = closed[d] || { count: 0, value: 0 });
     c.count += 1; c.value += parseFloat(s.basePrice) || 0;
@@ -3991,7 +4267,7 @@ app.get("/api/owner/statistics", requireOwner, (req, res) => {
   const previous = pq ? (({ start: ps, end: pe }) => statsHeadline(db, ps, pe))(dateRangeFor(pq)) : null;
 
   const completed = sales.filter((s) => s.completed);
-  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && !redoFree(s) && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
   const headline = head;
 
   const groupBy = (list, keyFn) => { const m = {}; list.forEach((x) => { const k = keyFn(x); (m[k] = m[k] || []).push(x); }); return m; };
@@ -4002,7 +4278,7 @@ app.get("/api/owner/statistics", requireOwner, (req, res) => {
 
   const bySalesRep = db.salesReps.map((rep) => {
     const repClosed = closed.filter((s) => s.salesRepId === rep.id);
-    const mine = sales.filter((s) => s.salesRepId === rep.id);
+    const mine = sales.filter((s) => s.salesRepId === rep.id && !redoFree(s));
     const showed = mine.filter((s) => s.status === "arrived");
     const noShows = mine.filter((s) => s.status === "no_show").length;
     return {

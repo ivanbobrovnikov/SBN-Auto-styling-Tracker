@@ -26,4 +26,14 @@ function titleSaysReschedule(title) {
   }
   return false;
 }
-module.exports = { titleSaysReschedule };
+// "REDO": the work is being done again at no charge. Whole word only: "redo", "re-do", "re do". Never part of a longer word ("Redondo",
+// "credo", "tuxedo", "Toledo") and not other forms like "redone".
+function titleSaysRedo(title) {
+  const words = String(title || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  for (let i = 0; i < words.length; i++) {
+    if (words[i] === "redo") return true;
+    if (words[i] === "re" && words[i + 1] === "do") return true;
+  }
+  return false;
+}
+module.exports = { titleSaysReschedule, titleSaysRedo };
