@@ -12,10 +12,14 @@ const round2 = (n) => Math.round(n * 100) / 100;
 function parseTitlePricing(title) {
   let t = String(title || "");
   if (!t.trim()) return null;
-  // The dollar sign can come AFTER the number too ("299$-50$ depo"). Turn that into the usual "$299-$50 depo" so one set of rules reads both.
-  // A number is only changed when nothing letter-like sits right in front of it, so "F150$" or "Model3$" never becomes a price.
-  t = t.replace(/(\$\s*\d[\d,]*(?:\.\d{1,2})?)\s*\$/g, "$1");                       // "$299$" -> "$299"
-  t = t.replace(/(^|[^\w$.,])(\d[\d,]*(?:\.\d{1,2})?)\s*\$/g, "$1$$$2");            // "299$"  -> "$299"
+  // The dollar sign can come AFTER the number too ("299$-50$ depo", "499$ plus wheels 100$ 599$ -95$ depo"). Turn that into the usual
+  // "$299-$50 depo" so one set of rules reads both.
+  //  - A "$" counts as the number's own TRAILING dollar sign only when it is NOT the "$" that starts the next number. In "front 2 $200" or
+  //    "Model 3 $279" the "$" belongs to the 200 / 279, so the lone 2 or 3 must be left alone (gluing them would make $2,200 or $3,279).
+  //  - "$299$" (a dollar sign on both sides, nothing between) is one price; but "100$ 599$" is two prices, each with its own trailing dollar.
+  //  - A number is only changed when nothing letter-like sits right in front of it, so "F150$" or "Model3$" never becomes a price.
+  t = t.replace(/(\$\d[\d,]*(?:\.\d{1,2})?)\$/g, "$1");                                   // "$299$" -> "$299" (tight only)
+  t = t.replace(/(^|[^\w$.,])(\d[\d,]*(?:\.\d{1,2})?)[ \t]*\$(?!\d)/g, "$1$$$2");         // "299$"  -> "$299" (not when that "$" starts the next number)
   const found = [];
   // "$644-$50", "$249 - $50depo", "$644 - 50", "$644 minus $50"
   const dollarPair = new RegExp(`\\$\\s*(${NUM})\\s*(?:-|–|—|minus)\\s*\\$?\\s*(${NUM})`, "gi");
