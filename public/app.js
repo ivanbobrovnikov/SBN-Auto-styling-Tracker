@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-10-pricefix";
+const UI_BUILD = "2026-10-11-closetime";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2306,6 +2306,7 @@ async function renderCommissionAudit(content) {
               el("div", { class: "muted", style: "font-size:12.5px", text: r.customerName || "" }),
               el("div", { class: "muted", style: "font-size:11.5px", text: `Closed: ${r.closedAtEastern} — ${r.duringHours ? "in-hours" : "after-hours"} (${r.rateApplied}%)` }),
               r.isReschedule ? el("div", { style: "font-size:11px;color:var(--amber)", text: "↻ Reschedule: left out of closing activity, still paid when the client shows" }) : null,
+              r.closedAtCheck ? el("div", { style: "font-size:11px;color:var(--amber)", text: "⚠ This time is when the booking reached the tracker, not a confirmed close time. If it was closed earlier, set the real time below and press Save (pressing Save on a correct time confirms it)." }) : null,
               el("div", { style: "display:flex;gap:6px;align-items:center;margin-top:4px" }, [closedAtInput, saveClosedAtBtn]),
             ]),
             el("div", { style: "text-align:right" }, [
@@ -3639,6 +3640,7 @@ async function renderManagerJobs(content) {
     else if (withStatus) out.push(tag(job.status === "arrived" ? "HERE" : "UPCOMING", job.status === "arrived" ? "var(--green)" : "var(--sub)"));
     if (job.completed) out.push(tag("DONE", "var(--green)"));
     if (job.isRedo) out.push(tag("REDO", "var(--cyan)"));
+    if (job.closedAtCheck) out.push(tag("⚠ CHECK CLOSE TIME", "var(--amber)"));   // a second car re-created without a real close time: set the true one in Commission Audit
     if (job.paid) out.push(tag("PAID", "var(--green)"));
     else if (job.noPaymentNeeded) out.push(tag("NO CHARGE", "var(--green)"));   // a free redo owes nothing, so it is never "UNPAID" or "NO PRICE"
     else if ((job.status === "arrived" || job.completed) && job.status !== "no_show" && job.status !== "cancelled") out.push(tag("UNPAID", "var(--red)"));
