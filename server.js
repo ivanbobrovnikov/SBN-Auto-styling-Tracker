@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-10-pricefix";
+const BUILD = "2026-10-11-closetime";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -475,8 +475,12 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
   if (isNaN(oldMs) || isNaN(newMs)) return false;
-  // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment.
-  if (EASTERN_DAY_FMT.format(new Date(oldMs)) === EASTERN_DAY_FMT.format(new Date(newMs))) return false;
+  // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment. The ONE exception is a clearly
+  // DIFFERENT CAR while the first booking is still live: a customer bringing two cars in on one day. Both bookings arrive under the
+  // same GHL id, and without this the second silently overwrote the first (the first car's job simply vanished).
+  if (EASTERN_DAY_FMT.format(new Date(oldMs)) === EASTERN_DAY_FMT.format(new Date(newMs))) {
+    return vehiclesDiffer(existing.car, incomingTitle) && !["cancelled", "no_show", "unconfirmed"].includes(existing.status);
+  }
   // Finished work is history: a new booking after it is a new deal.
   if (isServiced(existing)) return true;
   // A cancellation is explicit - that deal ended, so booking again is a fresh sale.
@@ -508,7 +512,20 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   const attribution = resolveSalesRepAttribution(db, salesRepName, car);
   const incomingIso = normalizeDate(date);
   let sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  // Two cars on one day share ONE id: the newest job holds it and the other is filed under "<id>~earlier-...". When a booking comes round
+  // again (a re-fire, a confirmation, a price change) for the OTHER car, it belongs to that car's job: update it in place, so re-firing
+  // either booking never splits off a third copy or moves one car's details onto the other's job.
+  // It only applies when the job holding the id is on the SAME DAY as this booking (the two-cars-one-day case), and only to a LIVE earlier job: a cancelled
+  // or no-show job never absorbs a new booking (that booking would vanish into a dead job), and bookings on other days keep working exactly as before.
+  if (sale && incomingIso && sale.date && vehiclesDiffer(sale.car, car) && EASTERN_DAY_FMT.format(new Date(sale.date)) === EASTERN_DAY_FMT.format(new Date(incomingIso))) {
+    const dayOf = (iso) => EASTERN_DAY_FMT.format(new Date(iso));
+    const itsOwn = db.sales.find((s) => s !== sale && String(s.ghlOpportunityId || "").startsWith(`${ghlOpportunityId}~earlier-`)
+      && s.date && dayOf(s.date) === dayOf(incomingIso) && !vehiclesDiffer(s.car, car) && vehicleKey(s.car) && ["pending", "arrived"].includes(s.status || "pending"));
+    if (itsOwn) sale = itsOwn;
+  }
+  let secondCarSameDay = false;       // this new job is a second car for a day that already has a live booking under this id
   if (sale && isSeparateAppointment(sale, incomingIso, car)) {
+    secondCarSameDay = !!(sale.date && incomingIso && EASTERN_DAY_FMT.format(new Date(sale.date)) === EASTERN_DAY_FMT.format(new Date(incomingIso)));
     // Same opportunity, different appointment. The old job keeps all of its own history untouched
     // but gives up its claim on the opportunity ID, so this booking - and every later event for
     // the opportunity (confirm, cancel, price changes) - lands on the new job instead.
@@ -570,7 +587,21 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // firing for the first time = the opportunity hitting Booked w/ Deposit). Later syncs
   // (like a price update) never touch it — that would let someone accidentally shift a
   // rep's commission rate after the fact just by editing the price later.
-  if (isNew) sale.closedAt = closedAt || new Date().toISOString();
+  if (isNew) {
+    // A close time GHL sends is used, read the same Eastern-aware way as every other date (a time with no zone is Eastern wall-clock).
+    // Without one, the close time is the moment this reached the tracker, which is right for a booking made just now, but wrong if the booking
+    // is being fired again later. For an ordinary new job that is the long-standing behavior. For a SECOND CAR on a day that already has a booking
+    // under the same id, it is more likely a re-fire, so it is marked for checking instead of being quietly trusted.
+    const fromGhl = closedAt ? (normalizeDate(closedAt) || closedAt) : null;
+    sale.closedAt = fromGhl || new Date().toISOString();
+    sale.closedAtSource = fromGhl ? "ghl" : "tracker";
+    if (!fromGhl && secondCarSameDay) {
+      sale.closedAtCheck = true;
+      if (!db.auditLog) db.auditLog = [];
+      db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (second car, same day)", saleId: sale.id, car: car || "", field: "Closed At", oldValue: "", newValue: `${sale.closedAt} (when it reached the tracker: please check)` });
+      db.auditLog = db.auditLog.slice(0, 1000);
+    }
+  }
   // The customer didn't show, and the appointment was moved to another day: that's the same deal being
   // rescheduled, so it's a live booking again (the no-show stays visible in Edit History).
   if (!isNew && incomingIso && sale.date && sale.status === "no_show"
@@ -1102,6 +1133,41 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   res.json({ ok: true, found: true, saleId: sale.id });
 });
 
+
+// Cancel, unconfirm and delete events carry only the GHL id. A customer with two cars on one day has TWO jobs under that one id, so the id
+// alone can't say which car the event is about, and guessing could cancel the wrong car. If the event names the car, that decides it. If it
+// doesn't, and there is more than one live booking that day, NOTHING is changed and it is written to the Debug log for the owner, which is
+// safer than quietly changing the wrong job.
+function resolveGhlTarget(db, body, endpoint, req) {
+  const id = body.ghlOpportunityId;
+  const holder = db.sales.find((s) => s.ghlOpportunityId === id);
+  if (!holder) return { sale: null };
+  const dayOf = (s) => (s.date ? EASTERN_DAY_FMT.format(new Date(s.date)) : "");
+  // Only LIVE bookings (pending, or the car is here) can be confused with each other: a cancelled, no-show or unconfirmed one is already out of the picture.
+  const live = (s) => ["pending", "arrived"].includes(s.status || "pending");
+  const family = db.sales.filter((s) => (s === holder || String(s.ghlOpportunityId || "").startsWith(`${id}~earlier-`)) && dayOf(s) === dayOf(holder) && live(s));
+  if (family.length < 2) return { sale: holder };
+  const title = body.car || body.title || body.appointmentTitle || "";
+  const chose = (sale) => {          // the event named a car, and that picked the job (written to the Debug log when it isn't simply the job holding the id)
+    if (sale !== holder) {
+      if (!db.debugLog) db.debugLog = [];
+      db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint, note: "two bookings share this id: used the car named in the event to pick the job", body: req.body, jobs: [{ id: sale.id, car: sale.car, date: sale.date }] });
+      db.debugLog = db.debugLog.slice(0, 30);
+    }
+    return { sale };
+  };
+  if (title) {
+    const byTitle = family.filter((s) => titlesMatch(s.car, title));
+    if (byTitle.length === 1) return chose(byTitle[0]);
+    const key = vehicleKey(title), byCar = key ? family.filter((s) => vehicleKey(s.car) === key) : [];
+    if (byCar.length === 1) return chose(byCar[0]);
+  }
+  if (!db.debugLog) db.debugLog = [];
+  db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint, failedReason: "two bookings share this id and the event doesn't say which car: nothing was changed", body: req.body, jobs: family.map((s) => ({ id: s.id, car: s.car, date: s.date })) });
+  db.debugLog = db.debugLog.slice(0, 30);
+  return { ambiguous: true };
+}
+
 // Cancellation — deliberately separate from the main webhook above. This one ONLY updates
 // a job that already exists (matched by ghlOpportunityId); it never creates a new one.
 // If the appointment was cancelled before it ever hit "Confirmed," there's nothing in the
@@ -1109,9 +1175,11 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
 app.post("/api/webhook/ghl/cancel", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  const { ghlOpportunityId } = ghlPayload(req.body);
-  if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
-  const sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  const payload = ghlPayload(req.body);
+  if (!payload.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  const target = resolveGhlTarget(db, payload, "cancel", req);
+  if (target.ambiguous) { saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  const sale = target.sale;
   if (!sale) return res.json({ ok: true, found: false });
   sale.status = "cancelled";
   saveDB(db);
@@ -1124,9 +1192,11 @@ app.post("/api/webhook/ghl/cancel", (req, res) => {
 app.post("/api/webhook/ghl/unconfirm", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  const { ghlOpportunityId } = ghlPayload(req.body);
-  if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
-  const sale = db.sales.find((s) => s.ghlOpportunityId === ghlOpportunityId);
+  const payload = ghlPayload(req.body);
+  if (!payload.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  const target = resolveGhlTarget(db, payload, "unconfirm", req);
+  if (target.ambiguous) { saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  const sale = target.sale;
   if (!sale) return res.json({ ok: true, found: false });
   sale.status = "unconfirmed";
   saveDB(db);
@@ -1140,10 +1210,12 @@ app.post("/api/webhook/ghl/unconfirm", (req, res) => {
 app.post("/api/webhook/ghl/delete", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  const { ghlOpportunityId } = ghlPayload(req.body);
-  if (!ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  const payload = ghlPayload(req.body);
+  if (!payload.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  const target = resolveGhlTarget(db, payload, "delete", req);
+  if (target.ambiguous) { saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const before = db.sales.length;
-  db.sales = db.sales.filter((s) => s.ghlOpportunityId !== ghlOpportunityId);
+  if (target.sale) db.sales = db.sales.filter((s) => s !== target.sale);
   const found = db.sales.length < before;
   saveDB(db);
   res.json({ ok: true, found });
@@ -2220,7 +2292,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   db.cashEntries.forEach((e) => { if (e.autoFromJob && e.saleId) cashBySale[e.saleId] = (cashBySale[e.saleId] || 0) + e.amount; });
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-    cashPaidAmount: cashBySale[s.id] || 0, isReschedule: !!s.isReschedule,
+    cashPaidAmount: cashBySale[s.id] || 0, isReschedule: !!s.isReschedule, closedAtCheck: !!s.closedAtCheck,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
@@ -2343,6 +2415,8 @@ function patchJobHandler(req, res) {
     if (normalized) {
       logAudit(db, req, sale, "Closed At", sale.closedAt, normalized);
       sale.closedAt = normalized;
+      sale.closedAtCheck = false;          // someone has now looked at it and set it
+      sale.closedAtSource = "owner";
     }
   }
   if (req.body.status !== undefined) sale.status = req.body.status;
@@ -2813,7 +2887,7 @@ app.get("/api/owner/commission-audit", requireOwner, (req, res) => {
     return {
       saleId: s.id, car: s.car, customerName: s.customerName, basePrice: parseFloat(s.basePrice) || 0,
       salesRepName: rep ? rep.name : "Removed rep", status: s.status || "pending",
-      closedAtRaw, closedAtEastern: easternLabel, duringHours, rateApplied, commissionAmount, isReschedule: !!s.isReschedule,
+      closedAtRaw, closedAtEastern: easternLabel, duringHours, rateApplied, commissionAmount, isReschedule: !!s.isReschedule, closedAtCheck: !!s.closedAtCheck,
     };
   }).sort((a, b) => (a.closedAtRaw < b.closedAtRaw ? 1 : -1));
   res.json(rows);
