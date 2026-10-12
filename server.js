@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-11-closetime";
+const BUILD = "2026-10-12-managerwork";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -648,6 +648,15 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
 }
 
 // Backward/forward-compatible accessor: some records may still use the old single employeeId shape.
+// Who worked a job, for display: the techs, plus any manager who helped hands-on. A job worked ONLY by a manager reads "Ivan (manager)" instead
+// of "Unassigned" (tips and car commission already included that manager; the screens just never said so).
+function workedByLabel(s) {
+  const techs = s.employeeNames && s.employeeNames !== "Unassigned" ? s.employeeNames : "";
+  const mgrs = s.managerHelperNames || "";
+  if (techs && mgrs) return `${techs} + ${mgrs} (manager)`;
+  if (mgrs) return `${mgrs} (manager)`;
+  return techs || "Unassigned";
+}
 function saleEmployeeIds(sale) {
   if (sale.employeeIds) return sale.employeeIds;
   return sale.employeeId ? [sale.employeeId] : [];
@@ -1666,7 +1675,7 @@ app.get("/api/manager/unpaid-arrived", requireManager, (req, res) => {
   const jobs = db.sales.filter((s) => s.status === "arrived" && !s.paid && !redoFree(s)); // a free redo never needs paying
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, car: s.car, customerName: s.customerName, customerPhone: s.customerPhone,
-    baseService: s.baseService, basePrice: s.basePrice || 0, total: saleTotal(s), employeeNames: s.employeeNames || "Unassigned",
+    baseService: s.baseService, basePrice: s.basePrice || 0, total: saleTotal(s), employeeNames: workedByLabel(s),
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
 
@@ -1685,7 +1694,7 @@ app.get("/api/manager/unmarked-appointments", requireManager, (req, res) => {
   );
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, car: s.car, customerName: s.customerName, customerPhone: s.customerPhone,
-    baseService: s.baseService, basePrice: s.basePrice || 0, employeeNames: s.employeeNames || "Unassigned",
+    baseService: s.baseService, basePrice: s.basePrice || 0, employeeNames: workedByLabel(s),
     status: s.status || "pending",
   })).sort((a, b) => (a.date < b.date ? 1 : -1)));
 });
@@ -1711,7 +1720,7 @@ app.get("/api/manager/needs-cleanup", requireManager, (req, res) => {
   const jobs = db.sales.filter((s) => s.status !== "cancelled" && !redoFree(s) && (!s.basePrice || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking) || !s.baseService));
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-    employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
+    employeeNames: workedByLabel(s), baseService: s.baseService || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     basePrice: s.basePrice || 0, titlePrice: s.titlePrice == null ? null : s.titlePrice, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
@@ -1768,7 +1777,7 @@ app.get("/api/cross-location/cleanup-list", (req, res) => {
     locationLabel: SHOP_LOCATION_LABEL,
     jobs: jobs.map((s) => ({
       id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-      employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService || "",
+      employeeNames: workedByLabel(s), baseService: s.baseService || "",
       salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn, isOnlineBooking: !!s.isOnlineBooking,
       basePrice: s.basePrice || 0, titlePrice: s.titlePrice == null ? null : s.titlePrice, missingPrice: !s.basePrice, missingRep: !s.salesRepId && !s.isWalkIn && !s.isOnlineBooking, missingService: !s.baseService,
     })).sort((a, b) => (a.date < b.date ? 1 : -1)),
@@ -2700,7 +2709,8 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const myUpsells = (s) => (s.upsells || []).filter((u) => u.managerId === managerId);
   const relevant = db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db) && myUpsells(s).length > 0);
   const upsellRev = relevant.reduce((a, s) => a + myUpsells(s).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
-  const cars = relevant.length;
+  const cars = relevant.length;      // cars they UPSOLD
+  const carsWorked = db.sales.filter((s) => inRange(s.date, start, end) && s.status !== "cancelled" && afterRevenueStart(s, db) && (s.managerHelperIds || []).includes(managerId)).length;   // cars they WORKED hands-on
 
   const breakdown = {};
   relevant.forEach((s) => myUpsells(s).forEach((u) => {
@@ -2726,7 +2736,7 @@ app.get("/api/manager/performance", requireManager, (req, res) => {
   const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.personType === "manager" && sp.personId === managerId).amount, splitCount: t.split.length }));
 
   res.json({
-    cars, upsellRevenue: upsellRev,
+    cars, carsWorked, upsellRevenue: upsellRev,
     top: sorted.slice(0, 2), growthArea: sorted.length > 1 ? sorted[sorted.length - 1] : null,
     commissionRate: mgr ? mgr.commissionRate : 0, commission,
     walkInCommissionRate: mgr ? mgr.walkInCommissionRate || 0 : 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue,
@@ -2854,7 +2864,7 @@ app.get("/api/sales/full-schedule", requireSales, (req, res) => {
   const { start, end } = dateRangeFor(req.query);
   const jobs = db.sales.filter((s) => inRange(s.date, start, end)).map((s) => ({
     id: s.id, date: s.date, car: s.car, baseService: s.baseService,
-    employeeNames: s.employeeNames || "Unassigned",
+    employeeNames: workedByLabel(s),
     status: s.status || "pending", completed: !!s.completed, notes: s.notes || [],
     upsells: resolveUpsellNames(s.upsells || [], db),
   }));
@@ -3182,6 +3192,7 @@ function buildPayroll(db, query) {
   });
   const managers = db.managers.map((mgr) => {
     const b = personBreakdown("managerId", mgr.id);
+    const carsWorked = sales.filter((s) => (s.managerHelperIds || []).includes(mgr.id)).length;      // cars the manager worked hands-on, counted like a tech's
     const commission = mgr.commissionRate ? b.revenue * (mgr.commissionRate / 100) : 0;
     const myWalkIns = sales.filter((s) => s.walkInClosedByType === "manager" && s.walkInClosedById === mgr.id);
     const walkInClosedCount = myWalkIns.length;
@@ -3198,7 +3209,7 @@ function buildPayroll(db, query) {
     const tipsTotal = myTips.reduce((a, t) => a + t.split.find((sp) => sp.personType === "manager" && sp.personId === mgr.id).amount, 0);
     const tipDetails = myTips.map((t) => ({ id: t.id, car: t.car, date: t.date, totalAmount: t.amount, yourShare: t.split.find((sp) => sp.personType === "manager" && sp.personId === mgr.id).amount, splitCount: t.split.length }));
     return {
-      id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
+      id: mgr.id, name: mgr.name, commissionRate: mgr.commissionRate || 0, carsWorked, upsellRevenue: b.revenue, upsellCount: b.count, commission, upsells: b.items, individualUpsells: b.individual,
       walkInCommissionRate: mgr.walkInCommissionRate || 0, walkInClosedCount, walkInArrivedPaidCount, walkInCommission, walkInRevenue, walkInDetails,
       payType: mgr.payType || null, salaryPerPeriod: mgr.salaryPerPeriod || 0, hourlyRate: mgr.hourlyRate || 0, carCommissionRate: mgr.carCommissionRate || 0, basePay,
       tipsTotal, tipDetails,
@@ -4156,11 +4167,10 @@ app.get("/api/owner/summary", requireOwner, (req, res) => {
     const myUpsellRevenue = sales.reduce((a, s) => a + (s.upsells || []).filter((u) => u.employeeId === emp.id).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
     return { id: emp.id, name: emp.name, cars: carsWorked.length, upsellRevenue: myUpsellRevenue };
   });
-  // Managers upsell too — same idea, but they're not "assigned" to cars the way techs are,
-  // so there's no cars-worked count for them, just their own upsell revenue.
+  // Managers upsell too, and some work cars hands-on (marked "manager also helped" on the job), which counts as a car worked just like a tech's.
   const perManager = db.managers.map((mgr) => {
     const myUpsellRevenue = sales.reduce((a, s) => a + (s.upsells || []).filter((u) => u.managerId === mgr.id).reduce((x, u) => x + (parseFloat(u.price) || 0), 0), 0);
-    return { id: mgr.id, name: mgr.name, upsellRevenue: myUpsellRevenue };
+    return { id: mgr.id, name: mgr.name, cars: sales.filter((s) => (s.managerHelperIds || []).includes(mgr.id)).length, upsellRevenue: myUpsellRevenue };
   });
   // Sales reps get commission on the BASE sale, only when it showed (manager-marked) —
   // completely separate from upsell commission the techs/managers earn.
