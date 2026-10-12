@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-11-closetime";
+const UI_BUILD = "2026-10-12-managerwork";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1338,7 +1338,7 @@ async function renderOwnerPayroll(content) {
 
     if (d.managers.length > 0) {
       body.appendChild(el("div", { class: "muted", style: "margin:16px 0 8px;font-size:11.5px;letter-spacing:0.04em", text: "MANAGERS — EACH PERSON'S OWN UPSELLS" }));
-      d.managers.forEach((m) => body.appendChild(personCard(m, `${m.upsellCount} upsell${m.upsellCount !== 1 ? "s" : ""} sold`)));
+      d.managers.forEach((m) => body.appendChild(personCard(m, `${m.carsWorked || 0} car${m.carsWorked !== 1 ? "s" : ""} worked · ${m.upsellCount} upsell${m.upsellCount !== 1 ? "s" : ""} sold`)));
     }
   }
 
@@ -1422,7 +1422,7 @@ async function renderOwnerPayroll(content) {
 function openPrintableReport(title, s, periodLabel) {
   const win = window.open("", "_blank");
   const rowsEmp = s.perEmployee.map((e) => `<tr><td>${e.name}</td><td>${e.cars}</td><td>${money(e.upsellRevenue)}</td></tr>`).join("");
-  const rowsMgr = (s.perManager || []).map((m) => `<tr><td>${m.name}</td><td>${money(m.upsellRevenue)}</td></tr>`).join("");
+  const rowsMgr = (s.perManager || []).map((m) => `<tr><td>${m.name}</td><td>${m.cars || 0}</td><td>${money(m.upsellRevenue)}</td></tr>`).join("");
   const rowsLb = s.leaderboard.map((r) => `<tr><td>${r.upsell}</td><td>${r.employee}</td><td>${r.count}</td><td>${money(r.revenue)}</td></tr>`).join("");
   win.document.write(`
     <html><head><title>${title}</title>
@@ -1451,7 +1451,7 @@ function openPrintableReport(title, s, periodLabel) {
       </div>
       <h2>Per-employee breakdown</h2>
       <table><tr><th>Employee</th><th>Cars worked</th><th>Upsell revenue</th></tr>${rowsEmp}</table>
-      ${rowsMgr ? `<h2>Manager upsells</h2><table><tr><th>Manager</th><th>Upsell revenue</th></tr>${rowsMgr}</table>` : ""}
+      ${rowsMgr ? `<h2>Managers</h2><table><tr><th>Manager</th><th>Cars worked</th><th>Upsell revenue</th></tr>${rowsMgr}</table>` : ""}
       <h2>Upsell leaderboard</h2>
       <table><tr><th>Upsell</th><th>Employee</th><th>Times sold</th><th>Revenue</th></tr>${rowsLb}</table>
     </body></html>
@@ -1526,8 +1526,8 @@ function openPrintableReport(title, s, periodLabel) {
 
     if (s.perManager && s.perManager.length > 0) {
       const mgrTable = el("table", {}, [
-        el("tr", {}, [el("th", { text: "Manager" }), el("th", { text: "Their upsell revenue" })]),
-        ...s.perManager.map((m) => el("tr", {}, [el("td", { text: m.name }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(m.upsellRevenue) })])),
+        el("tr", {}, [el("th", { text: "Manager" }), el("th", { text: "Cars worked" }), el("th", { text: "Their upsell revenue" })]),
+        ...s.perManager.map((m) => el("tr", {}, [el("td", { text: m.name }), el("td", { class: "mono", text: m.cars || 0 }), el("td", { class: "mono", style: "color:var(--cyan)", text: money(m.upsellRevenue) })])),
       ]);
       body.appendChild(el("div", { class: "card" }, [
         el("div", { class: "muted", style: "margin-bottom:10px", text: "MANAGER UPSELLS" }),
@@ -3378,6 +3378,7 @@ async function renderManagerPerformance(content) {
     body.appendChild(el("div", { class: "metric-grid" }, [
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Your upsell revenue" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(stats.upsellRevenue) })]),
       el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars you upsold" }), el("div", { class: "metric-value mono", text: stats.cars })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars you worked" }), el("div", { class: "metric-value mono", text: stats.carsWorked || 0 })]),
       stats.commissionRate > 0 ? el("div", { class: "metric" }, [el("div", { class: "metric-label", text: `Est. commission (${stats.commissionRate}%)` }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(stats.commission) })]) : null,
     ]));
     if (stats.top && stats.top.length) {
@@ -3645,7 +3646,7 @@ async function renderManagerJobs(content) {
     else if (job.noPaymentNeeded) out.push(tag("NO CHARGE", "var(--green)"));   // a free redo owes nothing, so it is never "UNPAID" or "NO PRICE"
     else if ((job.status === "arrived" || job.completed) && job.status !== "no_show" && job.status !== "cancelled") out.push(tag("UNPAID", "var(--red)"));
     if (!(job.basePrice > 0) && !job.noPaymentNeeded) out.push(tag("NO PRICE", "var(--red)"));
-    if (job.status === "arrived" && (!job.employeeNames || job.employeeNames === "Unassigned")) out.push(tag("NO TECH", "var(--red)"));
+    if (job.status === "arrived" && (!job.employeeNames || job.employeeNames === "Unassigned") && !job.managerHelperNames) out.push(tag("NO TECH", "var(--red)"));   // a manager who worked it counts as someone on the job
     if ((job.status === "arrived" || job.status === "no_show" || job.paid || job.completed) && d.getTime() > Date.now() + 6 * 3600 * 1000) out.push(tag("⚠ CHECK DATE", "var(--red)"));
     return out;
   };
