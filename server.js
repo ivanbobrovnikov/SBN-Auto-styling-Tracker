@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-12-managerwork";
+const BUILD = "2026-10-12-completecounts";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2428,8 +2428,21 @@ function patchJobHandler(req, res) {
       sale.closedAtSource = "owner";
     }
   }
-  if (req.body.status !== undefined) sale.status = req.body.status;
-  if (req.body.completed !== undefined) sale.completed = !!req.body.completed;
+  if (req.body.status !== undefined) { sale.status = req.body.status; sale.arrivedByComplete = false; }      // someone chose the status themselves
+  if (req.body.completed !== undefined) {
+    // A car can't be serviced without having shown up, so marking Service complete also marks a still-waiting car as Arrived. A sales rep's commission
+    // (and the TV, and every total) all go off "arrived", so this keeps them agreeing. It is remembered, so undoing the Service complete (a mis-tap)
+    // puts the car back as it was; if someone chose Arrived themselves, that stays put.
+    const wasCompleted = !!sale.completed;
+    sale.completed = !!req.body.completed;
+    if (sale.completed && !wasCompleted && (!sale.status || sale.status === "pending" || sale.status === "unconfirmed")) {
+      logAudit(db, req, sale, "Status", sale.status || "pending", "arrived (service complete)");
+      sale.status = "arrived"; sale.arrivedByComplete = true;
+    } else if (!sale.completed && wasCompleted && sale.arrivedByComplete && sale.status === "arrived") {
+      logAudit(db, req, sale, "Status", "arrived", "pending (service complete undone)");
+      sale.status = "pending"; sale.arrivedByComplete = false;
+    }
+  }
   // How much of the payment was actually cash - validated before anything is changed, so a
   // bad value can never leave a half-applied update behind.
   let cashAmountRequested;
