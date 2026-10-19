@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-12-completecounts";
+const UI_BUILD = "2026-10-13-demote";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2886,6 +2886,7 @@ async function renderOwnerSalesReps(content) {
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
   const rateInput = el("input", { type: "number", placeholder: "Commission % (9am-6pm ET, Mon-Sat)", style: "max-width:220px" });
   const afterRateInput = el("input", { type: "number", placeholder: "After-hours %", style: "max-width:130px" });
+  const phoneInput = el("input", { placeholder: "Mobile (for texts)", style: "max-width:150px" });
   const notice = el("div", { class: "notice" });
   const list = el("div");
 
@@ -2896,6 +2897,13 @@ async function renderOwnerSalesReps(content) {
     reps.forEach((r) => {
       const initials = el("input", { value: r.initials || "", placeholder: "Initials", style: "max-width:70px" });
       initials.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ initials: initials.value }) }));
+      const phone = el("input", { value: r.phone || "", placeholder: "Mobile", style: "width:128px;flex:none", "data-field": "phone" });
+      const phoneNote = el("span", { class: "muted", style: "font-size:11px" });
+      phone.addEventListener("change", async () => {
+        try { const res = await api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ phone: phone.value }) }); phone.value = res.phone || ""; phoneNote.textContent = phone.value ? "saved ✓" : "removed"; phoneNote.style.color = "var(--green)"; }
+        catch (e) { phoneNote.textContent = e.message; phoneNote.style.color = "var(--red)"; }
+        setTimeout(() => { phoneNote.textContent = ""; }, 3500);
+      });
       const rate = el("input", { type: "number", value: r.commissionRate || 0, style: "max-width:70px" });
       const afterRate = el("input", { type: "number", value: r.afterHoursCommissionRate || 0, style: "max-width:70px" });
       rate.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
@@ -2905,6 +2913,7 @@ async function renderOwnerSalesReps(content) {
       list.appendChild(el("div", { class: "card row" }, [
         el("div", { style: "flex:1;font-weight:500", text: r.name }),
         el("span", { class: "muted", style: "font-size:11.5px", text: "Initials:" }), initials,
+        el("span", { class: "muted", style: "font-size:11.5px", text: "Mobile:" }), phone, phoneNote,
         el("span", { class: "muted", style: "font-size:11.5px", text: "In hours:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         el("span", { class: "muted", style: "font-size:11.5px;margin-left:8px", text: "After hours:" }), afterRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
         newPinInput,
@@ -2922,11 +2931,11 @@ async function renderOwnerSalesReps(content) {
 
   content.appendChild(el("div", { class: "card" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD SALES REP — this is the person who closed the deal, not the tech who worked it. Initials should match exactly what they type at the start of the appointment title (e.g. \"DG\" for Dmitriy Gumenyuk) — that's what the tracker uses to identify who booked a job. Their commission is on the base sale, only counted once a manager marks the appointment as arrived. The rate that applies depends on when the deal actually closed — during business hours (Mon–Sat, 9am–6pm Eastern) or after." }),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, initialsInput, pinInput, rateInput, afterRateInput,
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, initialsInput, pinInput, rateInput, afterRateInput, phoneInput,
       el("button", { class: "primary", onclick: async () => {
         try {
-          await api("/api/salesreps", { method: "POST", body: JSON.stringify({ name: nameInput.value, initials: initialsInput.value, pin: pinInput.value, commissionRate: rateInput.value, afterHoursCommissionRate: afterRateInput.value }) });
-          nameInput.value = ""; initialsInput.value = ""; pinInput.value = ""; rateInput.value = ""; afterRateInput.value = "";
+          await api("/api/salesreps", { method: "POST", body: JSON.stringify({ name: nameInput.value, initials: initialsInput.value, pin: pinInput.value, commissionRate: rateInput.value, afterHoursCommissionRate: afterRateInput.value, phone: phoneInput.value }) });
+          nameInput.value = ""; initialsInput.value = ""; pinInput.value = ""; rateInput.value = ""; afterRateInput.value = ""; phoneInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
         } catch (e) { notice.className = "notice err"; notice.textContent = e.message; }
@@ -2936,6 +2945,51 @@ async function renderOwnerSalesReps(content) {
   ]));
   content.appendChild(list);
   await loadList();
+  await renderTextsCard(content);
+}
+
+// The owner's setup for texts to sales reps: the GHL address, a fallback number, the on/off switch, a test button, and the log of what was sent.
+async function renderTextsCard(content) {
+  const card = el("div", { class: "card", style: "margin-top:16px", "data-part": "texts" });
+  content.appendChild(card);
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  async function draw(msg) {
+    const t = await api("/api/owner/texts");
+    card.innerHTML = "";
+    const say = el("div", { style: "font-size:12.5px;min-height:16px;margin:8px 0" });
+    const flash = (text, color) => { say.textContent = text; say.style.color = color || "var(--sub)"; };
+    const url = el("input", { placeholder: t.webhookConfigured ? `Saved (${t.webhookMasked}). Paste a new address to replace it.` : "Paste the GHL workflow's webhook address (https://…)", style: "flex:1;min-width:240px", "data-field": "webhook" });
+    const fb = el("input", { value: t.fallbackDisplay || "", placeholder: "Fallback mobile", style: "max-width:150px", "data-field": "fallback" });
+    const testTo = el("input", { value: t.fallbackDisplay || "", placeholder: "Send the test to (mobile)", style: "max-width:190px", "data-field": "testto" });
+    const run = async (fn, okText) => { try { await fn(); await draw({ text: okText, color: "var(--green)" }); } catch (e) { flash(e.message || "Something went wrong.", "var(--red)"); } };
+    card.appendChild(el("div", { class: "row", style: "margin-bottom:6px" }, [
+      el("div", { class: "muted", style: "flex:1", text: "TEXTS TO SALES REPS" }),
+      el("span", { class: "appt-tag", style: `border-color:${t.enabled ? "var(--green)" : "var(--sub)"};color:${t.enabled ? "var(--green)" : "var(--sub)"}`, text: t.enabled ? "ON" : "OFF", "data-part": "texts-state" }),
+    ]));
+    card.appendChild(el("div", { class: "muted", style: "font-size:12.5px;line-height:1.55;margin-bottom:10px", text: "When a car is marked No-show or Cancelled for today, the sales rep on the job gets a text with the customer, car, time and number to call. This tracker decides when; GHL sends the text. A no-show text waits 20 seconds, so a mis-tap can be undone. A cancellation waits 3 minutes, in case it was really a reschedule. Only today's appointments, and one text per job." }));
+    card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" }, [url, el("button", { class: "ghost", text: "Save address", onclick: () => run(() => api("/api/owner/texts", { method: "PUT", body: JSON.stringify({ webhookUrl: url.value }) }), "GHL address saved ✓") })]));
+    card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [fb, el("button", { class: "ghost", text: "Save fallback", onclick: () => run(() => api("/api/owner/texts", { method: "PUT", body: JSON.stringify({ fallbackPhone: fb.value }) }), "Fallback number saved ✓") }), el("span", { class: "muted", style: "font-size:11.5px", text: "gets the text when a job has no sales rep, or the rep has no mobile saved" })]));
+    card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px" }, [testTo, el("button", { class: "ghost", "data-part": "send-test", text: "Send a test text", onclick: async (ev) => {
+      const btn = ev.currentTarget; btn.disabled = true; flash("Sending…");
+      try { const r = await api("/api/owner/texts/test", { method: "POST", body: JSON.stringify({ phone: testTo.value }) }); await draw(r.status === "sent" ? { text: "Test sent ✓. Check that the phone got it.", color: "var(--green)" } : { text: `Not sent yet: ${r.reason || r.status}`, color: "var(--amber)" }); }
+      catch (e) { flash(e.message, "var(--red)"); btn.disabled = false; }
+    } }), el("button", { class: t.enabled ? "ghost" : "primary", "data-part": "toggle", text: t.enabled ? "Turn texts OFF" : "Turn texts ON", onclick: () => run(() => api("/api/owner/texts", { method: "PUT", body: JSON.stringify({ enabled: !t.enabled }) }), t.enabled ? "Texts are OFF." : "Texts are ON.") })]));
+    card.appendChild(say);
+    if (msg) flash(msg.text, msg.color);
+    if (t.failed > 0) card.appendChild(el("div", { style: "font-size:12.5px;color:var(--red);margin-bottom:6px", text: `${t.failed} recent text${t.failed !== 1 ? "s" : ""} could not be sent. Check the GHL address and workflow.` }));
+    card.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin:8px 0 4px", text: "RECENT TEXTS" }));
+    if (t.log.length === 0) card.appendChild(el("div", { class: "muted", style: "font-size:12.5px", text: "Nothing yet." }));
+    t.log.slice(0, 12).forEach((x) => {
+      const col = x.status === "sent" ? "var(--green)" : x.status === "failed" ? "var(--red)" : x.status === "pending" ? "var(--amber)" : "var(--sub)";
+      const label = x.status === "sent" ? "Sent ✓" : x.status === "failed" ? "Failed" : x.status === "pending" ? "Waiting" : "Not sent";
+      const what = x.kind === "test" ? "Test" : x.kind === "cancelled" ? "Cancelled" : "No-show";
+      card.appendChild(el("div", { style: "border-top:0.5px solid var(--border);padding:7px 0;font-size:12.5px", "data-part": "log-row" }, [
+        el("div", { class: "row" }, [el("div", { style: "flex:1", text: `${what}${x.customerName ? " · " + x.customerName : ""}${x.toName ? " → " + x.toName : ""}${x.toDisplay ? " " + x.toDisplay : ""}` }), el("span", { style: `color:${col};font-weight:600`, text: label })]),
+        el("div", { class: "muted", style: "font-size:11.5px", text: `${fmt.format(new Date(x.at))}${x.reason ? " · " + x.reason : ""}` }),
+      ]));
+    });
+  }
+  await draw();
 }
 
 // ---------------- Attendance — who showed up, who didn't, who worked a half day ----------------
@@ -3876,12 +3930,38 @@ async function renderManagerJobs(content) {
   }
 
   const tipWidgetWrap = el("div", { style: "margin-bottom:14px;display:none" });
+  // Cars today that are an hour past their start time with no outcome marked: ask, so a no-show is a decision a person made, not a guess.
+  const lateBanner = el("div", { style: "display:none", "data-part": "late-banner" });
+  let textsOn = false, lateShowAll = false;
+  api("/api/manager/texts-enabled").then((r) => { textsOn = !!r.enabled; }).catch(() => {});
+  function drawLateBanner(jobs, day) {
+    lateBanner.innerHTML = "";
+    const timeOf = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? "" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); };
+    const late = day === easternToday() ? (jobs || []).filter((j) => ["pending", "unconfirmed", undefined, null, ""].includes(j.status) && !j.completed && Date.parse(j.date) + 60 * 60 * 1000 < Date.now()).sort((x, y) => (x.date < y.date ? -1 : 1)) : [];
+    if (late.length === 0) { lateBanner.style.display = "none"; return; }
+    lateBanner.style.cssText = "display:block;border:1px solid var(--amber);border-radius:10px;padding:10px 12px;margin:0 0 12px;background:rgba(245,158,11,0.07)";
+    lateBanner.appendChild(el("div", { style: "font-weight:600;color:var(--amber);font-size:13.5px", text: `⚠ ${late.length} car${late.length !== 1 ? "s are" : " is"} past ${late.length !== 1 ? "their" : "its"} time and not marked` }));
+    lateBanner.appendChild(el("div", { class: "muted", style: "font-size:12px;margin:2px 0 8px", text: "Mark each one so it's counted right" + (textsOn ? " and the sales rep can follow up on a no-show." : ".") }));
+    (lateShowAll ? late : late.slice(0, 5)).forEach((j) => {
+      const name = j.customerName || "This customer";
+      lateBanner.appendChild(el("div", { class: "row", style: "border-top:0.5px solid var(--border);padding:7px 0;gap:8px;flex-wrap:wrap" }, [
+        el("div", { style: "flex:1;min-width:180px" }, [el("div", { style: "font-size:13px;font-weight:500", text: `${timeOf(j.date)} · ${name}` }), el("div", { class: "muted", style: "font-size:11.5px", text: `${j.car || ""}${j.salesRepName && j.salesRepName !== "Unassigned" ? " · " + j.salesRepName : ""}` })]),
+        el("button", { class: "tab-btn", style: "border-color:var(--green);color:var(--green);padding:5px 12px;font-size:12px", "data-act": "late-arrived", text: "Arrived", onclick: async () => { await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ status: "arrived" }) }); load(); } }),
+        el("button", { class: "tab-btn", style: "border-color:var(--red);color:var(--red);padding:5px 12px;font-size:12px", "data-act": "late-noshow", text: "No-show", onclick: async () => {
+          if (!confirm(textsOn ? `Mark ${name} as a no-show? ${j.salesRepName && j.salesRepName !== "Unassigned" ? j.salesRepName : "The sales rep"} will get a text.` : `Mark ${name} as a no-show?`)) return;
+          await api(`/api/manager/jobs/${j.id}`, { method: "PATCH", body: JSON.stringify({ status: "no_show" }) }); load();
+        } }),
+      ]));
+    });
+    if (late.length > 5) lateBanner.appendChild(el("button", { class: "ghost", style: "margin-top:6px;font-size:12px", text: lateShowAll ? "Show fewer" : `Show all ${late.length}`, onclick: () => { lateShowAll = !lateShowAll; drawLateBanner(jobs, day); } }));
+  }
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const myLoad = ++latestLoadId;
     const jobs = await api(`/api/manager/jobs?${qs}`);
     if (myLoad !== latestLoadId) return; // a newer refresh is already on its way; don't draw over it
+    drawLateBanner(jobs, p.date);
     tipWidgetWrap.innerHTML = "";
     tipWidgetWrap.appendChild(renderTipWidget(jobs, () => load()));
     clearAll();
@@ -4276,7 +4356,7 @@ async function renderManagerJobs(content) {
     tipWidgetWrap.style.display = showing ? "none" : "block";
     tipToggleBtn.textContent = showing ? "💵 Log a tip" : "− Hide tip form";
   } });
-  const leftEl = el("div", { class: "jp-left" }, [barEl, boardWrap, listEl, noMatch, emptyHint]);
+  const leftEl = el("div", { class: "jp-left" }, [barEl, lateBanner, boardWrap, listEl, noMatch, emptyHint]);
   nav.el.style.marginBottom = "0";
   nav.el.classList.add("jp-daynav");
   const dateIn = nav.el.querySelector('input[type="date"]');
@@ -4298,6 +4378,7 @@ async function renderOwnerManagers(content) {
   const rateInput = el("input", { type: "number", placeholder: "Upsell commission %", style: "max-width:150px" });
   const walkInRateInput = el("input", { type: "number", placeholder: "Walk-in close %", style: "max-width:140px" });
   const notice = el("div", { class: "notice" });
+  const demoteNotice = el("div", { class: "notice", "data-part": "demote-notice" });
   const list = el("div");
 
   async function loadList() {
@@ -4334,6 +4415,19 @@ async function renderOwnerManagers(content) {
       list.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", { style: "flex:1;font-weight:500", text: m.name }),
+          // Owner only (the server enforces it too). Moves the person to the Tech role and carries everything they've logged with them, instead of deleting them.
+          el("button", { class: "ghost", "data-act": "demote", onclick: async () => {
+            if (!confirm(`Demote ${m.name} to a tech?\n\nEverything ${m.name} has logged moves with them: upsells, walk-in closes, tips, attendance, and the cars they worked, so their pay stays exactly as it was. Their rates and pay setup carry over. Same PIN.\n\nThey lose manager access right away, and the same PIN then signs them in as a tech.`)) return;
+            try {
+              const r = await api(`/api/managers/${m.id}/demote-to-employee`, { method: "POST" });
+              const mv = r.moved || {};
+              const parts = [[mv.upsells, "upsell"], [mv.cars, "car worked", "cars worked"], [mv.walkIns, "walk-in close"], [mv.tips, "tip share"], [mv.attendanceDays, "attendance day"]]
+                .filter(([n]) => n > 0).map(([n, one, many]) => `${n} ${n === 1 ? one : (many || one + "s")}`);
+              demoteNotice.className = "notice ok";
+              demoteNotice.textContent = `${r.name} is now a tech. Moved with them: ${parts.length ? parts.join(", ") : "nothing logged yet, so nothing to move"}.`;
+              loadList();
+            } catch (err) { demoteNotice.className = "notice err"; demoteNotice.textContent = err.message || "Couldn't make that change."; }
+          }, text: "Demote to tech" }),
           el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
@@ -4371,6 +4465,7 @@ async function renderOwnerManagers(content) {
     ]),
     notice,
   ]));
+  content.appendChild(demoteNotice);
   content.appendChild(list);
   await loadList();
 }
