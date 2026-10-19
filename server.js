@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-12-completecounts";
+const BUILD = "2026-10-13-demote";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -40,10 +40,20 @@ function loadDB() {
   if (!db.cashEntries) db.cashEntries = [];
   if (!db.calendarServiceMap) db.calendarServiceMap = {};
   if (!db.tips) db.tips = [];
+  if (!db.textSettings) db.textSettings = { enabled: false, webhookUrl: "", fallbackPhone: "" };
+  if (!db.textLog) db.textLog = [];
   return db;
+}
+// Who currently holds each role. A login cookie names a role and a person, and lasts a year, so on its own it would keep working for someone who has
+// since been removed or moved to another role. Every request checks the person is still in that role. Kept in memory and refreshed on every save,
+// so it costs nothing per request, and re-read from the file if a cookie names someone it hasn't seen (e.g. after a backup restore).
+let rolePeople = null;
+function refreshRolePeople(db) {
+  rolePeople = { manager: new Set((db.managers || []).map((x) => x.id)), employee: new Set((db.employees || []).map((x) => x.id)), sales: new Set((db.salesReps || []).map((x) => x.id)) };
 }
 function saveDB(db) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  refreshRolePeople(db);
 }
 function hash(pin) {
   return crypto.createHash("sha256").update(String(pin)).digest("hex");
@@ -723,7 +733,13 @@ function setAuthCookie(res, payload) {
 // Every request gets req.auth populated from the signed cookie — no server-side session
 // store involved, so logins survive server restarts and redeploys.
 app.use((req, res, next) => {
-  req.auth = verifyAuth(req.cookies[AUTH_COOKIE]) || { role: null };
+  const auth = verifyAuth(req.cookies[AUTH_COOKIE]) || { role: null };
+  if (auth.role && auth.role !== "owner") {
+    if (!rolePeople) refreshRolePeople(loadDB());
+    if (!(rolePeople[auth.role] && rolePeople[auth.role].has(auth.id))) refreshRolePeople(loadDB());        // maybe the file changed under us: look once more
+    if (!(rolePeople[auth.role] && rolePeople[auth.role].has(auth.id))) { req.auth = { role: null }; return next(); }   // no longer in that role: treated as logged out
+  }
+  req.auth = auth;
   next();
 });
 
@@ -965,6 +981,53 @@ function promoteEmployeeToManager(db, empId) {
   return moved;
 }
 
+// The reverse of promoting: moves a manager to the tech side WITHOUT losing anything they've logged. Same id, PIN and pay setup; every reference to them
+// is rewritten to the tech side in one pass (saved once: all or nothing), so their pay history comes with them exactly as it does the other way round.
+function demoteManagerToEmployee(db, mgrId) {
+  const mgr = db.managers.find((m) => m.id === mgrId);
+  if (!mgr) return null;
+  const moved = { upsells: 0, cars: 0, walkIns: 0, tips: 0, attendanceDays: 0 };
+  const { promotedFromEmployeeAt, ...rest } = mgr;
+  db.employees.push({ ...rest, demotedFromManagerAt: new Date().toISOString() });
+  db.managers = db.managers.filter((m) => m.id !== mgrId);
+  db.sales.forEach((s) => {
+    (s.upsells || []).forEach((u) => {
+      if (u.managerId === mgrId) { u.managerId = null; u.employeeId = mgrId; moved.upsells++; }
+    });
+    // "Managers who also helped" becomes "Techs who worked this car". Both count toward a car's split (tips, car commission), so everyone else's share is unchanged.
+    if ((s.managerHelperIds || []).includes(mgrId)) {
+      s.managerHelperIds = s.managerHelperIds.filter((id) => id !== mgrId);
+      s.managerHelperNames = s.managerHelperIds.map((id) => (db.managers.find((m) => m.id === id) || {}).name).filter(Boolean).join(", ");
+      s.employeeIds = [...new Set([...saleEmployeeIds(s), mgrId])];
+      s.employeeNames = s.employeeIds.map((id) => (db.employees.find((e) => e.id === id) || {}).name).filter(Boolean).join(", ") || "Unassigned";
+      moved.cars++;
+    }
+    if (s.walkInClosedByType === "manager" && s.walkInClosedById === mgrId) { s.walkInClosedByType = "employee"; moved.walkIns++; }
+  });
+  db.tips.forEach((t) => (t.split || []).forEach((sp) => {
+    if (sp.personType === "manager" && sp.personId === mgrId) { sp.personType = "employee"; moved.tips++; }
+  }));
+  db.attendance.forEach((a) => {
+    if (a.personType === "manager" && a.personId === mgrId) { a.personType = "employee"; moved.attendanceDays++; }
+  });
+  db.cashEntries.forEach((c) => { if (c.enteredByType === "manager" && c.enteredById === mgrId) c.enteredByType = "employee"; });
+  return moved;
+}
+
+// Owner only. They lose manager access at once (the next thing they do signs them out), and the same PIN then signs them in as a tech.
+// Refused if another person already uses that PIN: login takes the first match, so two people sharing a PIN could never both sign in as themselves.
+app.post("/api/managers/:id/demote-to-employee", requireOwner, (req, res) => {
+  const db = loadDB();
+  const mgr = db.managers.find((m) => m.id === req.params.id);
+  if (!mgr) return res.status(404).json({ error: "Manager not found." });
+  const clash = [...db.employees.map((e) => ({ n: e.name, h: e.pinHash })), ...db.salesReps.map((r) => ({ n: r.name, h: r.pinHash })), ...db.managers.filter((m) => m.id !== mgr.id).map((m) => ({ n: m.name, h: m.pinHash }))].find((x) => x.h === mgr.pinHash);
+  if (clash) return res.status(400).json({ error: `${clash.n} already uses ${mgr.name}'s PIN. Change one of the two PINs first, then try again.` });
+  const name = mgr.name;
+  const moved = demoteManagerToEmployee(db, req.params.id);
+  saveDB(db);
+  res.json({ ok: true, name, moved });
+});
+
 // Owner only. If they're logged in as an employee at that moment, the app just sends them back
 // to the login screen, and the same PIN then signs them in as a manager.
 app.post("/api/employees/:id/promote-to-manager", requireOwner, (req, res) => {
@@ -1025,16 +1088,170 @@ app.delete("/api/managers/:id", requireOwner, (req, res) => {
 // ---------- sales reps (owner only to manage) — the person who CLOSED the deal, distinct from
 // the techs who worked it and the managers who mark it arrived/no-show. Their commission
 // depends on that arrived mark, so they get no ability to touch job status themselves. ----------
+// =====================================================================================================================================
+// TEXTS TO SALES REPS (phase 1: missed appointments)
+// The tracker decides WHEN and WHO; GHL does the actual texting. For each text the tracker sends a small JSON message to a GHL "inbound webhook"
+// workflow (set in Settings), and that workflow sends the text. Everything is kept in a durable queue (it survives a restart), failed sends are
+// retried, and every text, sent or not, is written to a log the owner can read. Nothing is sent until the owner adds the address AND switches it on.
+// =====================================================================================================================================
+const TEXT_DELAY_NOSHOW_MS = Number(process.env.TEXT_DELAY_NOSHOW_MS ?? 20000);      // a mis-tapped No-show can be undone before anyone is texted
+const TEXT_DELAY_CANCEL_MS = Number(process.env.TEXT_DELAY_CANCEL_MS ?? 180000);     // a GHL "cancel" might really be a reschedule: wait and re-check
+const TEXT_POLL_MS = Number(process.env.TEXT_POLL_MS ?? 15000);
+const TEXT_RETRY_SECONDS = String(process.env.TEXT_RETRY_SECONDS || "60,300,900").split(",").map((n) => Number(n)).filter((n) => n > 0);
+const TEXT_LOG_MAX = 300;
+
+function normalizePhone(input) {                      // US numbers only: returns +1XXXXXXXXXX, or null if it isn't one
+  const d = String(input || "").replace(/\D/g, "");
+  if (d.length === 10) return "+1" + d;
+  if (d.length === 11 && d[0] === "1") return "+" + d;
+  return null;
+}
+function fmtPhone(e164) {
+  const d = String(e164 || "").replace(/\D/g, "").slice(-10);
+  return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(e164 || "");
+}
+const fmtEasternTime = (iso) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+// "DG 2026 Toyota Corolla AllAroundTInt 485-50depo" -> "2026 Toyota Corolla AllAroundTInt" (the rep's initials and the price/deposit don't belong in a text)
+function cleanCarForText(car) {
+  let t = String(car || "").replace(/\s+/g, " ").trim();
+  t = t.replace(/^[A-Za-z]{2,3}\s+(?=\d{4}\b)/, "");
+  t = t.replace(/\s*[-–]?\s*\$?\d{2,5}\s*\$?\s*[-–]\s*\$?\d{1,5}\s*\$?\s*(depo|deposit)\w*/ig, "");
+  t = t.replace(/\s*\b\d{2,5}\$/g, "").replace(/\s*\$\d[\d,]*(\.\d+)?/g, "");
+  t = t.replace(/\s{2,}/g, " ").trim();
+  return t.length > 60 ? t.slice(0, 57).trim() + "..." : t;
+}
+function textWebhookUrl(db) { return (db.textSettings && db.textSettings.webhookUrl) || process.env.REP_TEXT_WEBHOOK_URL || ""; }
+function maskUrl(u) { try { const x = new URL(u); return `${x.origin}/…${u.slice(-6)}`; } catch (e) { return ""; } }
+function validWebhookUrl(u) {
+  try { const x = new URL(u); return x.protocol === "https:" || (x.protocol === "http:" && ["localhost", "127.0.0.1"].includes(x.hostname)); } catch (e) { return false; }
+}
+
+function logText(db, entry) {
+  if (!db.textLog) db.textLog = [];
+  const e = { id: newId(), at: new Date().toISOString(), attempts: 0, ...entry };
+  db.textLog.unshift(e);
+  if (db.textLog.length > TEXT_LOG_MAX) db.textLog = db.textLog.filter((x, i) => i < TEXT_LOG_MAX || x.status === "pending");
+  return e;
+}
+function scheduleTextRun(ms) { const t = setTimeout(() => { processTextQueue().catch(() => {}); }, ms + 100); if (t.unref) t.unref(); }
+
+function composeMissedText(sale, kind, prefix) {
+  const label = `SBN ${SHOP_LOCATION_LABEL}`, who = sale.customerName || "A customer", car = cleanCarForText(sale.car), time = fmtEasternTime(sale.date);
+  const num = normalizePhone(sale.customerPhone), call = num ? fmtPhone(num) : "";
+  if (kind === "cancelled") return `${label}: ${prefix}CANCELLED - ${who}, ${car}, was ${time} today.${call ? ` Call to rebook: ${call}.` : " No phone on file."}`;
+  return `${label}: ${prefix}MISSED - ${who}, ${car}, was due ${time} today.${call ? ` Call ${call}.` : " No phone on file."}`;
+}
+
+// Called when a job turns No-show or Cancelled. Only today's appointments, only once per job, only when the owner has switched texts on.
+function maybeQueueMissedText(db, sale, newStatus) {
+  const ts = db.textSettings || {};
+  if (!ts.enabled || sale.missedTextAt || redoFree(sale)) return;
+  if (!sale.date || EASTERN_DAY_FMT.format(new Date(sale.date)) !== EASTERN_DAY_FMT.format(new Date())) return;
+  const kind = newStatus === "cancelled" ? "cancelled" : "no_show";
+  const rep = sale.salesRepId ? db.salesReps.find((r) => r.id === sale.salesRepId) : null;
+  const base = { kind, saleId: sale.id, customerName: sale.customerName || "", car: cleanCarForText(sale.car) };
+  sale.missedTextAt = new Date().toISOString();
+  if (!textWebhookUrl(db)) { logText(db, { ...base, toName: rep ? rep.name : "", status: "skipped", reason: "No GHL address is set yet." }); return; }
+  let toPhone = rep && rep.phone ? rep.phone : "", toName = rep ? rep.name : "", prefix = "";
+  if (!toPhone && ts.fallbackPhone) { toPhone = ts.fallbackPhone; toName = "Fallback number"; prefix = rep ? `(${rep.name} has no phone saved) ` : "(no sales rep on this job) "; }
+  if (!toPhone) { logText(db, { ...base, toName: rep ? rep.name : "(no rep)", status: "skipped", reason: rep ? `${rep.name} has no phone number saved, and there is no fallback number.` : "No sales rep on this job, and there is no fallback number." }); return; }
+  const delay = kind === "cancelled" ? TEXT_DELAY_CANCEL_MS : TEXT_DELAY_NOSHOW_MS;
+  logText(db, { ...base, toName, toPhone, message: composeMissedText(sale, kind, prefix), status: "pending", nextAt: Date.now() + delay });
+  scheduleTextRun(delay);
+}
+
+let textsProcessing = false;
+async function processTextQueue() {
+  if (textsProcessing) return;
+  textsProcessing = true;
+  try {
+    for (let guard = 0; guard < 50; guard++) {
+      let db = loadDB();
+      const due = (db.textLog || []).filter((x) => x.status === "pending" && x.nextAt <= Date.now()).pop();     // oldest first (the log is newest-first)
+      if (!due) break;
+      const url = textWebhookUrl(db), sale = due.saleId ? db.sales.find((s) => s.id === due.saleId) : null;
+      const finish = (patch) => { const d2 = loadDB(), e = (d2.textLog || []).find((x) => x.id === due.id); if (e) { Object.assign(e, patch); saveDB(d2); } };
+      // Re-check just before sending: has the job gone back to how it was (an undone mis-tap, or a reschedule)?
+      if ((due.kind === "no_show" || due.kind === "cancelled") && sale && sale.status !== due.kind) {
+        const d2 = loadDB(), s2 = d2.sales.find((x) => x.id === due.saleId); if (s2) s2.missedTextAt = null; saveDB(d2);
+        finish({ status: "skipped", reason: due.kind === "no_show" ? "It was changed back before the text went out." : "No longer cancelled (probably rescheduled), so no text was sent." });
+        continue;
+      }
+      if (!url) { finish({ status: "skipped", reason: "No GHL address is set." }); continue; }
+      const payload = { source: "sbn-tracker", location: SHOP_LOCATION_LABEL, kind: due.kind === "no_show" ? "missed_appointment" : due.kind === "cancelled" ? "cancelled_appointment" : due.kind,
+        toName: due.toName, toPhone: due.toPhone, message: due.message, customerName: due.customerName, customerPhone: sale ? (normalizePhone(sale.customerPhone) || "") : "", car: due.car,
+        appointmentTime: sale ? sale.date : "", appointmentTimeEastern: sale && sale.date ? fmtEasternTime(sale.date) : "", saleId: due.saleId || "" };
+      try {
+        const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(8000) });
+        if (!r.ok) throw new Error(`GHL answered ${r.status}`);
+        finish({ status: "sent", sentAt: new Date().toISOString(), attempts: (due.attempts || 0) + 1, reason: "" });
+      } catch (e) {
+        const attempts = (due.attempts || 0) + 1, wait = TEXT_RETRY_SECONDS[attempts - 1];
+        const why = String((e && e.cause && e.cause.code) || (e && e.message) || e).slice(0, 120);
+        if (wait) finish({ attempts, nextAt: Date.now() + wait * 1000, reason: `Retrying: ${why}` });
+        else finish({ status: "failed", attempts, reason: `Gave up after ${attempts} tries: ${why}` });
+        if (wait) scheduleTextRun(wait * 1000);
+      }
+    }
+  } finally { textsProcessing = false; }
+}
+const textTimer = setInterval(() => { processTextQueue().catch(() => {}); }, TEXT_POLL_MS);
+if (textTimer.unref) textTimer.unref();
+
+function textsView(db) {
+  const ts = db.textSettings || {}, url = textWebhookUrl(db), log = db.textLog || [];
+  const lastSent = log.find((x) => x.status === "sent");
+  return { enabled: !!ts.enabled, webhookConfigured: !!url, webhookMasked: url ? maskUrl(url) : "", webhookFromEnv: !!(!ts.webhookUrl && process.env.REP_TEXT_WEBHOOK_URL),
+    fallbackPhone: ts.fallbackPhone || "", fallbackDisplay: ts.fallbackPhone ? fmtPhone(ts.fallbackPhone) : "", lastSentAt: lastSent ? lastSent.sentAt : null,
+    pending: log.filter((x) => x.status === "pending").length, failed: log.slice(0, 50).filter((x) => x.status === "failed").length,
+    log: log.slice(0, 25).map((x) => ({ id: x.id, at: x.at, kind: x.kind, toName: x.toName || "", toDisplay: x.toPhone ? fmtPhone(x.toPhone) : "", customerName: x.customerName || "", car: x.car || "", message: x.message || "", status: x.status, attempts: x.attempts || 0, reason: x.reason || "", sentAt: x.sentAt || null })) };
+}
+app.get("/api/owner/texts", requireOwner, (req, res) => res.json(textsView(loadDB())));
+app.put("/api/owner/texts", requireOwner, (req, res) => {
+  const db = loadDB(), ts = db.textSettings, b = req.body || {};
+  if (b.webhookUrl !== undefined) {
+    const u = String(b.webhookUrl).trim();
+    if (u && !validWebhookUrl(u)) return res.status(400).json({ error: "That isn't a valid address. It should start with https:// (copy it from the GHL workflow's webhook trigger)." });
+    ts.webhookUrl = u;
+  }
+  if (b.fallbackPhone !== undefined) {
+    const raw = String(b.fallbackPhone).trim();
+    if (raw && !normalizePhone(raw)) return res.status(400).json({ error: "That doesn't look like a US phone number. Use 10 digits." });
+    ts.fallbackPhone = raw ? normalizePhone(raw) : "";
+  }
+  if (b.enabled !== undefined) {
+    if (b.enabled && !textWebhookUrl(db)) return res.status(400).json({ error: "Add the GHL address first, then switch texts on." });
+    ts.enabled = !!b.enabled;
+  }
+  saveDB(db);
+  res.json(textsView(db));
+});
+app.post("/api/owner/texts/test", requireOwner, async (req, res) => {
+  const db = loadDB();
+  if (!textWebhookUrl(db)) return res.status(400).json({ error: "Add the GHL address first." });
+  const to = normalizePhone(req.body && req.body.phone);
+  if (!to) return res.status(400).json({ error: "Enter a 10-digit US phone number to send the test to." });
+  const e = logText(db, { kind: "test", toName: "Test", toPhone: to, message: `SBN ${SHOP_LOCATION_LABEL}: TEST - this is what a missed-appointment text will look like. Sent ${fmtEasternTime(new Date().toISOString())}.`, customerName: "", status: "pending", nextAt: Date.now() });
+  saveDB(db);
+  await processTextQueue();
+  const done = (loadDB().textLog || []).find((x) => x.id === e.id) || e;
+  res.json({ status: done.status, reason: done.reason || "" });
+});
+// the Job status screen asks this before it offers a No-show button, so it can say a sales rep will be texted
+app.get("/api/manager/texts-enabled", requireManager, (req, res) => { const db = loadDB(); res.json({ enabled: !!(db.textSettings && db.textSettings.enabled && textWebhookUrl(db)) }); });
+
 app.get("/api/salesreps", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name, initials: r.initials || "", commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0 })));
+  res.json(db.salesReps.map((r) => ({ id: r.id, name: r.name, initials: r.initials || "", commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0, phone: r.phone ? fmtPhone(r.phone) : "" })));
 });
 
 app.post("/api/salesreps", requireOwner, (req, res) => {
   const db = loadDB();
-  const { name, pin, commissionRate, afterHoursCommissionRate, initials } = req.body;
+  const { name, pin, commissionRate, afterHoursCommissionRate, initials, phone } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
+  if (phone && !normalizePhone(phone)) return res.status(400).json({ error: "That doesn't look like a US phone number. Use 10 digits." });
   const rep = { id: newId(), name: name.trim(), initials: (initials || "").trim().toUpperCase(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, afterHoursCommissionRate: parseFloat(afterHoursCommissionRate) || 0 };
+  if (phone) rep.phone = normalizePhone(phone);
   db.salesReps.push(rep);
   saveDB(db);
   res.json({ id: rep.id, name: rep.name, initials: rep.initials, commissionRate: rep.commissionRate, afterHoursCommissionRate: rep.afterHoursCommissionRate });
@@ -1047,9 +1264,14 @@ app.patch("/api/salesreps/:id", requireOwner, (req, res) => {
   if (req.body.commissionRate !== undefined) rep.commissionRate = parseFloat(req.body.commissionRate) || 0;
   if (req.body.afterHoursCommissionRate !== undefined) rep.afterHoursCommissionRate = parseFloat(req.body.afterHoursCommissionRate) || 0;
   if (req.body.initials !== undefined) rep.initials = req.body.initials.trim().toUpperCase();
+  if (req.body.phone !== undefined) {
+    const raw = String(req.body.phone).trim();
+    if (raw && !normalizePhone(raw)) return res.status(400).json({ error: "That doesn't look like a US phone number. Use 10 digits." });
+    if (raw) rep.phone = normalizePhone(raw); else delete rep.phone;
+  }
   if (req.body.pin) rep.pinHash = hash(req.body.pin);
   saveDB(db);
-  res.json({ ok: true });
+  res.json({ ok: true, phone: rep.phone ? fmtPhone(rep.phone) : "" });
 });
 
 app.delete("/api/salesreps/:id", requireOwner, (req, res) => {
@@ -1190,7 +1412,9 @@ app.post("/api/webhook/ghl/cancel", (req, res) => {
   if (target.ambiguous) { saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const sale = target.sale;
   if (!sale) return res.json({ ok: true, found: false });
+  const wasCancelled = sale.status === "cancelled";
   sale.status = "cancelled";
+  if (!wasCancelled) maybeQueueMissedText(db, sale, "cancelled");
   saveDB(db);
   res.json({ ok: true, found: true, saleId: sale.id });
 });
@@ -2428,7 +2652,9 @@ function patchJobHandler(req, res) {
       sale.closedAtSource = "owner";
     }
   }
+  const statusBefore = sale.status || "pending";
   if (req.body.status !== undefined) { sale.status = req.body.status; sale.arrivedByComplete = false; }      // someone chose the status themselves
+  if (req.body.status !== undefined && (sale.status === "no_show" || sale.status === "cancelled") && statusBefore !== sale.status) maybeQueueMissedText(db, sale, sale.status);
   if (req.body.completed !== undefined) {
     // A car can't be serviced without having shown up, so marking Service complete also marks a still-waiting car as Arrived. A sales rep's commission
     // (and the TV, and every total) all go off "arrived", so this keeps them agreeing. It is remembered, so undoing the Service complete (a mis-tap)
