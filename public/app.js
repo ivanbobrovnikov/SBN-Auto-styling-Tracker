@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-13-demote";
+const UI_BUILD = "2026-10-14-followups";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2966,7 +2966,8 @@ async function renderTextsCard(content) {
       el("div", { class: "muted", style: "flex:1", text: "TEXTS TO SALES REPS" }),
       el("span", { class: "appt-tag", style: `border-color:${t.enabled ? "var(--green)" : "var(--sub)"};color:${t.enabled ? "var(--green)" : "var(--sub)"}`, text: t.enabled ? "ON" : "OFF", "data-part": "texts-state" }),
     ]));
-    card.appendChild(el("div", { class: "muted", style: "font-size:12.5px;line-height:1.55;margin-bottom:10px", text: "When a car is marked No-show or Cancelled for today, the sales rep on the job gets a text with the customer, car, time and number to call. This tracker decides when; GHL sends the text. A no-show text waits 20 seconds, so a mis-tap can be undone. A cancellation waits 3 minutes, in case it was really a reschedule. Only today's appointments, and one text per job." }));
+    card.appendChild(el("div", { class: "muted", style: "font-size:12.5px;line-height:1.55;margin-bottom:10px", text: "When a car is marked No-show or Cancelled for today, the sales rep on the job gets a text with the customer, car, time and number to call. This tracker decides when; GHL sends the text. A no-show text waits 20 seconds, so a mis-tap can be undone. A cancellation waits 3 minutes, in case it was really a reschedule. Only today's appointments, and one text per job. Follow-ups: when a rep adds a follow-up tag in GHL (like fu-fk-2h), they get a text with the contact's name and number when it's due." }));
+    if (t.followUpsWaiting > 0) card.appendChild(el("div", { style: "font-size:12.5px;color:var(--amber);margin-bottom:6px", "data-part": "fu-waiting", text: `${t.followUpsWaiting} follow-up${t.followUpsWaiting !== 1 ? "s" : ""} waiting to be texted.` }));
     card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" }, [url, el("button", { class: "ghost", text: "Save address", onclick: () => run(() => api("/api/owner/texts", { method: "PUT", body: JSON.stringify({ webhookUrl: url.value }) }), "GHL address saved ✓") })]));
     card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [fb, el("button", { class: "ghost", text: "Save fallback", onclick: () => run(() => api("/api/owner/texts", { method: "PUT", body: JSON.stringify({ fallbackPhone: fb.value }) }), "Fallback number saved ✓") }), el("span", { class: "muted", style: "font-size:11.5px", text: "gets the text when a job has no sales rep, or the rep has no mobile saved" })]));
     card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px" }, [testTo, el("button", { class: "ghost", "data-part": "send-test", text: "Send a test text", onclick: async (ev) => {
@@ -2981,11 +2982,11 @@ async function renderTextsCard(content) {
     if (t.log.length === 0) card.appendChild(el("div", { class: "muted", style: "font-size:12.5px", text: "Nothing yet." }));
     t.log.slice(0, 12).forEach((x) => {
       const col = x.status === "sent" ? "var(--green)" : x.status === "failed" ? "var(--red)" : x.status === "pending" ? "var(--amber)" : "var(--sub)";
-      const label = x.status === "sent" ? "Sent ✓" : x.status === "failed" ? "Failed" : x.status === "pending" ? "Waiting" : "Not sent";
-      const what = x.kind === "test" ? "Test" : x.kind === "cancelled" ? "Cancelled" : "No-show";
+      const label = x.status === "sent" ? "Sent ✓" : x.status === "failed" ? "Failed" : x.status === "pending" ? "Waiting" : x.status === "cancelled" ? "Cancelled" : "Not sent";
+      const what = x.kind === "test" ? "Test" : x.kind === "follow_up" ? "Follow-up" : x.kind === "cancelled" ? "Cancelled" : "No-show";
       card.appendChild(el("div", { style: "border-top:0.5px solid var(--border);padding:7px 0;font-size:12.5px", "data-part": "log-row" }, [
         el("div", { class: "row" }, [el("div", { style: "flex:1", text: `${what}${x.customerName ? " · " + x.customerName : ""}${x.toName ? " → " + x.toName : ""}${x.toDisplay ? " " + x.toDisplay : ""}` }), el("span", { style: `color:${col};font-weight:600`, text: label })]),
-        el("div", { class: "muted", style: "font-size:11.5px", text: `${fmt.format(new Date(x.at))}${x.reason ? " · " + x.reason : ""}` }),
+        el("div", { class: "muted", style: "font-size:11.5px", text: `${x.status === "pending" && x.kind === "follow_up" && x.dueAt ? "Due " + fmt.format(new Date(x.dueAt)) + " · set " : ""}${fmt.format(new Date(x.at))}${x.reason ? " · " + x.reason : ""}` }),
       ]));
     });
   }
