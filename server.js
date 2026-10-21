@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-13-demote";
+const BUILD = "2026-10-14-followups";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1099,6 +1099,8 @@ const TEXT_DELAY_CANCEL_MS = Number(process.env.TEXT_DELAY_CANCEL_MS ?? 180000);
 const TEXT_POLL_MS = Number(process.env.TEXT_POLL_MS ?? 15000);
 const TEXT_RETRY_SECONDS = String(process.env.TEXT_RETRY_SECONDS || "60,300,900").split(",").map((n) => Number(n)).filter((n) => n > 0);
 const TEXT_LOG_MAX = 300;
+const FOLLOWUP_TIME_SCALE = Number(process.env.FOLLOWUP_TIME_SCALE ?? 1);          // tests only: makes "1 hour" take seconds
+
 
 function normalizePhone(input) {                      // US numbers only: returns +1XXXXXXXXXX, or null if it isn't one
   const d = String(input || "").replace(/\D/g, "");
@@ -1133,7 +1135,7 @@ function logText(db, entry) {
   if (db.textLog.length > TEXT_LOG_MAX) db.textLog = db.textLog.filter((x, i) => i < TEXT_LOG_MAX || x.status === "pending");
   return e;
 }
-function scheduleTextRun(ms) { const t = setTimeout(() => { processTextQueue().catch(() => {}); }, ms + 100); if (t.unref) t.unref(); }
+function scheduleTextRun(ms) { const t = setTimeout(() => { processTextQueue().catch(() => {}); }, Math.min(ms + 100, 2147000000)); if (t.unref) t.unref(); }
 
 function composeMissedText(sale, kind, prefix) {
   const label = `SBN ${SHOP_LOCATION_LABEL}`, who = sale.customerName || "A customer", car = cleanCarForText(sale.car), time = fmtEasternTime(sale.date);
@@ -1171,6 +1173,7 @@ async function processTextQueue() {
       if (!due) break;
       const url = textWebhookUrl(db), sale = due.saleId ? db.sales.find((s) => s.id === due.saleId) : null;
       const finish = (patch) => { const d2 = loadDB(), e = (d2.textLog || []).find((x) => x.id === due.id); if (e) { Object.assign(e, patch); saveDB(d2); } };
+      if (due.kind !== "test" && !(db.textSettings && db.textSettings.enabled)) { finish({ status: "skipped", reason: "Texts were switched OFF before it was sent." }); continue; }
       // Re-check just before sending: has the job gone back to how it was (an undone mis-tap, or a reschedule)?
       if ((due.kind === "no_show" || due.kind === "cancelled") && sale && sale.status !== due.kind) {
         const d2 = loadDB(), s2 = d2.sales.find((x) => x.id === due.saleId); if (s2) s2.missedTextAt = null; saveDB(d2);
@@ -1179,8 +1182,8 @@ async function processTextQueue() {
       }
       if (!url) { finish({ status: "skipped", reason: "No GHL address is set." }); continue; }
       const payload = { source: "sbn-tracker", location: SHOP_LOCATION_LABEL, kind: due.kind === "no_show" ? "missed_appointment" : due.kind === "cancelled" ? "cancelled_appointment" : due.kind,
-        toName: due.toName, toPhone: due.toPhone, message: due.message, customerName: due.customerName, customerPhone: sale ? (normalizePhone(sale.customerPhone) || "") : "", car: due.car,
-        appointmentTime: sale ? sale.date : "", appointmentTimeEastern: sale && sale.date ? fmtEasternTime(sale.date) : "", saleId: due.saleId || "" };
+        toName: due.toName, toPhone: due.toPhone, message: due.message, customerName: due.customerName || due.contactName || "", customerPhone: sale ? (normalizePhone(sale.customerPhone) || "") : (due.contactPhone || ""), car: due.car || "",
+        appointmentTime: sale ? sale.date : "", appointmentTimeEastern: sale && sale.date ? fmtEasternTime(sale.date) : "", saleId: due.saleId || "", ...(due.kind === "follow_up" ? { contactId: due.contactId || "", note: due.note || "", dueAt: due.dueAt || "" } : {}) };
       try {
         const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(8000) });
         if (!r.ok) throw new Error(`GHL answered ${r.status}`);
@@ -1203,8 +1206,8 @@ function textsView(db) {
   const lastSent = log.find((x) => x.status === "sent");
   return { enabled: !!ts.enabled, webhookConfigured: !!url, webhookMasked: url ? maskUrl(url) : "", webhookFromEnv: !!(!ts.webhookUrl && process.env.REP_TEXT_WEBHOOK_URL),
     fallbackPhone: ts.fallbackPhone || "", fallbackDisplay: ts.fallbackPhone ? fmtPhone(ts.fallbackPhone) : "", lastSentAt: lastSent ? lastSent.sentAt : null,
-    pending: log.filter((x) => x.status === "pending").length, failed: log.slice(0, 50).filter((x) => x.status === "failed").length,
-    log: log.slice(0, 25).map((x) => ({ id: x.id, at: x.at, kind: x.kind, toName: x.toName || "", toDisplay: x.toPhone ? fmtPhone(x.toPhone) : "", customerName: x.customerName || "", car: x.car || "", message: x.message || "", status: x.status, attempts: x.attempts || 0, reason: x.reason || "", sentAt: x.sentAt || null })) };
+    pending: log.filter((x) => x.status === "pending").length, followUpsWaiting: log.filter((x) => x.status === "pending" && x.kind === "follow_up").length, failed: log.slice(0, 50).filter((x) => x.status === "failed").length,
+    log: log.slice(0, 25).map((x) => ({ id: x.id, at: x.at, kind: x.kind, toName: x.toName || "", toDisplay: x.toPhone ? fmtPhone(x.toPhone) : "", customerName: x.customerName || x.contactName || "", car: x.car || "", message: x.message || "", dueAt: x.dueAt || null, status: x.status, attempts: x.attempts || 0, reason: x.reason || "", sentAt: x.sentAt || null })) };
 }
 app.get("/api/owner/texts", requireOwner, (req, res) => res.json(textsView(loadDB())));
 app.put("/api/owner/texts", requireOwner, (req, res) => {
@@ -1237,6 +1240,84 @@ app.post("/api/owner/texts/test", requireOwner, async (req, res) => {
   const done = (loadDB().textLog || []).find((x) => x.id === e.id) || e;
   res.json({ status: done.status, reason: done.reason || "" });
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// FOLLOW-UPS. A rep puts a contact into follow-up in GHL (by adding a tag such as "fu-2h", or "fu-fk-2h" to name the rep), a small GHL workflow tells
+// the tracker, and when the time comes the rep gets a text with the contact's name and number. GHL doesn't say WHO added a tag, and a contact's owner
+// in GHL is often not the rep, so the rep is read from the initials in the tag first, then from the rep named in the message, then the fallback number.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+const FU_TAG = /^(?:fu|follow[-_ ]?up)[-_ ]+(?:([a-z]{2,4})[-_ ]+)?(\d+(?:\.\d+)?\s*(?:m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)|tomorrow|tmrw)$/i;
+function followUpWhen(raw, now) {            // "2h", "90m", "3d", "tomorrow" -> a due time (tomorrow = 10:00 AM Eastern)
+  const t = String(raw || "").trim().toLowerCase();
+  if (t === "tomorrow" || t === "tmrw") {
+    const iso = normalizeDate(`${EASTERN_DAY_FMT.format(new Date(now + 24 * 3600 * 1000))} 10:00:00`);
+    return iso ? { dueMs: Date.parse(iso), label: "tomorrow 10 AM" } : { error: "Couldn't work out tomorrow." };
+  }
+  const m = t.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)$/);
+  if (!m) return { error: `I couldn't read "${raw}" as a time. Use something like 1h, 2h, 90m, 3d or tomorrow.` };
+  const mins = Number(m[1]) * (/^m/.test(m[2]) ? 1 : /^h/.test(m[2]) ? 60 : 1440);
+  if (!(mins >= 1 && mins <= 14 * 1440)) return { error: "A follow-up has to be between 1 minute and 14 days away." };
+  return { dueMs: now + mins * 60000 * FOLLOWUP_TIME_SCALE, label: t };
+}
+function readFollowUp(p) {                   // finds the follow-up tag (or an explicit time) in whatever the GHL workflow sent
+  const cands = []; const tags = Array.isArray(p.tags) ? p.tags : String(p.tags || p.tag || "").split(",");
+  tags.map((x) => String(x).trim()).filter(Boolean).forEach((x) => cands.push(x));
+  const when = p.minutes !== undefined && p.minutes !== "" ? `${p.minutes}m` : String(p.when || p.delay || "").trim();
+  const hits = cands.map((c) => c.match(FU_TAG)).filter(Boolean).map((m) => ({ initials: m[1] || "", when: m[2] }));
+  if (hits.length) return hits[hits.length - 1];                // tags are removed once used, so normally exactly one; if several, the last listed
+  if (when) { const m = when.match(FU_TAG); return m ? { initials: m[1] || "", when: m[2] } : { initials: "", when }; }
+  return null;
+}
+function findRepForFollowUp(db, initials, nameHint) {
+  const reps = db.salesReps;
+  if (initials) { const r = reps.find((x) => (x.initials || "").toLowerCase() === initials.toLowerCase()); if (r) return r; }
+  const n = String(nameHint || "").trim().toLowerCase();
+  if (n) {
+    const exact = reps.find((x) => x.name.toLowerCase() === n || (x.initials || "").toLowerCase() === n); if (exact) return exact;
+    const first = reps.filter((x) => x.name.toLowerCase().split(/\s+/)[0] === n.split(/\s+/)[0]); if (first.length === 1) return first[0];
+  }
+  return null;
+}
+app.post("/api/webhook/ghl/followup", (req, res) => {
+  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), p = ghlPayload(req.body), ts = db.textSettings || {};
+  const name = String(p.contactName || p.name || p.fullName || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  const phone = normalizePhone(p.contactPhone || p.phone);
+  const contactKey = String(p.contactId || phone || name.toLowerCase());
+  if (!name && !phone) return res.status(400).json({ error: "Send the contact's name or phone number." });
+  const fu = readFollowUp(p);
+  if (!fu) return res.status(400).json({ error: "No follow-up time found. Send a tag like fu-2h (or fu-fk-2h), or a time like 2h." });
+  const due = followUpWhen(fu.when, Date.now());
+  if (due.error) return res.status(400).json({ error: due.error });
+  const note = String(p.note || "").replace(/\s+/g, " ").trim().slice(0, 140);
+  const rep = findRepForFollowUp(db, fu.initials, p.salesRepName || p.repName || p.assignedTo || p.userName);
+  const base = { kind: "follow_up", contactKey, contactId: String(p.contactId || ""), contactName: name || fmtPhone(phone), contactPhone: phone || "", note, dueAt: new Date(due.dueMs).toISOString() };
+  if (!ts.enabled) { logText(db, { ...base, toName: rep ? rep.name : "", status: "skipped", reason: "Texts are switched OFF." }); saveDB(db); return res.json({ ok: true, queued: false, reason: "Texts are switched OFF." }); }
+  if (!textWebhookUrl(db)) { logText(db, { ...base, toName: rep ? rep.name : "", status: "skipped", reason: "No GHL address is set yet." }); saveDB(db); return res.json({ ok: true, queued: false, reason: "No GHL address is set yet." }); }
+  let toPhone = rep && rep.phone ? rep.phone : "", toName = rep ? rep.name : "", prefix = "";
+  if (!toPhone && ts.fallbackPhone) { toPhone = ts.fallbackPhone; toName = "Fallback number"; prefix = rep ? `(${rep.name} has no phone saved) ` : "(no sales rep matched) "; }
+  if (!toPhone) { logText(db, { ...base, toName: rep ? rep.name : "(no rep matched)", status: "skipped", reason: rep ? `${rep.name} has no phone number saved, and there is no fallback number.` : "Couldn't tell which sales rep this is for (put their initials in the tag, like fu-fk-2h), and there is no fallback number." }); saveDB(db); return res.json({ ok: true, queued: false, reason: "No one to text." }); }
+  // one waiting follow-up per contact per rep: a newer one replaces the older (the rep changed their mind, or GHL sent it twice)
+  (db.textLog || []).forEach((x) => { if (x.kind === "follow_up" && x.status === "pending" && x.contactKey === contactKey && x.toPhone === toPhone) { x.status = "cancelled"; x.reason = "Replaced by a newer follow-up."; } });
+  const message = `SBN ${SHOP_LOCATION_LABEL}: ${prefix}FOLLOW-UP - ${base.contactName}${phone ? `, ${fmtPhone(phone)}` : ""}.${phone ? "" : " No phone on file."}${note ? ` Note: ${note}` : ""}`;
+  const e = logText(db, { ...base, toName, toPhone, message, status: "pending", nextAt: due.dueMs });
+  saveDB(db);
+  scheduleTextRun(Math.max(0, due.dueMs - Date.now()));
+  res.json({ ok: true, queued: true, id: e.id, dueAt: base.dueAt, toName, when: due.label });
+});
+// A rep takes a contact OUT of follow-up (e.g. adds a "fu-cancel" tag): any follow-up still waiting for that contact is cancelled.
+app.post("/api/webhook/ghl/followup-cancel", (req, res) => {
+  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), p = ghlPayload(req.body);
+  const phone = normalizePhone(p.contactPhone || p.phone), name = String(p.contactName || p.name || "").replace(/\s+/g, " ").trim();
+  const contactKey = String(p.contactId || phone || name.toLowerCase());
+  if (!contactKey) return res.status(400).json({ error: "Send the contact's id, phone or name." });
+  let n = 0;
+  (db.textLog || []).forEach((x) => { if (x.kind === "follow_up" && x.status === "pending" && (x.contactKey === contactKey || (phone && x.contactPhone === phone))) { x.status = "cancelled"; x.reason = "Cancelled in GHL."; n++; } });
+  saveDB(db);
+  res.json({ ok: true, cancelled: n });
+});
+
 // the Job status screen asks this before it offers a No-show button, so it can say a sales rep will be texted
 app.get("/api/manager/texts-enabled", requireManager, (req, res) => { const db = loadDB(); res.json({ enabled: !!(db.textSettings && db.textSettings.enabled && textWebhookUrl(db)) }); });
 
