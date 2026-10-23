@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-14-followups";
+const BUILD = "2026-10-24-tips";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -40,6 +40,7 @@ function loadDB() {
   if (!db.cashEntries) db.cashEntries = [];
   if (!db.calendarServiceMap) db.calendarServiceMap = {};
   if (!db.tips) db.tips = [];
+  if (!db.removedTips) db.removedTips = [];
   if (!db.textSettings) db.textSettings = { enabled: false, webhookUrl: "", fallbackPhone: "" };
   if (!db.textLog) db.textLog = [];
   return db;
@@ -2115,6 +2116,33 @@ app.post("/api/cross-location/cleanup-fix", (req, res) => {
 // These let the owner correct or add jobs from the combined rep tracker. The edit runs through this
 // shop's own job editor (patchJobHandler), so every rule - Eastern-aware times, validation, Edit
 // History - is identical to editing on this shop's own screen. Edit History just says who did it.
+// Each person's pay at THIS location for one pay period, for the combined rep tracker to add up across locations. Read-only, and gated on the shared secret like the
+// other cross-location routes. Uses the same function as the Payroll screen (teamPayrollLines), so the numbers are the ones you'd see there. For a period whose payroll
+// has already been run, it reports what the run recorded (that's what was paid, with its adjustments); otherwise the live figures plus any adjustments still waiting.
+app.get("/api/cross-location/people-pay", (req, res) => {
+  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), today = trackerToday(), all = paySchedule.periods();
+  const containingIndex = all.findIndex((p) => p.start <= today && today <= p.end);
+  const period = req.query.periodId ? all.find((p) => p.id === String(req.query.periodId)) : all[containingIndex];
+  if (!period) return res.status(400).json({ error: "That pay period isn't known here." });
+  const run = payRuns(db).find((r) => r.periodId === period.id) || null;
+  const waiting = payAdjustments(db).filter((a) => !a.appliedRunId);
+  const people = [];
+  teamPayrollLines(db, period).forEach((l) => {
+    const runLine = run && !run.skipped ? (run.lines || []).find((x) => x.key === l.key) || null : null;
+    const src = runLine || l;                                   // a closed run's own numbers if there is one
+    const adjustments = runLine ? runLine.adjustmentsTotal : run ? 0 : payRound(waiting.filter((a) => payKey(a.personType, a.personId) === l.key).reduce((t, a) => t + a.amount, 0));
+    if (!(src.subtotal !== 0 || adjustments !== 0 || l.payType || runLine)) return;       // nobody on this person's row: leave them off, as a payroll run does
+    people.push({ name: l.name, role: l.personType === "manager" ? "manager" : "tech", payType: l.payType || null,
+      base: src.base, upsellCommission: src.upsellCommission, walkInCommission: src.walkInCommission, tips: src.tips, subtotal: src.subtotal,
+      adjustments, total: payRound(src.subtotal + adjustments), daysPresent: src.daysPresent || 0,
+      changedSinceRun: !!(runLine && payRound(l.subtotal) !== runLine.subtotal) });
+  });
+  res.json({ location: SHOP_LOCATION_LABEL, state: run ? (run.skipped ? "skipped" : "run") : "open", runClosedAt: run && !run.skipped ? run.closedAt : null,
+    period: { id: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind, workDays: period.workDays, submit: period.submit || null, paid: period.paid || null },
+    people, ...(req.query.list ? { containingIndex, periods: all.map((p) => ({ id: p.id, start: p.start, end: p.end, name: p.name, kind: p.kind, paid: p.paid || null })) } : {}) });
+});
+
 app.get("/api/cross-location/salesreps", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
@@ -2308,6 +2336,21 @@ app.post("/api/manager/cleanup-fix-by-calendar", requireManager, (req, res) => {
 });
 
 // Tips - pick a job, amount auto-splits evenly among whoever's assigned to it.
+const money$ = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+const TIP_SELF_UNDO_MS = Number(process.env.TIP_SELF_UNDO_MS ?? 10 * 60 * 1000);       // a person can take back their OWN tip for 10 minutes
+// The payroll run (if any) that has already counted a tip. A tip belongs to the pay period of the job's date. Once that payroll has been run (or skipped and carried
+// forward), taking the tip away would silently change a check that's already gone out, so that has to be a payroll adjustment instead.
+function tipRunBlock(db, tip) {
+  const ymd = tip.date ? EASTERN_DAY_FMT.format(new Date(tip.date)) : null;
+  const period = ymd ? paySchedule.periodContaining(ymd) : null;
+  const run = period ? payRuns(db).find((r) => r.periodId === period.id) : null;
+  return run ? { period, run } : null;
+}
+const tipView = (db, t, canSeeSplit) => {
+  const block = tipRunBlock(db, t);
+  return { id: t.id, amount: t.amount, timestamp: t.timestamp, loggedByName: t.loggedByName || "", split: canSeeSplit ? t.split.map((p) => ({ name: p.name, amount: p.amount, personType: p.personType })) : [],
+    removable: !block, blockedReason: block ? `Payroll for ${payShortDate(block.period.start)} to ${payShortDate(block.period.end)} has already been run. To correct this tip, add an adjustment on the Payroll screen.` : "" };
+};
 app.post("/api/manager/tips", requireAnyStaff, (req, res) => {
   const db = loadDB();
   const { saleId, amount } = req.body;
@@ -2321,19 +2364,38 @@ app.post("/api/manager/tips", requireAnyStaff, (req, res) => {
     ...saleEmployeeIds(sale).map((id) => ({ personType: "employee", personId: id })),
     ...(sale.managerHelperIds || []).map((id) => ({ personType: "manager", personId: id })),
   ];
-  if (workers.length === 0) return res.status(400).json({ error: "This job has no one assigned to it yet." });
+  if (workers.length === 0) return res.status(400).json({ error: "No one is assigned to this car yet. Add who worked on it first, then add the tip." });
   const each = Math.round((amt / workers.length) * 100) / 100;
   const split = workers.map((w) => {
     const person = w.personType === "employee" ? db.employees.find((e) => e.id === w.personId) : db.managers.find((m) => m.id === w.personId);
     return { personType: w.personType, personId: w.personId, name: person ? person.name : "Removed person", amount: each };
   });
   const actor = actorInfo(req, db);
-  const tip = { id: newId(), saleId, car: sale.car, date: sale.date, amount: amt, split, loggedByName: actor.name, timestamp: new Date().toISOString() };
+  const tip = { id: newId(), saleId, car: sale.car, date: sale.date, amount: amt, split, loggedByName: actor.name, loggedById: req.auth.id || null, loggedByRole: req.auth.role || null, timestamp: new Date().toISOString() };
   db.tips.push(tip);
+  logAudit(db, req, sale, "Tip", "", `added ${money$(amt)}: ${split.map((p) => `${p.name} ${money$(p.amount)}`).join(", ")}`);
   saveDB(db);
   res.json({ ok: true, tip });
 });
-
+// Take a tip back (put on the wrong car, wrong amount). Owner and managers: any tip, until its pay period's payroll has been run. A tech: only a tip they logged themselves,
+// within 10 minutes. The tip is archived (not lost) and the removal is written to the history.
+app.delete("/api/manager/tips/:id", requireAnyStaff, (req, res) => {
+  const db = loadDB(), tip = db.tips.find((t) => t.id === req.params.id);
+  if (!tip) return res.status(404).json({ error: "That tip was already removed, or doesn't exist." });
+  const role = req.auth.role, isBoss = role === "owner" || role === "manager";
+  if (!isBoss) {
+    const mine = tip.loggedById && tip.loggedById === req.auth.id && tip.loggedByRole === role;
+    if (!mine || Date.now() - Date.parse(tip.timestamp) > TIP_SELF_UNDO_MS) return res.status(403).json({ error: "You can take back a tip you logged yourself for 10 minutes. After that, ask a manager to remove it." });
+  }
+  const block = tipRunBlock(db, tip);
+  if (block) return res.status(409).json({ error: `Payroll for ${payShortDate(block.period.start)} to ${payShortDate(block.period.end)} has already been run, so this tip can't be removed here. To correct it, add an adjustment on the Payroll screen.` });
+  const actor = actorInfo(req, db);
+  db.tips = db.tips.filter((t) => t.id !== tip.id);
+  db.removedTips.push({ ...tip, removedAt: new Date().toISOString(), removedByName: actor.name });
+  logAudit(db, req, db.sales.find((s) => s.id === tip.saleId) || { id: tip.saleId, car: tip.car }, "Tip", `${money$(tip.amount)}: ${tip.split.map((p) => `${p.name} ${money$(p.amount)}`).join(", ")}`, "removed");
+  saveDB(db);
+  res.json({ ok: true });
+});
 app.get("/api/manager/tips", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
@@ -2602,6 +2664,8 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
   const jobs = db.sales.filter((s) => inRange(s.date, start, end));
+  const tipsBySale = {};
+  db.tips.forEach((t) => { (tipsBySale[t.saleId] = tipsBySale[t.saleId] || []).push(t); });
   const cashBySale = {};
   db.cashEntries.forEach((e) => { if (e.autoFromJob && e.saleId) cashBySale[e.saleId] = (cashBySale[e.saleId] || 0) + e.amount; });
   res.json(jobs.map((s) => ({
@@ -2614,7 +2678,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     isRedo: !!s.isRedo, redoAuto: !!s.redoAuto, noPaymentNeeded: redoFree(s), titlePrice: s.titlePrice == null ? null : s.titlePrice, depositAmount: depositOf(s), balanceDue: depositOf(s) > 0 ? balanceDueOf(s) : null, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceSource: s.priceSource || null, priceLocked: !!s.priceLocked,
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
-    photos: s.photos || { before: {}, after: {} }, notes: s.notes || [],
+    photos: s.photos || { before: {}, after: {} }, notes: s.notes || [], tips: (tipsBySale[s.id] || []).map((t) => tipView(db, t, true)),
   })));
 });
 
@@ -2964,6 +3028,8 @@ app.get("/api/my/jobs", requireEmployee, (req, res) => {
       // commission credit still only goes to whoever actually logged it.
       upsells: resolveUpsellNames(s.upsells || [], db),
       photos: s.photos || { before: {}, after: {} }, notes: s.notes || [],
+      // A tech sees ONLY a tip they logged themselves a moment ago (so they can take back a mis-tap). Other people's tips, and who got what, stay private.
+      myTips: db.tips.filter((t) => t.saleId === s.id && t.loggedById === myId && t.loggedByRole === req.auth.role && Date.now() - Date.parse(t.timestamp) <= TIP_SELF_UNDO_MS).map((t) => ({ id: t.id, amount: t.amount, timestamp: t.timestamp })),
       // basePrice and total sale $ intentionally NOT sent to employees
     }));
   res.json(jobs);
