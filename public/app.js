@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-14-followups";
+const UI_BUILD = "2026-10-24-tips";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -656,14 +656,11 @@ async function renderEmployeeTabContent(content) {
 async function renderSchedule(content) {
   const { cols, wrap, clearAll } = makeServiceColumns();
   const emptyMsg = el("div", { class: "muted", style: "display:none", text: "Nothing booked on this day." });
-  const tipWidgetWrap = el("div", { style: "margin-bottom:14px" });
   const nav = renderDayNav((params) => load(params));
   async function load(params) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const jobs = await api(`/api/my/jobs?${qs}`);
-    tipWidgetWrap.innerHTML = "";
-    tipWidgetWrap.appendChild(renderTipWidget(jobs, () => load()));
     clearAll();
     emptyMsg.style.display = jobs.length === 0 ? "" : "none";
     if (jobs.length === 0) return;
@@ -689,10 +686,10 @@ async function renderSchedule(content) {
         el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px" }, [upsellList, upsellForm]),
         photoGrid,
         notesSection,
+        renderTechTipRow(job, () => load()),
       ]));
     });
   }
-  content.appendChild(tipWidgetWrap);
   content.appendChild(nav.el);
   content.appendChild(wrap);
   content.appendChild(emptyMsg);
@@ -727,40 +724,80 @@ function showImageModal(url, title) {
   document.body.appendChild(overlay);
 }
 
-// Shared tip widget - pick a car from today's jobs, amount auto-splits evenly among
-// whoever's assigned to it (the server figures out who, this just sends saleId + amount).
-function renderTipWidget(jobs, onDone) {
-  const select = el("select", {}, [
-    el("option", { value: "", text: "Pick a car..." }),
-    ...jobs.map((j) => el("option", { value: j.id, text: `${j.car}${j.customerName ? " — " + j.customerName : ""}` })),
-  ]);
-  const whoLabel = el("div", { class: "muted", style: "font-size:11.5px;margin:6px 0" });
-  const amountInput = el("input", { type: "number", placeholder: "Tip amount", style: "max-width:140px" });
-  const notice = el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px" });
-  select.addEventListener("change", () => {
-    const job = jobs.find((j) => j.id === select.value);
-    whoLabel.textContent = job ? `Splits among: ${[job.employeeNames, job.managerHelperNames].filter(Boolean).join(", ") || "Unassigned"}` : "";
-  });
-  const saveBtn = el("button", { class: "primary", onclick: async () => {
-    if (!select.value) { notice.textContent = "Pick a car first."; notice.style.color = "var(--red)"; return; }
-    if (!amountInput.value || parseFloat(amountInput.value) <= 0) { notice.textContent = "Enter a real amount."; notice.style.color = "var(--red)"; return; }
+// A tip for ONE car. The car is already known (you're on its card), so there is no list of cars to hunt through: just the amount. The server splits it evenly
+// among whoever worked the car, and this says who that is before you save.
+function renderTipForm(job, onDone, onCancel) {
+  const names = [job.employeeNames && job.employeeNames !== "Unassigned" ? job.employeeNames : "", job.managerHelperNames ? `${job.managerHelperNames} (manager)` : ""].filter(Boolean).join(", ");
+  const amountInput = el("input", { type: "number", inputmode: "decimal", min: "0.01", step: "0.01", placeholder: "Tip amount", "aria-label": "Tip amount", style: "width:130px;flex:none", "data-field": "tip-amount" });
+  const notice = el("div", { style: "font-size:12px;min-height:16px;margin-top:6px" });
+  const say = (text, color) => { notice.textContent = text; notice.style.color = color || "var(--sub)"; };
+  say(names ? `Split evenly between: ${names}` : "No one is assigned to this car yet. Add who worked on it first, then add the tip.", names ? "var(--sub)" : "var(--amber)");
+  const saveBtn = el("button", { class: "primary", "data-act": "tip-save", text: "Save tip", ...(names ? {} : { disabled: "true" }), onclick: async (ev) => {
+    ev.stopPropagation();
+    if (!amountInput.value || parseFloat(amountInput.value) <= 0) { say("Enter the tip amount.", "var(--red)"); return; }
+    saveBtn.disabled = true;
     try {
-      const r = await api("/api/manager/tips", { method: "POST", body: JSON.stringify({ saleId: select.value, amount: amountInput.value }) });
-      notice.textContent = `Saved — split ${r.tip.split.length} way${r.tip.split.length !== 1 ? "s" : ""} ✓`;
-      notice.style.color = "var(--green)";
-      select.value = ""; amountInput.value = ""; whoLabel.textContent = "";
-      onDone();
-    } catch (e) {
-      notice.textContent = e.message || "Something went wrong.";
-      notice.style.color = "var(--red)";
-    }
-  }, text: "Save tip" });
-  return el("div", { class: "card" }, [
-    el("div", { style: "font-weight:500;margin-bottom:8px", text: "Log a tip" }),
-    select, whoLabel,
-    el("div", { style: "display:flex;gap:8px;align-items:center;margin-top:6px" }, [amountInput, saveBtn]),
+      await api("/api/manager/tips", { method: "POST", body: JSON.stringify({ saleId: job.id, amount: amountInput.value }) });
+      say("Saved ✓", "var(--green)");
+      setTimeout(onDone, 350);
+    } catch (e) { say(e.message || "Couldn't save that tip.", "var(--red)"); saveBtn.disabled = false; }
+  } });
+  const box = el("div", { "data-part": "tip-form", onclick: (ev) => ev.stopPropagation() }, [
+    el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [amountInput, saveBtn, el("button", { class: "ghost", text: "Cancel", onclick: (ev) => { ev.stopPropagation(); if (onCancel) onCancel(); } })]),
     notice,
   ]);
+  return box;
+}
+
+// The tips already logged on one car, with a way to take one back (for managers and the owner). A tip whose payroll has already been run is locked, with the reason.
+function renderTipsSection(job, onDone) {
+  const tips = job.tips || [], total = tips.reduce((t, x) => t + (Number(x.amount) || 0), 0);
+  const wrap = el("div", { "data-part": "tips", style: "margin-top:10px;border-top:0.5px solid var(--border);padding-top:10px" });
+  wrap.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: tips.length ? `TIPS ON THIS CAR (${money(total)})` : "TIPS ON THIS CAR" }));
+  const msg = el("div", { style: "font-size:12px;min-height:14px;margin-bottom:4px;color:var(--red)" });
+  tips.forEach((t) => {
+    const who = (t.split || []).map((p) => `${p.name} ${money(p.amount)}`).join(", ");
+    wrap.appendChild(el("div", { class: "row", "data-part": "tip-row", style: "align-items:flex-start;gap:8px;margin-bottom:8px" }, [
+      el("div", { style: "flex:1;min-width:0" }, [
+        el("div", { style: "font-size:13px", text: `${money(t.amount)}${who ? " · " + who : ""}` }),
+        el("div", { class: "muted", style: "font-size:11px", text: `Logged by ${t.loggedByName || "someone"} · ${formatDateTime(t.timestamp)}` }),
+        t.removable ? null : el("div", { style: "font-size:11.5px;color:var(--amber);margin-top:2px", text: t.blockedReason }),
+      ]),
+      t.removable ? el("button", { class: "icon-danger", "data-act": "tip-remove", style: "font-size:12px;padding:4px 10px", text: "Remove", onclick: async (ev) => {
+        ev.stopPropagation();
+        if (!confirm(`Remove this ${money(t.amount)} tip?${who ? `\n\n${who} will lose their share.` : ""}`)) return;
+        try { await api(`/api/manager/tips/${t.id}`, { method: "DELETE" }); onDone(); } catch (e) { msg.textContent = e.message || "Couldn't remove that tip."; }
+      } }) : null,
+    ]));
+  });
+  wrap.appendChild(msg);
+  const formBox = el("div", { style: "display:none;margin-top:6px" });
+  wrap.appendChild(el("button", { class: "ghost", "data-act": "panel-add-tip", text: "Add tip", onclick: () => {
+    const open = formBox.style.display === "none";
+    formBox.style.display = open ? "block" : "none";
+    if (open) { formBox.innerHTML = ""; formBox.appendChild(renderTipForm(job, onDone, () => { formBox.style.display = "none"; })); const inp = formBox.querySelector("input"); if (inp) inp.focus(); }
+  } }));
+  wrap.appendChild(formBox);
+  return wrap;
+}
+
+// The same idea on a technician's own schedule card: Add tip on the car, and for a few minutes a way to undo one they just logged by mistake.
+function renderTechTipRow(job, onDone) {
+  const wrap = el("div", { "data-part": "tech-tip", style: "border-top:0.5px solid var(--border);margin-top:8px;padding-top:8px" });
+  const msg = el("div", { style: "font-size:12px;min-height:14px;margin-top:4px;color:var(--red)" });
+  const formBox = el("div", { style: "display:none;margin-top:8px" });
+  const row = el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" });
+  row.appendChild(el("button", { class: "ghost", "data-act": "add-tip", text: "Add tip", onclick: () => {
+    const open = formBox.style.display === "none";
+    formBox.style.display = open ? "block" : "none";
+    if (open) { formBox.innerHTML = ""; formBox.appendChild(renderTipForm(job, onDone, () => { formBox.style.display = "none"; })); const inp = formBox.querySelector("input"); if (inp) inp.focus(); }
+  } }));
+  (job.myTips || []).forEach((t) => row.appendChild(el("button", { class: "icon-danger", "data-act": "tip-undo", style: "font-size:12px;padding:6px 12px", text: `Undo your ${money(t.amount)} tip`, onclick: async () => {
+    if (!confirm(`Take back your ${money(t.amount)} tip on this car?`)) return;
+    try { await api(`/api/manager/tips/${t.id}`, { method: "DELETE" }); onDone(); } catch (e) { msg.textContent = e.message || "Couldn't take that back."; }
+  } })));
+  wrap.appendChild(row); wrap.appendChild(formBox); wrap.appendChild(msg);
+  return wrap;
 }
 
 // Clears a container and holds its height stable while the caller repopulates it right
@@ -3696,6 +3733,7 @@ async function renderManagerJobs(content) {
     else if (withStatus) out.push(tag(job.status === "arrived" ? "HERE" : "UPCOMING", job.status === "arrived" ? "var(--green)" : "var(--sub)"));
     if (job.completed) out.push(tag("DONE", "var(--green)"));
     if (job.isRedo) out.push(tag("REDO", "var(--cyan)"));
+    if ((job.tips || []).length) out.push(tag("TIPS " + money(job.tips.reduce((t, x) => t + (Number(x.amount) || 0), 0)), "var(--cyan)"));
     if (job.closedAtCheck) out.push(tag("⚠ CHECK CLOSE TIME", "var(--amber)"));   // a second car re-created without a real close time: set the true one in Commission Audit
     if (job.paid) out.push(tag("PAID", "var(--green)"));
     else if (job.noPaymentNeeded) out.push(tag("NO CHARGE", "var(--green)"));   // a free redo owes nothing, so it is never "UNPAID" or "NO PRICE"
@@ -3746,6 +3784,13 @@ async function renderManagerJobs(content) {
       : (col === "here" && needsPay)
       ? el("button", { class: "tab-btn", style: "padding:5px 10px;font-size:12px;border-color:var(--red);color:var(--red)", text: "Paid", onclick: (ev) => { ev.stopPropagation(); select(job.id); focusPayment(job.id); } })
       : null;
+    const tipBox = el("div", { "data-part": "card-tip", style: "display:none;margin-top:8px;border-top:0.5px solid var(--border);padding-top:8px", onclick: (ev) => ev.stopPropagation() });
+    const tipBtn = col === "out" ? null : el("button", { class: "tab-btn", "data-act": "add-tip", style: "padding:5px 10px;font-size:12px", text: "Add tip", onclick: (ev) => {
+      ev.stopPropagation();
+      const open = tipBox.style.display === "none";
+      tipBox.style.display = open ? "block" : "none";
+      if (open) { tipBox.innerHTML = ""; tipBox.appendChild(renderTipForm(job, () => load(), () => { tipBox.style.display = "none"; })); const inp = tipBox.querySelector("input"); if (inp) inp.focus(); }
+    } });
     const card = el("div", { class: "jb-card", "data-job-id": job.id, style: cardStyle || "" }, [
       el("div", { style: "display:flex;justify-content:space-between;gap:8px;align-items:baseline" }, [
         el("span", { style: "display:flex;gap:2px 6px;align-items:baseline;flex-wrap:wrap;min-width:0" }, [el("span", { class: "mono", style: "font-weight:600;white-space:nowrap", text: time }), el("span", { class: "jb-first" })]),
@@ -3756,7 +3801,8 @@ async function renderManagerJobs(content) {
       ]),
       el("div", { class: "jb-title", style: "font-weight:500;margin:2px 0", text: job.car || "(no title)" }),
       el("div", { class: "muted", style: "font-size:12px", text: [job.customerName, job.employeeNames && job.employeeNames !== "Unassigned" ? job.employeeNames : null, serviceShort].filter(Boolean).join(" · ") }),
-      el("div", { style: "display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:6px" }, [...jobTags(job, kind === "row"), quick ? el("span", { style: "margin-left:auto" }, [quick]) : null]),
+      el("div", { style: "display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:6px" }, [...jobTags(job, kind === "row"), (tipBtn || quick) ? el("span", { style: "margin-left:auto;display:flex;gap:6px" }, [tipBtn, quick]) : null]),
+      tipBox,
     ]);
     card.addEventListener("click", () => select(job.id));
     return card;
@@ -3810,6 +3856,7 @@ async function renderManagerJobs(content) {
       sec("job", part("actions")),
       sec("notes", part("notes")),
       sec("job", part("people")),
+      sec("job", part("tips")),
       sec("notes", part("photos")),
       sec("edit", [editToggle, editGroup]),
     ]);
@@ -3930,7 +3977,6 @@ async function renderManagerJobs(content) {
     }
   }
 
-  const tipWidgetWrap = el("div", { style: "margin-bottom:14px;display:none" });
   // Cars today that are an hour past their start time with no outcome marked: ask, so a no-show is a decision a person made, not a guess.
   const lateBanner = el("div", { style: "display:none", "data-part": "late-banner" });
   let textsOn = false, lateShowAll = false;
@@ -3963,8 +4009,6 @@ async function renderManagerJobs(content) {
     const jobs = await api(`/api/manager/jobs?${qs}`);
     if (myLoad !== latestLoadId) return; // a newer refresh is already on its way; don't draw over it
     drawLateBanner(jobs, p.date);
-    tipWidgetWrap.innerHTML = "";
-    tipWidgetWrap.appendChild(renderTipWidget(jobs, () => load()));
     clearAll();
     entries.length = 0;
     if (p.date !== lastDay) { lastDay = p.date; didAutoScroll = false; selectedId = null; panelOpen = false; }
@@ -4345,6 +4389,7 @@ async function renderManagerJobs(content) {
           upsellList,
           upsellForm,
         ]),
+        tagPart("tips", renderTipsSection(job, () => load())),
         tagPart("photos", renderPhotoGrid(job, () => load())),
         tagPart("notes", renderNotesSection(job, () => load())),
       ]);
@@ -4352,21 +4397,14 @@ async function renderManagerJobs(content) {
     });
     finishRender();
   }
-  const tipToggleBtn = el("button", { class: "ghost", style: "margin-bottom:10px", text: "💵 Log a tip", onclick: () => {
-    const showing = tipWidgetWrap.style.display !== "none";
-    tipWidgetWrap.style.display = showing ? "none" : "block";
-    tipToggleBtn.textContent = showing ? "💵 Log a tip" : "− Hide tip form";
-  } });
   const leftEl = el("div", { class: "jp-left" }, [barEl, lateBanner, boardWrap, listEl, noMatch, emptyHint]);
   nav.el.style.marginBottom = "0";
   nav.el.classList.add("jp-daynav");
   const dateIn = nav.el.querySelector('input[type="date"]');
   if (dateIn) dateIn.style.cssText = "width:160px;flex:0 0 auto";
   addToggleBtn.style.marginBottom = "0";
-  tipToggleBtn.style.marginBottom = "0";
-  content.appendChild(el("div", { style: "display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;margin-bottom:12px" }, [nav.el, el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [addToggleBtn, tipToggleBtn])]));
+  content.appendChild(el("div", { style: "display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;margin-bottom:12px" }, [nav.el, el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [addToggleBtn])]));
   content.appendChild(addFormWrap);
-  content.appendChild(tipWidgetWrap);
   content.appendChild(el("div", { class: "jp-main" }, [leftEl, panelHost]));
   setView(view);
   await load();
