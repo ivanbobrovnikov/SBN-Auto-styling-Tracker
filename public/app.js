@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-24-fixes";
+const UI_BUILD = "2026-10-25-more";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -630,15 +630,55 @@ function closeMoreSheet() {
   document.querySelectorAll(".more-sheet, .more-sheet-backdrop").forEach((n) => n.remove());
 }
 
+// The More menu: every tab that does not fit in the bottom bar, sorted into labeled groups and laid out as two-column tiles with icons, so it reads at a glance and
+// fits on a phone without a long scroll. A tab that is not listed in a group below still shows (under "More"), so a new tab can never go missing.
+const MORE_GROUPS = [
+  ["Money", ["owner-cash", "manager-cash", "owner-unpaid", "owner-stats"]],
+  ["Jobs", ["owner-serviced", "owner-arrived", "owner-search", "owner-cleanup"]],
+  ["Records", ["owner-audit", "owner-edit-history", "owner-attendance", "manager-shop"]],
+  ["People", ["owner-team", "owner-managers", "owner-salesreps"]],
+  ["Tools", ["owner-test"]],
+];
+const MORE_ICONS = {
+  "owner-cash": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 12h.01M17.5 12h.01"/></svg>`,
+  "manager-cash": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 12h.01M17.5 12h.01"/></svg>`,
+  "owner-unpaid": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M14.5 9.2c-.5-.8-1.4-1.2-2.5-1.2-1.5 0-2.5.8-2.5 1.9 0 2.7 5 1.3 5 4 0 1.1-1.1 2-2.5 2-1.1 0-2-.5-2.5-1.3M12 6.5V8M12 16v1.5"/></svg>`,
+  "owner-stats": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6"/></svg>`,
+  "owner-serviced": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>`,
+  "owner-arrived": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>`,
+  "owner-search": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>`,
+  "owner-cleanup": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16M7 20l2-8h6l2 8M10 12V5a2 2 0 014 0v7"/></svg>`,
+  "owner-audit": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>`,
+  "owner-edit-history": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/></svg>`,
+  "owner-attendance": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M9 15l2 2 4-4"/></svg>`,
+  "manager-shop": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l1.5-5h15L21 9"/><path d="M4 9v11h16V9"/><path d="M3 9a3 3 0 006 0 3 3 0 006 0 3 3 0 006 0"/></svg>`,
+  "owner-team": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="8" width="18" height="12" rx="2"/><path d="M9 8V6a2 2 0 012-2h2a2 2 0 012 2v2M3 13h18"/></svg>`,
+  "owner-managers": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>`,
+  "owner-salesreps": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-6 6.5-6s6.5 2.5 6.5 6M16 4.5a3.5 3.5 0 010 7M18 14.5c2.2.6 3.5 2.4 3.5 5.5"/></svg>`,
+  "owner-test": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 7a4 4 0 105 5l-3 .5-1.5-1.5.5-3z"/><path d="M13 12l-8 8"/></svg>`,
+};
+const MORE_CLOSE_ICON = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>`;
 function openMoreSheet(moreTabs) {
+  const label = Object.fromEntries(moreTabs);
+  const placed = new Set(), groups = [];
+  MORE_GROUPS.forEach(([name, keys]) => {
+    const mine = keys.filter((k) => label[k] !== undefined);
+    mine.forEach((k) => placed.add(k));
+    if (mine.length) groups.push([name, mine]);
+  });
+  const rest = moreTabs.map((t) => t[0]).filter((k) => !placed.has(k));
+  if (rest.length) groups.push(["More", rest]);
+  const tile = (key) => el("button", {
+    class: "more-sheet-item" + (currentTab === key ? " active" : ""),
+    "aria-current": currentTab === key ? "page" : "false",
+    onclick: () => { currentTab = key; localStorage.setItem("lastTab", currentTab); closeMoreSheet(); render(); },
+  }, [el("span", { class: "more-ico", html: MORE_ICONS[key] || "" }), el("span", { text: label[key] })]);
   const backdrop = el("div", { class: "more-sheet-backdrop", onclick: closeMoreSheet });
-  const sheet = el("div", { class: "more-sheet" }, moreTabs.map(([key, label]) =>
-    el("button", {
-      class: "more-sheet-item" + (currentTab === key ? " active" : ""),
-      onclick: () => { currentTab = key; localStorage.setItem("lastTab", currentTab); closeMoreSheet(); render(); },
-      text: label,
-    })
-  ));
+  const sheet = el("div", { class: "more-sheet", role: "dialog", "aria-label": "More" }, [
+    el("div", { class: "more-grab" }),
+    el("div", { class: "more-head" }, [el("div", { class: "more-title", text: "More" }), el("button", { class: "more-close", "aria-label": "Close", html: MORE_CLOSE_ICON, onclick: closeMoreSheet })]),
+    ...groups.map(([name, keys]) => el("div", { class: "more-group" }, [el("div", { class: "more-group-title", text: name }), el("div", { class: "more-grid" }, keys.map(tile))])),
+  ]);
   document.body.appendChild(backdrop);
   document.body.appendChild(sheet);
 }
