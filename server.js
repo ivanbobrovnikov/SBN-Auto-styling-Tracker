@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-25-reps";
+const BUILD = "2026-10-26-calendars";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -482,10 +482,15 @@ function isDeadBooking(s) {
   const ms = Date.parse(s.date);
   return !isNaN(ms) && EASTERN_DAY_FMT.format(new Date(ms)) < EASTERN_DAY_FMT.format(new Date());
 }
-function isSeparateAppointment(existing, incomingIso, incomingTitle) {
+function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCalendarId) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
   if (isNaN(oldMs) || isNaN(newMs)) return false;
+  // A booking on a DIFFERENT CALENDAR is a different appointment, not an edit of the first one: an edit stays on its own calendar. This is the customer who has
+  // Window Tint Booking on one day and Ceramic Coating Booking on another for the same car (both under one GHL id). Without this, the second booking was taken for
+  // an edit of the first: the tint appointment was rewritten into the ceramic one and vanished, and the close kept its old time so it didn't count today.
+  // (Only when BOTH calendars are known. A job saved before calendars were recorded falls through to the older rules below.)
+  if (incomingCalendarId && existing.calendarId && String(incomingCalendarId) !== String(existing.calendarId)) return true;
   // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment. The ONE exception is a clearly
   // DIFFERENT CAR while the first booking is still live: a customer bringing two cars in on one day. Both bookings arrive under the
   // same GHL id, and without this the second silently overwrote the first (the first car's job simply vanished).
@@ -535,7 +540,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     if (itsOwn) sale = itsOwn;
   }
   let secondCarSameDay = false;       // this new job is a second car for a day that already has a live booking under this id
-  if (sale && isSeparateAppointment(sale, incomingIso, car)) {
+  if (sale && isSeparateAppointment(sale, incomingIso, car, calendarId)) {
     secondCarSameDay = !!(sale.date && incomingIso && EASTERN_DAY_FMT.format(new Date(sale.date)) === EASTERN_DAY_FMT.format(new Date(incomingIso)));
     // Same opportunity, different appointment. The old job keeps all of its own history untouched
     // but gives up its claim on the opportunity ID, so this booking - and every later event for
@@ -566,7 +571,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     // about identical bookings at the same time) and Cleanup suggests it once the earlier one is clearly dead.
     const existingUnresolved = db.sales.find((s) =>
       sameCustomer(s) && s.status === "unconfirmed" && titlesMatch(s.car, car)
-      && !isSeparateAppointment(s, incomingIso, car)
+      && !isSeparateAppointment(s, incomingIso, car, calendarId)
     );
     if (existingUnresolved) {
       sale = existingUnresolved;
@@ -1402,7 +1407,7 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
   if (!db.debugLog) db.debugLog = [];
-  const { contactId, basePrice, salesRepName } = ghlPayload(req.body);
+  const { contactId, basePrice, salesRepName, calendarId: syncCalendar, car: syncCar } = ghlPayload(req.body);
   if (!contactId) {
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "sync", failedReason: "missing contactId", body: req.body });
     db.debugLog = db.debugLog.slice(0, 30);
@@ -1419,7 +1424,10 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   // Prefer the most recent still-pending booking for this contact — that's almost always
   // the one a phone call just closed. Falls back to the most recent overall if none are pending.
   const pending = matches.filter((s) => !s.status || s.status === "pending");
-  const pool = pending.length ? pending : matches;
+  let pool = pending.length ? pending : matches;
+  // two live bookings for one customer: if the event says which calendar or car it is about, use that; otherwise the most recent, as before
+  if (pool.length > 1 && syncCalendar) { const byCal = pool.filter((s) => String(s.calendarId) === String(syncCalendar)); if (byCal.length) pool = byCal; }
+  if (pool.length > 1 && syncCar) { const byCar = pool.filter((s) => titlesMatch(s.car, syncCar)); if (byCar.length) pool = byCar; }
   const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
   if (basePrice !== undefined) {
@@ -1458,25 +1466,28 @@ function resolveGhlTarget(db, body, endpoint, req) {
   const dayOf = (s) => (s.date ? EASTERN_DAY_FMT.format(new Date(s.date)) : "");
   // Only LIVE bookings (pending, or the car is here) can be confused with each other: a cancelled, no-show or unconfirmed one is already out of the picture.
   const live = (s) => ["pending", "arrived"].includes(s.status || "pending");
-  const family = db.sales.filter((s) => (s === holder || String(s.ghlOpportunityId || "").startsWith(`${id}~earlier-`)) && dayOf(s) === dayOf(holder) && live(s));
+  // Bookings that can be mixed up under one id: two cars on the SAME DAY, or a second appointment on ANOTHER CALENDAR (tint one day, ceramic another).
+  const otherCalendar = (s) => !!(s.calendarId && holder.calendarId && String(s.calendarId) !== String(holder.calendarId));
+  const family = db.sales.filter((s) => (s === holder || String(s.ghlOpportunityId || "").startsWith(`${id}~earlier-`)) && live(s) && (s === holder || dayOf(s) === dayOf(holder) || otherCalendar(s)));
   if (family.length < 2) return { sale: holder };
   const title = body.car || body.title || body.appointmentTitle || "";
-  const chose = (sale) => {          // the event named a car, and that picked the job (written to the Debug log when it isn't simply the job holding the id)
+  const chose = (sale, how) => {          // the event named a calendar or a car, and that picked the job (written to the Debug log when it isn't simply the job holding the id)
     if (sale !== holder) {
       if (!db.debugLog) db.debugLog = [];
-      db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint, note: "two bookings share this id: used the car named in the event to pick the job", body: req.body, jobs: [{ id: sale.id, car: sale.car, date: sale.date }] });
+      db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint, note: `two bookings share this id: used the ${how} named in the event to pick the job`, body: req.body, jobs: [{ id: sale.id, car: sale.car, date: sale.date }] });
       db.debugLog = db.debugLog.slice(0, 30);
     }
     return { sale };
   };
+  if (body.calendarId) { const byCal = family.filter((s) => String(s.calendarId) === String(body.calendarId)); if (byCal.length === 1) return chose(byCal[0], "calendar"); }
   if (title) {
     const byTitle = family.filter((s) => titlesMatch(s.car, title));
-    if (byTitle.length === 1) return chose(byTitle[0]);
+    if (byTitle.length === 1) return chose(byTitle[0], "car");
     const key = vehicleKey(title), byCar = key ? family.filter((s) => vehicleKey(s.car) === key) : [];
-    if (byCar.length === 1) return chose(byCar[0]);
+    if (byCar.length === 1) return chose(byCar[0], "car");
   }
   if (!db.debugLog) db.debugLog = [];
-  db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint, failedReason: "two bookings share this id and the event doesn't say which car: nothing was changed", body: req.body, jobs: family.map((s) => ({ id: s.id, car: s.car, date: s.date })) });
+  db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint, failedReason: "two bookings share this id and the event doesn't say which one: nothing was changed", body: req.body, jobs: family.map((s) => ({ id: s.id, car: s.car, date: s.date, calendarId: s.calendarId || null })) });
   db.debugLog = db.debugLog.slice(0, 30);
   return { ambiguous: true };
 }
@@ -2119,8 +2130,9 @@ app.post("/api/cross-location/cleanup-fix", (req, res) => {
 // Each person's pay at THIS location for one pay period, for the combined rep tracker to add up across locations. Read-only, and gated on the shared secret like the
 // other cross-location routes. Uses the same function as the Payroll screen (teamPayrollLines), so the numbers are the ones you'd see there. For a period whose payroll
 // has already been run, it reports what the run recorded (that's what was paid, with its adjustments); otherwise the live figures plus any adjustments still waiting.
+const crossSecretOk = (req) => { const given = req.get("x-cross-secret") || req.query.secret; return !!given && given === CROSS_LOCATION_SECRET; };
 app.get("/api/cross-location/people-pay", (req, res) => {
-  if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB(), today = trackerToday(), all = paySchedule.periods();
   const containingIndex = all.findIndex((p) => p.start <= today && today <= p.end);
   const period = req.query.periodId ? all.find((p) => p.id === String(req.query.periodId)) : all[containingIndex];
@@ -2138,9 +2150,21 @@ app.get("/api/cross-location/people-pay", (req, res) => {
       adjustments, total: payRound(src.subtotal + adjustments), daysPresent: src.daysPresent || 0,
       changedSinceRun: !!(runLine && payRound(l.subtotal) !== runLine.subtotal) });
   });
-  res.json({ location: SHOP_LOCATION_LABEL, state: run ? (run.skipped ? "skipped" : "run") : "open", runClosedAt: run && !run.skipped ? run.closedAt : null,
+  let warnings = [];
+  try { warnings = payrollPreview(db, period).warnings.map((w) => ({ code: w.code, count: w.count, text: w.text, items: (w.items || []).slice(0, 12) })); } catch (e) { warnings = []; }
+  res.json({ location: SHOP_LOCATION_LABEL, warnings, state: run ? (run.skipped ? "skipped" : "run") : "open", runClosedAt: run && !run.skipped ? run.closedAt : null,
     period: { id: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind, workDays: period.workDays, submit: period.submit || null, paid: period.paid || null },
     people, ...(req.query.list ? { containingIndex, periods: all.map((p) => ({ id: p.id, start: p.start, end: p.end, name: p.name, kind: p.kind, paid: p.paid || null })) } : {}) });
+});
+
+// Sales rep pay at THIS location for one date range (their pay period is its own Thursday-to-Wednesday cycle). Read-only. Same figures as the Payroll screen's sales rep section.
+app.get("/api/cross-location/salesrep-pay", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const ymd = /^\d{4}-\d{2}-\d{2}$/, start = String(req.query.start || ""), end = String(req.query.end || "");
+  if (!ymd.test(start) || !ymd.test(end) || start > end) return res.status(400).json({ error: "A start and end date (YYYY-MM-DD) are required." });
+  const p = buildPayroll(loadDB(), { period: "custom", startDate: start, endDate: end });
+  res.json({ location: SHOP_LOCATION_LABEL, start, end, reps: (p.salesReps || []).map((r) => ({ name: r.name, commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0,
+    totalBooked: r.totalBooked, showedCount: r.showedCount, noShowCount: r.noShowCount, showedValue: r.showedValue, commission: r.commission, duringHoursCount: r.duringHoursCount, afterHoursCount: r.afterHoursCount, duplicateCount: (r.duplicateWarnings || []).length })) });
 });
 
 app.get("/api/cross-location/salesreps", (req, res) => {
