@@ -10,10 +10,17 @@ body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Work 
 #app { max-width: 900px; margin: 0 auto; padding: 20px; }
 .oswald { font-family: 'Oswald', sans-serif; letter-spacing: 0.02em; }
 .mono { font-family: 'JetBrains Mono', monospace; }
-.header { margin-bottom: 14px; display: flex; align-items: center; gap: 10px; }
-.header img.logo { height: 34px; width: auto; }
-.title { font-size: 18px; font-weight: 600; color: var(--chrome); letter-spacing: 0.02em; }
-.subtitle { font-size: 11.5px; color: var(--muted); }
+.header { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--borderSoft); display: flex; align-items: center; gap: 12px; }
+.header img.logo { height: 38px; width: auto; flex: none; }
+.title { font-size: 19px; font-weight: 600; color: var(--chrome); letter-spacing: 0.02em; line-height: 1.15; }
+.subtitle { font-size: 12.5px; color: var(--sub); line-height: 1.3; margin-top: 2px; }
+.hdr-build { font-size: 10.5px; margin-top: 2px; }
+.hdr-acct { text-align: right; flex: none; }
+.hdr-name { font-size: 15px; font-weight: 600; line-height: 1.25; }
+.hdr-sub { font-size: 12.5px; color: var(--muted); line-height: 1.4; white-space: nowrap; }
+.hdr-out { background: none; border: 0; color: var(--cyan); font: inherit; font-size: 13px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
+  padding: 10px 6px; margin: -10px -6px; }
+@media (max-width: 700px) { .hdr-tag, .hdr-word { display: none; } .title { font-size: 17.5px; } .header { gap: 10px; } }
 .bottom-tabs { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--panel);
   border-top: 0.5px solid var(--border); z-index: 50; padding: 6px 4px 8px; }
 .bottom-tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
@@ -69,3 +76,18 @@ td { padding: 8px 6px; border-bottom: 0.5px solid var(--borderSoft); }
 .notice.ok { color: var(--green); }
 .notice.err { color: var(--red); }
 .gauge-label { font-size: 12px; color: var(--sub); text-align: center; margin-top: 2px; }
+
+/* a sales rep's appointments, day by day (owner Payroll) */
+.rep-day-group { border-bottom: 1px solid var(--borderSoft); }
+.rep-day { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 46px; padding: 6px 4px; background: transparent; border: 0; color: var(--text); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.rep-caret { color: var(--muted); width: 14px; flex: none; }
+.rep-day-name { flex: 1; font-weight: 500; }
+.rep-day-sum { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; white-space: nowrap; }
+.rep-comm { color: var(--green); font-size: 12.5px; }
+.rep-day-list { padding: 0 0 8px; }
+.rep-appt { display: grid; grid-template-columns: 62px 1fr auto; gap: 10px; padding: 8px 4px 8px 22px; border-top: 1px dashed var(--borderSoft); font-size: 13px; }
+.rep-appt-time { color: var(--sub); font-variant-numeric: tabular-nums; }
+.rep-appt-car { line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rep-appt-amt { text-align: right; }
+.rep-ns { color: var(--red); font-size: 12px; font-weight: 600; }
+.rep-appt.ns .rep-appt-car { color: var(--red); }

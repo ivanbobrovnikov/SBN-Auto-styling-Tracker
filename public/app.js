@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-25-more";
+const UI_BUILD = "2026-10-25-reps";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -290,12 +290,12 @@ function render() {
   app.appendChild(el("div", { class: "header" }, [
     el("img", { class: "logo", src: "/logo.png", alt: "SBN Auto Styling" }),
     el("div", { style: "flex:1;min-width:0" }, [
-      el("div", { class: "title oswald", text: "SBN Autostyling Tracker" }),
-      el("div", { class: "subtitle", text: `Window tint · PPF · Ceramic coating — ${session.shopLocation || ""}` }),
+      el("div", { class: "title oswald" }, [el("span", { text: "SBN Autostyling" }), el("span", { class: "hdr-word", text: " Tracker" })]),
+      el("div", { class: "subtitle" }, [el("span", { class: "hdr-tag", text: "Window tint \u00B7 PPF \u00B7 Ceramic coating \u2014 " }), el("span", { class: "hdr-loc", text: session.shopLocation || "" })]),
       (() => {
         // Shows which release this screen is, and goes red if the server is on a different one.
         // A network hiccup alone never triggers the warning - only a real answer that doesn't match.
-        const line = el("div", { class: "muted", style: "font-size:9.5px;margin-top:1px", text: `build ${UI_BUILD}` });
+        const line = el("div", { class: "muted hdr-build", text: `build ${UI_BUILD}` });
         fetch("/api/version", { cache: "no-store" })
           .then(async (r) => { let v = null; if (r.ok) { try { v = await r.json(); } catch (e) {} } return { reached: true, v }; })
           .catch(() => ({ reached: false }))
@@ -307,10 +307,12 @@ function render() {
         return line;
       })(),
     ]),
-    el("div", { style: "text-align:right;flex-shrink:0" }, [
-      el("div", { style: "font-size:12.5px;font-weight:500", text: session.name || "Owner" }),
-      el("div", { class: "muted", style: "font-size:10px;text-transform:uppercase;letter-spacing:0.04em", text: roleLabel }),
-      el("button", { class: "ghost", style: "font-size:10px;padding:3px 8px;margin-top:3px", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); }, text: "Log out" }),
+    el("div", { class: "hdr-acct" }, [
+      el("div", { class: "hdr-name", text: session.name || "Owner" }),
+      el("div", { class: "hdr-sub" }, [
+        (session.name && session.name !== roleLabel) ? el("span", { class: "hdr-role", text: roleLabel + " \u00B7 " }) : null,
+        el("button", { class: "hdr-out", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); }, text: "Log out" }),
+      ]),
     ]),
   ]));
 
@@ -1029,6 +1031,44 @@ async function renderManagerTabContent(content) {
   return renderManagerJobs(content);
 }
 
+// A sales rep's resolved appointments, day by day: one row per day (how many arrived, any no-shows, the commission that day), and a tap on a day shows that day's
+// appointments. A busy pay period used to dump every appointment in one long block of small text; now you read the days first and open only the one you want.
+function renderRepDays(r) {
+  const tz = "America/New_York";
+  const dayKey = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: tz });
+  const dayLabel = (key) => new Date(key + "T12:00:00Z").toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+  const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" });
+  const days = {};
+  const add = (j, kind) => { const k = dayKey(j.date); (days[k] = days[k] || []).push({ ...j, kind }); };
+  r.arrivedDetails.forEach((j) => add(j, "arrived"));
+  r.noShowDetails.forEach((j) => add(j, "noshow"));
+  const wrap = el("div", { class: "rep-days" });
+  Object.keys(days).sort().forEach((k) => {
+    const items = days[k].sort((x, y) => (new Date(x.date) - new Date(y.date)));
+    const arrived = items.filter((j) => j.kind === "arrived"), ns = items.filter((j) => j.kind === "noshow");
+    const comm = arrived.reduce((t, j) => t + (Number(j.commissionAmount) || 0), 0);
+    const list = el("div", { class: "rep-day-list", style: "display:none" }, items.map((j) => el("div", { class: "rep-appt" + (j.kind === "noshow" ? " ns" : ""), "data-kind": j.kind }, [
+      el("div", { class: "rep-appt-time", text: timeOf(j.date) }),
+      el("div", { class: "rep-appt-main" }, [el("div", { class: "rep-appt-car", text: j.car }), j.customerName ? el("div", { class: "muted", style: "font-size:12px", text: j.customerName }) : null]),
+      el("div", { class: "rep-appt-amt" }, [el("div", { class: "mono", text: money(j.basePrice) }), j.kind === "arrived" ? el("div", { class: "mono rep-comm", text: "+" + money(j.commissionAmount) }) : el("div", { class: "rep-ns", text: "No-show" })]),
+    ])));
+    const caret = el("span", { class: "rep-caret", text: "\u25B8" });
+    const head = el("button", { class: "rep-day", "aria-expanded": "false", onclick: () => {
+      const open = list.style.display === "none";
+      list.style.display = open ? "block" : "none"; head.setAttribute("aria-expanded", String(open)); caret.textContent = open ? "\u25BE" : "\u25B8";
+    } }, [
+      caret, el("span", { class: "rep-day-name", text: dayLabel(k) }),
+      el("span", { class: "rep-day-sum" }, [
+        arrived.length ? el("span", { style: "color:var(--green)", text: `${arrived.length} arrived` }) : null,
+        ns.length ? el("span", { style: "color:var(--red)", text: `${ns.length} no-show${ns.length !== 1 ? "s" : ""}` }) : null,
+        arrived.length ? el("span", { class: "mono rep-comm", text: "+" + money(comm) }) : null,
+      ]),
+    ]);
+    wrap.appendChild(el("div", { class: "rep-day-group", "data-day": k }, [head, list]));
+  });
+  return wrap;
+}
+
 async function renderSalesTabContent(content) {
   if (currentTab === "sales-performance") return renderSalesPerformance(content);
   if (currentTab === "sales-fullschedule") return renderSalesFullSchedule(content);
@@ -1441,27 +1481,15 @@ async function renderOwnerPayroll(content) {
           ? el("div", { class: "muted", style: `font-size:11.5px;margin-bottom:6px;color:${r.noShowRate >= 20 ? "var(--red)" : "var(--sub)"}`, text: `${r.noShowCount} no-show${r.noShowCount !== 1 ? "s" : ""} — ${Math.round(r.noShowRate)}% no-show rate` })
           : el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "0 no-shows" }),
         (() => {
-          const detailWrap = el("div", { style: "display:none;margin-bottom:10px" });
-          if (r.arrivedDetails.length > 0) {
-            detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin-top:6px;margin-bottom:4px", text: "ARRIVED" }));
-            r.arrivedDetails.forEach((j) => detailWrap.appendChild(el("div", { class: "row", style: "font-size:11.5px;margin-bottom:3px" }, [
-              el("span", {}, [el("span", { text: j.car }), el("span", { class: "muted", text: ` · ${formatDateTime(j.date)}` })]),
-              el("span", { class: "mono", style: "color:var(--green)", text: `${money(j.basePrice)} → +${money(j.commissionAmount)}` }),
-            ])));
-          }
-          if (r.noShowDetails.length > 0) {
-            detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin-top:8px;margin-bottom:4px", text: "NO-SHOW" }));
-            r.noShowDetails.forEach((j) => detailWrap.appendChild(el("div", { class: "row", style: "font-size:11.5px;margin-bottom:3px" }, [
-              el("span", { style: "color:var(--red)" }, [el("span", { text: j.car }), el("span", { class: "muted", text: ` · ${formatDateTime(j.date)}` })]),
-              el("span", { class: "mono", style: "color:var(--red)", text: money(j.basePrice) }),
-            ])));
-          }
-          const toggleBtn = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:11.5px;margin-bottom:6px", onclick: () => {
+          const total = r.arrivedDetails.length + r.noShowDetails.length;
+          const detailWrap = el("div", { style: "display:none;margin-bottom:10px" }, [renderRepDays(r)]);
+          const toggleBtn = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12.5px;margin-bottom:6px", "aria-expanded": "false", onclick: () => {
             const showing = detailWrap.style.display !== "none";
             detailWrap.style.display = showing ? "none" : "block";
-            toggleBtn.textContent = showing ? "▸ See who arrived / no-showed" : "▾ Hide details";
-          }, text: (r.arrivedDetails.length + r.noShowDetails.length) > 0 ? "▸ See who arrived / no-showed" : "No resolved appointments yet" });
-          if ((r.arrivedDetails.length + r.noShowDetails.length) === 0) toggleBtn.disabled = true;
+            toggleBtn.setAttribute("aria-expanded", String(!showing));
+            toggleBtn.textContent = showing ? "\u25B8 See who arrived / no-showed" : "\u25BE Hide details";
+          }, text: total > 0 ? "\u25B8 See who arrived / no-showed" : "No resolved appointments yet" });
+          if (total === 0) toggleBtn.disabled = true;
           return el("div", {}, [toggleBtn, detailWrap]);
         })(),
         r.commissionRate > 0
