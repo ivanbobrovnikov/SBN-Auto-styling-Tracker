@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-26-calendars2";
+const BUILD = "2026-10-27-rerun";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -3789,7 +3789,7 @@ app.get("/api/owner/payroll-run-status", requireOwner, (req, res) => {
     body.preview = payrollPreview(db, period);
     const firstRunnable = paySchedule.periods().find(paySchedule.isRunnableKind);
     if (firstRunnable && firstRunnable.id === period.id) body.trueUp = paySchedule.FIRST_TRUE_UP;
-  } else if (!st.run.skipped) body.diff = payrollDiff(db, st.run);
+  } else if (!st.run.skipped) { body.diff = payrollDiff(db, st.run); body.afterPayday = !!st.run.paid && trackerToday() > st.run.paid; }
   res.json(body);
 });
 
@@ -3866,6 +3866,69 @@ app.post("/api/owner/payroll-run/:id/carry-forward", requireOwner, (req, res) =>
   });
   saveDB(db);
   res.json({ created, stillOver: diff.over });
+});
+
+// RE-RUN a payroll that has already been run, so the checks come out right after something was corrected (a job marked paid late, attendance fixed, a tip added).
+// It rebuilds the saved register from today's numbers and keeps the adjustments that were on that check; the earlier version is kept in the run's history.
+// Rules that keep anyone from being paid twice or having pay quietly taken back:
+//  - if part of the change was already carried to a LATER check, it is refused (re-running would pay it twice);
+//  - if it was carried but is still waiting for the next check, that carried amount is removed, because this check now includes it;
+//  - adjustments added since stay on the NEXT check unless the owner asks for them to come onto this one;
+//  - after the pay date the owner must confirm the checks for the period have not gone out;
+//  - people who no longer exist keep the line that was recorded (they were already paid).
+// "dryRun" only shows what would change. Nothing is deducted automatically either way: a lower total just means the check is smaller.
+app.post("/api/owner/payroll-run/:id/rerun", requireOwner, (req, res) => {
+  const db = loadDB(), { dryRun, confirmWarnings, checksNotOut, includePending } = req.body || {};
+  const run = payRuns(db).find((r) => r.id === req.params.id);
+  if (!run || run.skipped) return res.status(404).json({ error: "Payroll run not found." });
+  const period = paySchedule.periodByRange(run.start, run.end);
+  if (!period) return res.status(400).json({ error: "That isn't one of the pay periods on the schedule." });
+  const adjAll = payAdjustments(db);
+  const carriedAdj = adjAll.filter((a) => a.source === "carried" && a.fromRunId === run.id);
+  const carriedUsed = carriedAdj.filter((a) => a.appliedRunId);
+  if (carriedUsed.length) {
+    const later = payRuns(db).find((r) => r.id === carriedUsed[0].appliedRunId);
+    return res.status(409).json({ blocked: true, error: `Part of this period's change was already added to a later check${later ? ` (${payShortDate(later.start)} - ${payShortDate(later.end)})` : ""}. Re-running it would pay that part twice, so it can't be re-run.` });
+  }
+  const carriedPending = carriedAdj.filter((a) => !a.appliedRunId);
+  const addNow = includePending ? adjAll.filter((a) => !a.appliedRunId && !carriedPending.includes(a)) : [];
+  const afterPayday = !!run.paid && trackerToday() > run.paid;
+  const exists = new Set([...db.employees.map((e) => payKey("employee", e.id)), ...db.managers.map((m) => payKey("manager", m.id))]);
+  const lines = teamPayrollLines(db, period).map((l) => ({ ...l, adjustments: [], adjustmentsTotal: 0, total: l.subtotal }));
+  const byKey = new Map(lines.map((l) => [l.key, l]));
+  [...adjAll.filter((a) => a.appliedRunId === run.id), ...addNow].forEach((a) => {
+    const k = payKey(a.personType, a.personId);
+    let l = byKey.get(k);
+    if (!l) { l = { key: k, personType: a.personType, personId: a.personId, name: a.personName, payType: null, base: 0, upsellCommission: 0, walkInCommission: 0, tips: 0, subtotal: 0, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hours: 0, adjustments: [], adjustmentsTotal: 0, total: 0 }; lines.push(l); byKey.set(k, l); }
+    l.adjustments.push({ id: a.id, note: a.note, amount: a.amount, source: a.source });
+    l.adjustmentsTotal = payRound(l.adjustmentsTotal + a.amount);
+    l.total = payRound(l.subtotal + l.adjustmentsTotal);
+  });
+  let kept = lines.filter((l) => l.subtotal !== 0 || l.adjustments.length > 0 || l.payType);
+  run.lines.forEach((old) => { if (!exists.has(old.key) && !kept.some((l) => l.key === old.key)) kept.push(old); });      // someone removed since: their recorded line stays
+  const sum = (f) => payRound(kept.reduce((t, l) => t + f(l), 0));
+  const totals = { base: sum((l) => l.base), upsellCommission: sum((l) => l.upsellCommission), walkInCommission: sum((l) => l.walkInCommission), tips: sum((l) => l.tips), adjustments: sum((l) => l.adjustmentsTotal), total: sum((l) => l.total) };
+  const was = new Map(run.lines.map((l) => [l.key, l])), now = new Map(kept.map((l) => [l.key, l])), changes = [];
+  new Set([...was.keys(), ...now.keys()]).forEach((k) => {
+    const o = was.get(k), n = now.get(k), ref = n || o, delta = payRound((n ? n.total : 0) - (o ? o.total : 0));
+    if (Math.abs(delta) < 0.01) return;
+    changes.push({ key: k, name: ref.name, oldTotal: o ? o.total : 0, newTotal: n ? n.total : 0, delta });
+  });
+  changes.sort((a, b) => a.name.localeCompare(b.name));
+  const preview = payrollPreview(db, period);
+  const body = { runId: run.id, afterPayday, payDate: run.paid || null, changes, oldTotals: run.totals, newTotals: totals, revision: run.revision || 1, warnings: preview.warnings,
+    voidedCarried: carriedPending.map((a) => ({ name: a.personName, amount: a.amount })),
+    pendingLeft: adjAll.filter((a) => !a.appliedRunId && !carriedPending.includes(a) && !addNow.includes(a)).map((a) => ({ name: a.personName, amount: a.amount, note: a.note })) };
+  if (dryRun) return res.json({ preview: true, ...body });
+  if (afterPayday && !checksNotOut) return res.status(409).json({ needsCheckConfirm: true, error: `The pay date for this period (${payShortDate(run.paid)}) has passed. Only re-run it if the checks for this period have NOT gone out yet.` });
+  if (preview.warnings.length > 0 && !confirmWarnings) return res.status(409).json({ needsConfirm: true, error: "There are things to check before re-running this payroll.", warnings: preview.warnings });
+  run.revisions = run.revisions || [];
+  run.revisions.push({ revision: run.revision || 1, at: run.revisedAt || run.closedAt, lines: run.lines, totals: run.totals });
+  run.lines = kept; run.totals = totals; run.revision = (run.revision || 1) + 1; run.revisedAt = new Date().toISOString(); run.revisedBy = "Owner"; run.revisedAfterPayday = afterPayday; run.ranWithWarnings = preview.warnings.map((w) => w.code); run.carried = {};
+  carriedPending.forEach((a) => { const i = adjAll.indexOf(a); if (i >= 0) adjAll.splice(i, 1); });
+  addNow.forEach((a) => { a.appliedRunId = run.id; });
+  saveDB(db);
+  res.json({ ok: true, ...body, run });
 });
 
 app.post("/api/owner/payroll-adjustments", requireOwner, (req, res) => {
