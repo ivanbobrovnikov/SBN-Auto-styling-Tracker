@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-27-showroom";
+const BUILD = "2026-10-28-upsells";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2093,6 +2093,14 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
     return { id: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending", repName: r ? r.name : "Removed rep" };
   }) : [];
   const byRep = {};
+  // On the closing view, an upsell credited to a sales rep is a close of its own (the rep sold something extra), dated when it was added. It counts toward closed value and deals
+  // on the leaderboard only: it is marked isUpsell with status "upsell", so no combined screen turns it into commission, and the appointment view (which matches Payroll) never sees it.
+  const upsellCloses = [];
+  if (closedBasis) db.sales.filter((s) => s.status !== "cancelled" && !redoFree(s)).forEach((s) => (s.upsells || []).forEach((u) => {
+    if (!u.salesRepId || !u.createdAt || !inRange(u.createdAt, start, end)) return;
+    const rep = db.salesReps.find((r) => r.id === u.salesRepId); if (!rep) return;
+    upsellCloses.push({ rep, close: { id: "u:" + u.id, isUpsell: true, car: `${u.name} (upsell) on ${s.car}`, customerName: s.customerName, date: s.date, closedAt: u.createdAt, basePrice: parseFloat(u.price) || 0, baseService: "Upsell", status: "upsell", duringHours: isDuringBusinessHours(u.createdAt), isReschedule: false } });
+  }));
   relevant.forEach((s) => {
     const rep = db.salesReps.find((r) => r.id === s.salesRepId);
     if (!rep) return;
@@ -2103,6 +2111,7 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
       basePrice: parseFloat(s.basePrice) || 0, baseService: s.baseService || "", status: s.status || "pending", duringHours, isReschedule: !!s.isReschedule,
     });
   });
+  upsellCloses.forEach(({ rep, close }) => { if (!byRep[rep.name]) byRep[rep.name] = { name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, closes: [] }; byRep[rep.name].closes.push(close); });
   res.json({ locationLabel: SHOP_LOCATION_LABEL, perRep: Object.values(byRep), leftOut });
 });
 
@@ -2186,6 +2195,72 @@ app.get("/api/cross-location/salesrep-pay", (req, res) => {
   const p = buildPayroll(loadDB(), { period: "custom", startDate: start, endDate: end });
   res.json({ location: SHOP_LOCATION_LABEL, start, end, reps: (p.salesReps || []).map((r) => ({ name: r.name, commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0,
     totalBooked: r.totalBooked, showedCount: r.showedCount, noShowCount: r.noShowCount, showedValue: r.showedValue, commission: r.commission, duringHoursCount: r.duringHoursCount, afterHoursCount: r.afterHoursCount, duplicateCount: (r.duplicateWarnings || []).length })) });
+});
+
+// ===== Find an appointment and add an upsell: used by the rep tracker's sales-team screen. Secret-gated, like the other cross-location routes. =====
+const repKey = (n) => String(n || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const upsellCreditName = (db, u) => (u.salesRepId ? (u.salesRepName || "Removed rep") + " (sales rep)" : u.employeeId ? ((db.employees.find((e) => e.id === u.employeeId) || {}).name || "Removed tech") + " (tech)" : u.managerId ? ((db.managers.find((m) => m.id === u.managerId) || {}).name || "Removed manager") + " (manager)" : "Unassigned");
+// Search every appointment from 60 days back to 180 days ahead by customer name, car, service, rep or phone digits. Never returns a phone number or email.
+app.get("/api/cross-location/appointments-search", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), q = String(req.query.q || "").trim().toLowerCase(), digits = q.replace(/\D/g, "");
+  if (q.length < 2) return res.json({ location: SHOP_LOCATION_LABEL, results: [] });
+  const tokens = q.split(/\s+/).filter(Boolean), now = Date.now(), lo = now - 60 * 86400000, hi = now + 180 * 86400000;
+  const hits = db.sales.filter((s) => {
+    if (s.status === "cancelled") return false;
+    const t = Date.parse(s.date); if (isNaN(t) || t < lo || t > hi) return false;
+    const rep = s.salesRepId ? (db.salesReps.find((r) => r.id === s.salesRepId) || {}).name || "" : "";
+    const hay = `${s.customerName || ""} ${s.car || ""} ${s.baseService || ""} ${rep}`.toLowerCase();
+    return tokens.every((tk) => hay.includes(tk)) || (digits.length >= 4 && String(s.customerPhone || "").replace(/\D/g, "").includes(digits));
+  }).sort((a, b) => Math.abs(Date.parse(a.date) - now) - Math.abs(Date.parse(b.date) - now)).slice(0, 25);
+  res.json({ location: SHOP_LOCATION_LABEL, results: hits.map((s) => ({ id: s.id, car: s.car, customerName: s.customerName || "", date: s.date, baseService: s.baseService || "", status: s.status || "pending",
+    salesRepName: s.salesRepId ? ((db.salesReps.find((r) => r.id === s.salesRepId) || {}).name || null) : null, isOnlineBooking: !!s.isOnlineBooking, isWalkIn: !!s.isWalkIn,
+    upsells: (s.upsells || []).map((u) => ({ id: u.id, name: u.name, price: u.price, creditedTo: upsellCreditName(db, u), addedVia: u.addedVia || null, createdAt: u.createdAt || null })) })) });
+});
+const auditAdd = (db, entry) => { if (!db.auditLog) db.auditLog = []; db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), ...entry }); db.auditLog = db.auditLog.slice(0, 1000); };
+// Add an upsell to an appointment, credited to a named sales rep (who must be set up at this location).
+app.post("/api/cross-location/rep-upsell", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), { saleId, name, price, creditName, addedBy } = req.body || {};
+  const sale = db.sales.find((s) => s.id === saleId);
+  if (!sale) return res.status(404).json({ error: "That appointment wasn't found." });
+  if (sale.status === "cancelled") return res.status(400).json({ error: "That appointment is cancelled." });
+  const label = String(name || "").trim(), amt = Number(price);
+  if (!label || label.length > 60) return res.status(400).json({ error: "Give the upsell a name (up to 60 characters)." });
+  if (!isFinite(amt) || amt <= 0 || amt > 100000) return res.status(400).json({ error: "Enter the upsell's price, more than $0." });
+  const rep = db.salesReps.find((r) => repKey(r.name) === repKey(creditName));
+  if (!rep) return res.status(400).json({ error: `"${creditName || ""}" isn't set up as a sales rep at ${SHOP_LOCATION_LABEL}. Add them on that location's Sales Reps page first.` });
+  sale.upsells = sale.upsells || [];
+  const now = Date.now();
+  if (sale.upsells.some((u) => u.salesRepId === rep.id && u.name === label && Number(u.price) === amt && u.createdAt && now - Date.parse(u.createdAt) < 120000)) return res.status(409).json({ error: "That exact upsell was just added. Not adding it twice." });
+  const upsell = { id: newId(), name: label, price: Math.round(amt * 100) / 100, employeeId: null, managerId: null, salesRepId: rep.id, salesRepName: rep.name, createdAt: new Date(now).toISOString(), addedVia: "rep-tracker", addedBy: String(addedBy || "").slice(0, 60) };
+  sale.upsells.push(upsell);
+  auditAdd(db, { actor: `Rep tracker (${upsell.addedBy || "unknown"})`, saleId: sale.id, car: sale.car, field: "Upsell added", oldValue: "", newValue: `${label} $${upsell.price} credited to ${rep.name}` });
+  saveDB(db);
+  res.json({ ok: true, location: SHOP_LOCATION_LABEL, upsell: { id: upsell.id, name: upsell.name, price: upsell.price, creditedTo: rep.name, createdAt: upsell.createdAt } });
+});
+// Undo: only the person who added it (by name) and only within 30 minutes. The owner can remove any upsell from this location's own tracker.
+app.post("/api/cross-location/rep-upsell/undo", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), { saleId, upsellId, addedBy } = req.body || {};
+  const sale = db.sales.find((s) => s.id === saleId), u = sale && (sale.upsells || []).find((x) => x.id === upsellId);
+  if (!u) return res.status(404).json({ error: "That upsell wasn't found." });
+  if (u.addedVia !== "rep-tracker" || repKey(u.addedBy) !== repKey(addedBy)) return res.status(403).json({ error: "Only the person who added an upsell can undo it. Ask the owner to remove it." });
+  if (!u.createdAt || Date.now() - Date.parse(u.createdAt) > 30 * 60000) return res.status(403).json({ error: "It's been more than 30 minutes, so only the owner can remove it now." });
+  sale.upsells = sale.upsells.filter((x) => x.id !== upsellId);
+  auditAdd(db, { actor: `Rep tracker (${u.addedBy})`, saleId: sale.id, car: sale.car, field: "Upsell removed", oldValue: `${u.name} $${u.price} credited to ${u.salesRepName}`, newValue: "" });
+  saveDB(db); res.json({ ok: true });
+});
+// Upsells a rep has had credited since the start of today (Eastern), for the "My upsells today" list.
+app.get("/api/cross-location/rep-upsells", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), who = repKey(req.query.name), me = repKey(req.query.addedBy || req.query.name), today = EASTERN_DAY_FMT.format(new Date()), out = [];
+  db.sales.forEach((s) => (s.upsells || []).forEach((u) => {
+    if (!u.salesRepId || repKey(u.salesRepName) !== who || !u.createdAt || EASTERN_DAY_FMT.format(new Date(u.createdAt)) !== today) return;
+    out.push({ saleId: s.id, upsellId: u.id, name: u.name, price: u.price, car: s.car, customerName: s.customerName || "", createdAt: u.createdAt, addedBy: u.addedBy || "", canUndo: u.addedVia === "rep-tracker" && repKey(u.addedBy) === me && Date.now() - Date.parse(u.createdAt) <= 30 * 60000 });
+  }));
+  out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  res.json({ location: SHOP_LOCATION_LABEL, upsells: out });
 });
 
 app.get("/api/cross-location/salesreps", (req, res) => {
@@ -2955,6 +3030,7 @@ app.post("/api/sales/:id/upsells", requireAnyStaff, (req, res) => {
     const rep = db.salesReps.find((r) => r.id === req.auth.id);
     upsell.salesRepId = req.auth.id;
     upsell.salesRepName = rep ? rep.name : null;
+    upsell.createdAt = new Date().toISOString(); upsell.addedVia = "shop"; upsell.addedBy = rep ? rep.name : "";
   }
   else if (req.body.employeeId) upsell.employeeId = req.body.employeeId;
   else if (req.body.managerId) upsell.managerId = req.body.managerId;
