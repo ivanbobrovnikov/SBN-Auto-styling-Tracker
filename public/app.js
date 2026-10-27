@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-28-upsells";
+const UI_BUILD = "2026-10-28-payperiods";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -145,9 +145,21 @@ function nearestValidPayPeriodEnd(referenceDateStr, anchorOverride) {
   return end.toISOString().slice(0, 10);
 }
 
+// The real pay schedule (Thursday to Wednesday, with the short transition periods), loaded once after sign-in. Any "Pay period" button that doesn't bring its own cadence (the Dashboard,
+// Statistics, Cash, the printable report, and every manager and tech screen) follows it, so they all show the same periods as Payroll. The sales screens keep their own cadence.
+let payScheduleCache = null;
+async function loadPayScheduleCache() {
+  try { const sc = await api("/api/pay-schedule"); payScheduleCache = { periods: sc.periods }; } catch (e) { payScheduleCache = null; }        // if it can't be loaded the picker simply behaves as it did before
+}
+
 // teamSchedule (techs and managers only) is the server's pay schedule: { periods, currentIndex }. Without it, or for sales reps (who pass their own
 // anchor), the picker behaves exactly as it always did.
 function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor, teamSchedule) {
+  if (!payPeriodAnchor && !teamSchedule && payScheduleCache && payScheduleCache.periods.length) {
+    const t = easternToday(), ps = payScheduleCache.periods;                 // worked out fresh each time, so it moves on at midnight
+    let idx = ps.findIndex((p) => p.start <= t && t <= p.end); if (idx < 0) idx = Math.max(0, ps.findIndex((p) => p.start > t));
+    teamSchedule = { periods: ps, today: t, mode: "containing", currentIndex: idx };
+  }
   const teamMode = !payPeriodAnchor && !!(teamSchedule && teamSchedule.periods && teamSchedule.periods.length);
   // "Current": on the Payroll screen (mode "runnable") that is the earliest period that is over and not yet run, otherwise the period we are in; on Attendance
   // (mode "containing") always the period we are in. Worked out fresh each time, so it moves on after a period is run.
@@ -206,7 +218,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor, 
       const p = teamSchedule.periods[teamIdx];
       payPeriodLabel.textContent = p.kind === "old"
         ? `Covers ${formatPlainDate(p.start)} – ${formatPlainDate(p.end)} (payroll processed ${formatPlainDate(p.end)}) · old Wed–Tue cycle`
-        : `Covers ${formatPlainDate(p.start)} – ${formatPlainDate(p.end)} · ${p.name} · submit ${fmtDay(p.submit)} · paid ${fmtDay(p.paid)}${p.note ? ` (${p.note})` : ""}${p.closedRunId ? (p.skipped ? " · ✓ paid another way" : " · ✓ payroll run") : ""}`;
+        : `Covers ${formatPlainDate(p.start)} \u2013 ${formatPlainDate(p.end)}` + [p.name, p.submit ? `submit ${fmtDay(p.submit)}` : "", p.paid ? `paid ${fmtDay(p.paid)}` : ""].filter(Boolean).map((x) => ` \u00B7 ${x}`).join("") + (p.note ? ` (${p.note})` : "") + (p.closedRunId ? (p.skipped ? " \u00B7 \u2713 paid another way" : " \u00B7 \u2713 payroll run") : "");
     } else {
       payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)} (payroll processed ${fmt(end)})`;
     }
@@ -274,6 +286,7 @@ let currentTab = localStorage.getItem("lastTab") || "jobs";
 
 async function boot() {
   session = await api("/api/session");
+  if (session.role && !payScheduleCache) await loadPayScheduleCache();
   render();
 }
 
