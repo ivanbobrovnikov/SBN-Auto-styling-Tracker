@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-28-upsells";
+const BUILD = "2026-10-28-payperiods";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -3808,7 +3808,7 @@ function payrollPreview(db, period) {
   // Corrections made to an EARLIER check after it was run that nobody has put on a check yet: say so now, so an underpayment isn't forgotten.
   payRuns(db).filter((r) => !r.skipped && r.end < period.start).sort((x, y) => (x.start < y.start ? -1 : 1)).forEach((r) => {
     const d = payrollDiff(db, r);
-    if (d.under.length) warnings.push({ code: "corrections", count: d.under.length, text: `${payShortDate(r.start)} - ${payShortDate(r.end)} payroll has ${payPlural(d.under.length, "correction")} since it was run that no check has picked up yet. Go back to that period and press "Add the underpayments to the next check".`, items: d.under.map((x) => `${x.name}: +$${x.delta.toFixed(2)}`) });
+    if (d.under.length) warnings.push({ code: "corrections", count: d.under.length, text: `${payShortDate(r.start)} - ${payShortDate(r.end)} payroll has ${payPlural(d.under.length, "correction")} since it was run that no check has picked up yet. Open that period: press "Re-run this payroll" if its checks have not gone out yet, or "Add the underpayments to the next check" if they have.`, items: d.under.map((x) => `${x.name}: +$${x.delta.toFixed(2)}`) });
   });
   return { warnings, workDays: days.length };
 }
@@ -3848,6 +3848,14 @@ app.get("/api/owner/pay-schedule", requireOwner, (req, res) => {
   const inside = periods.findIndex((p) => p.start <= today && today <= p.end);
   const first = periods.findIndex((p) => paySchedule.isRunnableKind(p) && !p.closedRunId);
   res.json({ today, periods, containingIndex: inside >= 0 ? inside : periods.findIndex((p) => p.start > today), runnableIndex: first >= 0 && periods[first].end < today ? first : -1 });
+});
+
+// The pay schedule every screen's "Pay period" button follows (the same one Payroll and Attendance use). Any signed-in person may read the period dates; nothing here says anything
+// about payroll runs, submit days or pay days.
+app.get("/api/pay-schedule", requireAnyStaff, (req, res) => {
+  const today = trackerToday(), periods = paySchedule.periods().map((p) => ({ id: p.id, start: p.start, end: p.end, kind: p.kind, name: p.name }));
+  const inside = periods.findIndex((p) => p.start <= today && today <= p.end);
+  res.json({ today, periods, containingIndex: inside >= 0 ? inside : periods.findIndex((p) => p.start > today) });
 });
 
 app.get("/api/owner/payroll-run-status", requireOwner, (req, res) => {
