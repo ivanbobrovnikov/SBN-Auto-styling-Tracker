@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-26-calendars";
+const UI_BUILD = "2026-10-26-calendars2";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
