@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-27-rerun";
+const UI_BUILD = "2026-10-27-showroom";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -578,6 +578,25 @@ const TAB_ICONS = {
   "sales-performance": "📈", "schedule": "🗓", "performance": "📈",
 };
 
+const NAV_ICONS = {
+  "owner-summary": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>`,
+  "owner-payroll": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M14.6 9.3c-.6-.8-1.5-1.3-2.7-1.3-1.5 0-2.6.8-2.6 2 0 3 5.4 1.6 5.4 4.4 0 1.2-1.1 2-2.7 2-1.3 0-2.3-.5-2.9-1.4M12 6.5V8m0 8v1.5"/></svg>`,
+  "owner-sales": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>`,
+  "manager-jobs": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 16v-5l1.8-4.2A2 2 0 0 1 8.6 5.6h6.8a2 2 0 0 1 1.8 1.2L19 11v5"/><path d="M3 16h18v2.5a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V16H7v2.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M7.5 13h.01M16.5 13h.01"/></svg>`,
+  "sales-schedule": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h4"/></svg>`,
+  "calendar": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>`,
+  "chart": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M8 15l3-4 3 2 4-6"/></svg>`,
+  "menu": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>`,
+};
+NAV_ICONS["sales-fullschedule"] = NAV_ICONS.calendar; NAV_ICONS.schedule = NAV_ICONS.calendar;
+NAV_ICONS["sales-performance"] = NAV_ICONS.chart; NAV_ICONS["manager-performance"] = NAV_ICONS.chart; NAV_ICONS.performance = NAV_ICONS.chart;
+// bottom-bar icon: a clean line icon (the same family as the More menu), falling back to the old emoji if a tab has none
+function tabIcon(key) {
+  const svg = NAV_ICONS[key] || MORE_ICONS[key], d = el("div", { class: "tab-icon" });
+  if (svg) d.innerHTML = svg; else d.textContent = TAB_ICONS[key] || "\u2022";
+  return d;
+}
+
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
@@ -611,7 +630,7 @@ function renderBottomNav() {
       class: "bottom-tab" + (currentTab === key ? " active" : ""),
       onclick: () => { currentTab = key; localStorage.setItem("lastTab", currentTab); render(); },
     }, [
-      el("div", { class: "tab-icon", text: TAB_ICONS[key] || "•" }),
+      tabIcon(key),
       el("div", { text: label }),
     ]));
   });
@@ -621,7 +640,7 @@ function renderBottomNav() {
       class: "bottom-tab" + (isMoreActive ? " active" : ""),
       onclick: () => openMoreSheet(moreTabs),
     }, [
-      el("div", { class: "tab-icon", text: "☰" }),
+      tabIcon("menu"),
       el("div", { text: "More" }),
     ]));
   }
@@ -803,7 +822,7 @@ function renderTipsSection(job, onDone) {
       el("div", { style: "flex:1;min-width:0" }, [
         el("div", { style: "font-size:13px", text: `${money(t.amount)}${who ? " · " + who : ""}` }),
         el("div", { class: "muted", style: "font-size:11px", text: `Logged by ${t.loggedByName || "someone"} · ${formatDateTime(t.timestamp)}` }),
-        t.removable ? null : el("div", { style: "font-size:11.5px;color:var(--amber);margin-top:2px", text: t.blockedReason }),
+        t.removable ? null : el("div", { style: "font-size:11.5px;color:var(--warn);margin-top:2px", text: t.blockedReason }),
       ]),
       t.removable ? el("button", { class: "icon-danger", "data-act": "tip-remove", style: "font-size:12px;padding:4px 10px", text: "Remove", onclick: async (ev) => {
         ev.stopPropagation();
@@ -1126,12 +1145,12 @@ function renderRerunSection(run, again) {
     ])));
     if (pv.voidedCarried.length) box.appendChild(note(`Already waiting for the next check: ${pv.voidedCarried.map((v) => `${v.name} ${moneySigned(v.amount)}`).join(", ")}. That comes off the next check, because this check now includes it, so nobody is paid twice.`, "color:var(--cyan);"));
     if (pv.pendingLeft.length) box.appendChild(note(`${payPluralJs(pv.pendingLeft.length, "adjustment")} added since stay on the next check: ${pv.pendingLeft.map((p) => `${p.name} ${moneySigned(p.amount)}`).join(", ")}.`));
-    if (pv.warnings.length) box.appendChild(note(`Still to check: ${pv.warnings.map((w) => w.text).join(" ")}`, "color:var(--amber);"));
+    if (pv.warnings.length) box.appendChild(note(`Still to check: ${pv.warnings.map((w) => w.text).join(" ")}`, "color:var(--warn);"));
     if (pv.changes.length === 0) { box.appendChild(el("button", { class: "ghost", style: "margin-top:6px", text: "Close", onclick: () => clearEl(panel) })); panel.appendChild(box); return; }
     let cb = null;
     if (pv.afterPayday) {
       cb = el("input", { type: "checkbox", "data-field": "checks-not-out", style: "width:auto;flex:none;margin:0" });
-      box.appendChild(el("label", { style: "display:flex;gap:8px;align-items:center;font-size:12.5px;margin:8px 0;color:var(--amber)" }, [cb, el("span", { text: `The checks for this period have NOT gone out yet (the pay date, ${ymdDay(pv.payDate)}, has passed).` })]));
+      box.appendChild(el("label", { style: "display:flex;gap:8px;align-items:center;font-size:12.5px;margin:8px 0;color:var(--warn)" }, [cb, el("span", { text: `The checks for this period have NOT gone out yet (the pay date, ${ymdDay(pv.payDate)}, has passed).` })]));
     }
     const go = el("button", { class: "primary", "data-act": "rerun-go", style: "margin:6px 8px 0 0", text: "Update the checks" });
     if (cb) { go.disabled = true; cb.addEventListener("change", () => { go.disabled = !cb.checked; }); }
@@ -1718,12 +1737,12 @@ function openPrintableReport(title, s, periodLabel) {
     const unpaidTotal = unpaidArrived.reduce((a, j) => a + (j.total || 0), 0);
     if (unpaidArrived.length > 0) {
       body.appendChild(el("div", {
-        class: "card", style: "cursor:pointer;border-color:var(--amber)",
+        class: "card", style: "cursor:pointer;border-color:var(--warn);background:rgba(255,184,77,0.07)",
         onclick: () => { currentTab = "owner-unpaid"; localStorage.setItem("lastTab", currentTab); render(); },
       }, [
         el("div", { class: "row" }, [
           el("div", { class: "muted", text: `⚠ ${unpaidArrived.length} job${unpaidArrived.length !== 1 ? "s" : ""} showed up but haven't been marked paid — this is the gap you're seeing between Shown Up and Total Revenue` }),
-          el("div", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(unpaidTotal) }),
+          el("div", { class: "mono", style: "color:var(--warn);font-weight:600", text: money(unpaidTotal) }),
         ]),
         el("div", { class: "muted", style: "font-size:10.5px;margin-top:4px", text: "Tap to view and mark paid" }),
       ]));
@@ -1742,8 +1761,8 @@ function sameLocalDay(d1, d2) {
 }
 function jobStatusColors(s) {
   if (s.status === "cancelled") return { bg: "var(--borderSoft)", border: "var(--muted)", text: "var(--muted)" };
-  if (s.status === "arrived") return { bg: "#173404", border: "var(--green)", text: "var(--green)" };
-  if (s.status === "no_show") return { bg: "#501313", border: "var(--red)", text: "var(--red)" };
+  if (s.status === "arrived") return { bg: "rgba(61, 220, 151, 0.12)", border: "var(--green)", text: "var(--green)" };
+  if (s.status === "no_show") return { bg: "rgba(255, 138, 122, 0.12)", border: "var(--red)", text: "var(--red)" };
   return { bg: "var(--cyanDim)", border: "var(--cyan)", text: "var(--cyan)" };
 }
 function serviceAbbrev(baseService) {
@@ -1846,7 +1865,7 @@ function renderYearGrid(sales, yearStr) {
     countsByDay[key] = (countsByDay[key] || 0) + 1;
   });
   const maxCount = Math.max(1, ...Object.values(countsByDay));
-  const shades = ["var(--borderSoft)", "#4A3A22", "#854F0B", "#412402"];
+  const shades = ["var(--borderSoft)", "#23407D", "#3A6BD1", "#5B93FF"];
   function shadeFor(count) {
     if (!count) return shades[0];
     const ratio = count / maxCount;
@@ -2697,23 +2716,23 @@ async function renderOwnerSales(content) {
       })();
 
       (dayCols ? dayCols[serviceColumnFor(s.baseService)] : body).appendChild(el("div", { class: "card" }, [
-        el("div", { style: `display:flex;gap:12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
+        el("div", { style: `display:flex;flex-wrap:wrap;gap:8px 12px;align-items:flex-start;${cancelled ? "opacity:0.55" : ""}` }, [
         el("div", { style: "min-width:64px;text-align:center;background:var(--cardAlt);border-radius:7px;padding:8px 4px;flex-shrink:0" }, [
           el("div", { class: "mono", style: "font-size:14px;font-weight:600", text: timeOnly }),
           el("div", { class: "muted", style: "font-size:10px", text: dateOnly }),
         ]),
-        el("div", { style: "flex:1;min-width:0" }, [
+        el("div", { style: "flex:1 1 170px;min-width:0" }, [
           el("div", { style: `font-weight:500;${cancelled ? "text-decoration:line-through" : ""}`, text: `${s.car}${s.syncedFromGHL ? " 🔗" : ""}` }),
           el("div", { class: "muted", style: "font-size:12.5px", text: `${s.employeeNames || "Unassigned"} · ${s.baseService || "no service set"}` }),
           upsellRows.length ? el("div", { style: "margin-top:4px" }, upsellRows) : null,
         ]),
-        el("div", { style: "text-align:right;flex-shrink:0" }, [
+        el("div", { style: "text-align:right;flex:0 0 auto;margin-left:auto;max-width:100%" }, [
           el("div", { style: `color:${statusColor};font-size:12px;font-weight:600;margin-bottom:4px`, text: statusLabel }),
           priceRow,
           !cancelled && s.upsellTotal > 0 ? el("div", { class: "muted", style: "font-size:11px;margin-top:2px", text: `Upsells: ${money(s.upsellTotal)}` }) : null,
           el("div", { class: "mono", style: `color:${cancelled ? "var(--red)" : "var(--amber)"};font-size:16px;font-weight:600;margin-top:2px`, text: cancelled ? "—" : `Total: ${money(s.total)}` }),
           s.paid ? el("div", { class: "muted", style: "font-size:11px", text: `Paid — ${s.paymentMethod === "cash" ? "Cash" : "Card"}` }) : el("div", { class: "muted", style: "font-size:11px", text: cancelled ? "" : "Unpaid" }),
-          el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end" }, [
+          el("div", { style: "display:flex;gap:6px;margin-top:6px;justify-content:flex-end;flex-wrap:wrap" }, [
             photoToggleBtn, notesToggleBtn, editToggleBtn,
             el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => navigator.clipboard.writeText(s.id), text: "Copy ID" }),
             el("button", { class: "icon-danger", onclick: async () => { await api(`/api/sales/${s.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
@@ -3059,8 +3078,8 @@ async function renderOwnerSalesReps(content) {
       afterRate.addEventListener("change", () => api(`/api/salesreps/${r.id}`, { method: "PATCH", body: JSON.stringify({ afterHoursCommissionRate: afterRate.value }) }));
       const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:90px" });
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
-      list.appendChild(el("div", { class: "card row" }, [
-        el("div", { style: "flex:1;font-weight:500", text: r.name }),
+      list.appendChild(el("div", { class: "card row", style: "flex-wrap:wrap" }, [
+        el("div", { style: "flex:1 1 140px;font-weight:500", text: r.name }),
         el("span", { class: "muted", style: "font-size:11.5px", text: "Initials:" }), initials,
         el("span", { class: "muted", style: "font-size:11.5px", text: "Mobile:" }), phone, phoneNote,
         el("span", { class: "muted", style: "font-size:11.5px", text: "In hours:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
@@ -4680,7 +4699,7 @@ async function renderTestTool(content) {
   content.appendChild(el("div", { class: "card", style: "max-width:480px" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "SIMULATE A DELETION — test what happens when an appointment gets deleted in GHL, not just marked cancelled. This actually removes the job from the tracker entirely, rather than leaving it visible as Cancelled." }),
     el("div", { class: "field" }, [el("label", { text: "Job ID" }), deleteJobId]),
-    el("button", { class: "primary", style: "background:var(--red);color:#fff", onclick: async () => {
+    el("button", { class: "primary", style: "background:var(--red);color:var(--ink)", onclick: async () => {
       try {
         await api("/api/owner/simulate-delete", { method: "POST", body: JSON.stringify({ saleId: deleteJobId.value.trim() }) });
         deleteNotice.className = "notice ok";
