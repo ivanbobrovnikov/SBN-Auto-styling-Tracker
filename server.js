@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-26-calendars";
+const BUILD = "2026-10-26-calendars2";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -482,7 +482,8 @@ function isDeadBooking(s) {
   const ms = Date.parse(s.date);
   return !isNaN(ms) && EASTERN_DAY_FMT.format(new Date(ms)) < EASTERN_DAY_FMT.format(new Date());
 }
-function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCalendarId) {
+const serviceLine = (v) => { const t = String(v || "").toLowerCase(); if (/tint/.test(t)) return "tint"; if (/ceramic|coat/.test(t)) return "ceramic"; if (/ppf|paint protection/.test(t)) return "ppf"; return ""; };
+function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCalendarId, incomingService) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
   if (isNaN(oldMs) || isNaN(newMs)) return false;
@@ -490,7 +491,14 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
   // Window Tint Booking on one day and Ceramic Coating Booking on another for the same car (both under one GHL id). Without this, the second booking was taken for
   // an edit of the first: the tint appointment was rewritten into the ceramic one and vanished, and the close kept its old time so it didn't count today.
   // (Only when BOTH calendars are known. A job saved before calendars were recorded falls through to the older rules below.)
-  if (incomingCalendarId && existing.calendarId && String(incomingCalendarId) !== String(existing.calendarId)) return true;
+  if (incomingCalendarId && existing.calendarId) {
+    if (String(incomingCalendarId) !== String(existing.calendarId)) return true;
+  } else if (serviceLine(incomingService) && serviceLine(existing.baseService) && serviceLine(incomingService) !== serviceLine(existing.baseService)) {
+    // The calendar isn't known on one side (a job saved before calendars were recorded, or a message that didn't carry it), so fall back to the SERVICE: a tint
+    // booking and a ceramic booking for the same customer are two appointments far more often than one appointment switched between them, and a duplicate is
+    // visible and fixable (Cleanup, Edit) where a swallowed appointment is silent.
+    return true;
+  }
   // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment. The ONE exception is a clearly
   // DIFFERENT CAR while the first booking is still live: a customer bringing two cars in on one day. Both bookings arrive under the
   // same GHL id, and without this the second silently overwrote the first (the first car's job simply vanished).
@@ -540,7 +548,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     if (itsOwn) sale = itsOwn;
   }
   let secondCarSameDay = false;       // this new job is a second car for a day that already has a live booking under this id
-  if (sale && isSeparateAppointment(sale, incomingIso, car, calendarId)) {
+  if (sale && isSeparateAppointment(sale, incomingIso, car, calendarId, baseService)) {
     secondCarSameDay = !!(sale.date && incomingIso && EASTERN_DAY_FMT.format(new Date(sale.date)) === EASTERN_DAY_FMT.format(new Date(incomingIso)));
     // Same opportunity, different appointment. The old job keeps all of its own history untouched
     // but gives up its claim on the opportunity ID, so this booking - and every later event for
@@ -571,7 +579,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     // about identical bookings at the same time) and Cleanup suggests it once the earlier one is clearly dead.
     const existingUnresolved = db.sales.find((s) =>
       sameCustomer(s) && s.status === "unconfirmed" && titlesMatch(s.car, car)
-      && !isSeparateAppointment(s, incomingIso, car, calendarId)
+      && !isSeparateAppointment(s, incomingIso, car, calendarId, baseService)
     );
     if (existingUnresolved) {
       sale = existingUnresolved;
@@ -627,6 +635,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     db.auditLog = db.auditLog.slice(0, 1000);
     sale.status = "pending";
   }
+  const prevSnap = isNew ? null : { service: sale.baseService, car: sale.car };
   sale.date = incomingIso || sale.date || new Date().toISOString();
   sale.customerName = customerName || sale.customerName || "";
   sale.customerPhone = customerPhone || sale.customerPhone || "";
@@ -646,6 +655,16 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
   else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
   sale.baseService = baseService || sale.baseService || "";
+  if (prevSnap && serviceLine(prevSnap.service) && serviceLine(sale.baseService) && serviceLine(prevSnap.service) !== serviceLine(sale.baseService)) {
+    // An existing job just had its SERVICE swapped by an incoming booking (tint to ceramic, say). A second appointment normally stays its own job (see
+    // isSeparateAppointment), so this means the two could not be told apart. Leave a plain trail so an appointment is never swallowed silently.
+    if (!db.auditLog) db.auditLog = [];
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "GHL booking (replaced this job's service)", saleId: sale.id, car: sale.car, field: "Service", oldValue: prevSnap.service, newValue: sale.baseService });
+    db.auditLog = db.auditLog.slice(0, 1000);
+    if (!db.debugLog) db.debugLog = [];
+    db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "booking", note: `a booking replaced this job's service (${prevSnap.service} to ${sale.baseService}). If it was really a SECOND appointment, add the missing one with Add a missing job.`, jobs: [{ id: sale.id, was: prevSnap.car, now: sale.car }], body: null });
+    db.debugLog = db.debugLog.slice(0, 30);
+  }
   // GHL's opportunity value is kept on record, but it never overwrites a price someone typed in by hand, and the price in the
   // title (see applyTitlePricing) takes priority over it.
   const priceBeforeUpdate = parseFloat(sale.basePrice) || 0;
@@ -1383,6 +1402,8 @@ app.post("/api/webhook/ghl", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
   const data = ghlPayload(req.body);
+  // accept the common spellings of the calendar field (the tracker only ever looked for "calendarId")
+  if (!data.calendarId) { const c = data.calendar_id || data.calendarID || (data.calendar && (data.calendar.id || (typeof data.calendar === "string" ? data.calendar : ""))) || ""; if (c) data.calendarId = c; }
   if (!data.ghlOpportunityId) {
     if (!db.debugLog) db.debugLog = [];
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), contentType: req.headers["content-type"] || "(none)", failedReason: "missing ghlOpportunityId", body: req.body });
