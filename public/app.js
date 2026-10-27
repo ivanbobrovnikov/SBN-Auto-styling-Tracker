@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-26-calendars2";
+const UI_BUILD = "2026-10-27-rerun";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1107,6 +1107,48 @@ const payPluralJs = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 const moneySigned = (n) => `${n < 0 ? "−" : "+"}${money(Math.abs(n))}`;
 function clearEl(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
+// Re-run a payroll that has already been run, so the checks come out right after something was corrected (a job marked paid late, attendance fixed, a tip added).
+// It always shows what would change FIRST, and nothing happens until the owner confirms. After the pay date it also asks for confirmation that the checks have not gone out.
+function renderRerunSection(run, again) {
+  const wrap = el("div", { "data-part": "rerun" });
+  const panel = el("div");
+  const note = (text, extra) => el("div", { class: "muted", style: `font-size:12px;margin:6px 0;${extra || ""}`, text });
+  wrap.appendChild(el("button", { class: "ghost", "data-act": "rerun", style: "margin:6px 0", text: "Re-run this payroll (update the checks)", onclick: async () => {
+    clearEl(panel);
+    let pv;
+    try { pv = await api(`/api/owner/payroll-run/${run.id}/rerun`, { method: "POST", body: JSON.stringify({ dryRun: true }) }); }
+    catch (e) { alert(e.message || "Couldn't check that."); return; }
+    const box = el("div", { "data-part": "rerun-panel", style: "margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:var(--radius)" });
+    box.appendChild(el("div", { style: "font-weight:600;font-size:13px", text: pv.changes.length ? "Re-running will change these checks" : "Nothing would change" }));
+    pv.changes.forEach((c) => box.appendChild(el("div", { class: "row", "data-part": "rerun-change", style: "font-size:12.5px;margin:3px 0" }, [
+      el("span", { text: `${c.name}: ${money(c.oldTotal)} \u2192 ${money(c.newTotal)}` }),
+      el("span", { class: "mono", style: `color:var(--${c.delta > 0 ? "green" : "red"})`, text: moneySigned(c.delta) }),
+    ])));
+    if (pv.voidedCarried.length) box.appendChild(note(`Already waiting for the next check: ${pv.voidedCarried.map((v) => `${v.name} ${moneySigned(v.amount)}`).join(", ")}. That comes off the next check, because this check now includes it, so nobody is paid twice.`, "color:var(--cyan);"));
+    if (pv.pendingLeft.length) box.appendChild(note(`${payPluralJs(pv.pendingLeft.length, "adjustment")} added since stay on the next check: ${pv.pendingLeft.map((p) => `${p.name} ${moneySigned(p.amount)}`).join(", ")}.`));
+    if (pv.warnings.length) box.appendChild(note(`Still to check: ${pv.warnings.map((w) => w.text).join(" ")}`, "color:var(--amber);"));
+    if (pv.changes.length === 0) { box.appendChild(el("button", { class: "ghost", style: "margin-top:6px", text: "Close", onclick: () => clearEl(panel) })); panel.appendChild(box); return; }
+    let cb = null;
+    if (pv.afterPayday) {
+      cb = el("input", { type: "checkbox", "data-field": "checks-not-out", style: "width:auto;flex:none;margin:0" });
+      box.appendChild(el("label", { style: "display:flex;gap:8px;align-items:center;font-size:12.5px;margin:8px 0;color:var(--amber)" }, [cb, el("span", { text: `The checks for this period have NOT gone out yet (the pay date, ${ymdDay(pv.payDate)}, has passed).` })]));
+    }
+    const go = el("button", { class: "primary", "data-act": "rerun-go", style: "margin:6px 8px 0 0", text: "Update the checks" });
+    if (cb) { go.disabled = true; cb.addEventListener("change", () => { go.disabled = !cb.checked; }); }
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      try { await api(`/api/owner/payroll-run/${run.id}/rerun`, { method: "POST", body: JSON.stringify({ confirmWarnings: pv.warnings.length > 0, checksNotOut: pv.afterPayday ? !!(cb && cb.checked) : true }) }); again(); }
+      catch (e) { alert(e.message || "Couldn't re-run it."); go.disabled = false; }
+    });
+    box.appendChild(go);
+    box.appendChild(el("button", { class: "ghost", style: "margin-top:6px", text: "Cancel", onclick: () => clearEl(panel) }));
+    panel.appendChild(box);
+  } }));
+  wrap.appendChild(note("Use this when this period's checks have not gone out yet. If they already have, use \"Add the underpayments to the next check\" instead. The earlier version is kept."));
+  wrap.appendChild(panel);
+  return wrap;
+}
+
 async function renderOwnerPayroll(content) {
   const body = el("div");
   // techs and managers follow the server's pay schedule (the 4-day and 8-day transition periods, then regular two-week periods); the page opens on
@@ -1379,6 +1421,7 @@ async function renderOwnerPayroll(content) {
       });
       const t = run.totals;
       reg.push(rowOf([cell("TOTAL", { name: true, bold: true }), cell(money(t.total), { bold: true }), cell(money(t.base), { bold: true }), cell(money(t.upsellCommission), { bold: true }), cell(money(t.walkInCommission), { bold: true }), cell(money(t.tips), { bold: true }), cell(t.adjustments ? moneySigned(t.adjustments) : "—", { bold: true })]));
+      if ((run.revision || 1) > 1 && run.revisions && run.revisions.length) card.appendChild(note(`Re-run on ${new Date(run.revisedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })} (version ${run.revision}). Earlier versions are kept. The first version totalled ${money(run.revisions[0].totals.total)}${run.revisedAfterPayday ? ", and this was re-run after the pay date" : ""}.`, "color:var(--cyan);"));
       card.appendChild(el("div", { style: "overflow-x:auto" }, [el("div", { style: "min-width:470px" }, reg)]));
       const copyBtn = el("button", { class: "ghost", style: "margin-top:10px", text: "Copy for payroll provider", onclick: async () => {
         const lines = [`Payroll register: ${rangeText} (${period.name}) · paid ${ymdDay(period.paid)}`, ["Name", "Base", "Upsell commission", "Walk-in commission", "Tips", "Adjustments", "Total"].join("\t")];
@@ -1396,6 +1439,7 @@ async function renderOwnerPayroll(content) {
         if (d.under.length) box.appendChild(el("button", { class: "primary", style: "margin:6px 0", text: "Add the underpayments to the next check", onclick: async () => { try { await api(`/api/owner/payroll-run/${run.id}/carry-forward`, { method: "POST", body: "{}" }); again(); } catch (e) { alert(e.message || "Couldn't do that."); } } }));
         d.over.forEach((x) => box.appendChild(el("div", { class: "row", style: "font-size:12.5px;margin-bottom:3px" }, [el("span", { text: `${x.name}: calculated ${money(x.calculated)}, now ${money(x.now)}` }), el("span", { class: "mono", style: "color:var(--red)", text: `${moneySigned(x.delta)} looks overpaid` })])));
         if (d.over.length) box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:4px", text: "Nothing is deducted automatically. If someone was overpaid, sort it out with them first (many states need written permission to deduct); you can add an adjustment on the next check once you've agreed." }));
+        box.appendChild(renderRerunSection(run, again));
         card.appendChild(box);
       }
       if (st.pending.length > 0) card.appendChild(note(`${payPluralJs(st.pending.length, "adjustment")} waiting for the next check: ${st.pending.map((a) => `${a.personName} ${moneySigned(a.amount)}`).join(", ")}.`, "color:var(--cyan);"));
