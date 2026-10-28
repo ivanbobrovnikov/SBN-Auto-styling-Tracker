@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-28-payperiods";
+const BUILD = "2026-10-29-cash";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1698,7 +1698,25 @@ app.get("/api/manager/salesreps-list", requireManager, (req, res) => {
 // Managers log entries but only ever see their OWN log — never shop-wide totals. Full
 // visibility and editing across everyone belongs to the owner only. This is a deliberate
 // boundary, not an oversight: managers track what they spend, they don't see the till.
-const CASH_CATEGORIES = ["Customer Payment", "Supplies", "Tools", "Misc", "Other"];
+const CASH_CATEGORY_CHOICES = ["Film & materials", "Shop supplies", "Tools & equipment", "Rent & utilities", "Payroll & labor", "Marketing", "Vehicle & fuel", "Software & fees", "Insurance & licenses", "Refunds", "Owner draw", "Meals & misc", "Other"];
+const CASH_CATEGORIES = ["Customer Payment", ...CASH_CATEGORY_CHOICES, "Supplies", "Tools", "Misc"];      // Supplies, Tools and Misc are the old names: entries keep them, and show under the new ones
+const catLabel = (c) => ({ Supplies: "Shop supplies", Tools: "Tools & equipment", Misc: "Other" }[c] || c || "Other");
+// A best guess at the category from what someone typed ("film roll", "Home Depot tape"). Only ever a suggestion: the owner has to accept it.
+const CASH_KEYWORDS = [
+  ["Film & materials", /\b(film|tint|ppf|ceramic|coating|vinyl|wrap|paint protection|xpel|llumar|ceramic pro)\b/i],
+  ["Tools & equipment", /\b(tool|tools|heat gun|steamer|knife|scraper|vacuum|drill|ladder|polisher|buffer|compressor|equipment|squeegee set)\b/i],
+  ["Shop supplies", /\b(towel|towels|microfiber|cleaner|soap|tape|blade|blades|squeegee|glove|gloves|chemical|solution|spray|bottle|slip|adhesive|razor|supplies|trash bag|paper towel)\b/i],
+  ["Rent & utilities", /\b(rent|electric|electricity|water bill|gas bill|internet|wifi|utility|utilities|comcast|verizon|pseg|lease)\b/i],
+  ["Payroll & labor", /\b(payroll|wage|wages|salary|helper|labor|worker|contractor|paid (him|her|them)|advance|bonus)\b/i],
+  ["Marketing", /\b(ad|ads|advertis\w*|facebook|instagram|google|yelp|flyer|flyers|sign|banner|marketing|promo|promotion|business card|cards printed)\b/i],
+  ["Vehicle & fuel", /\b(gas|fuel|diesel|uber|truck|van|car wash|toll|tolls|parking|delivery|shipping|mileage|oil change|u-?haul)\b/i],
+  ["Software & fees", /\b(subscription|software|app|railway|stripe|square|processing fee|bank fee|monthly fee|ghl|gohighlevel|domain|hosting)\b/i],
+  ["Insurance & licenses", /\b(insurance|license|licence|permit|registration|inspection)\b/i],
+  ["Refunds", /\b(refund|refunded|chargeback|give ?back)\b/i],
+  ["Owner draw", /\b(owner draw|personal|draw)\b/i],
+  ["Meals & misc", /\b(lunch|dinner|food|coffee|pizza|meal|meals|snacks|drinks)\b/i],
+];
+function suggestCategory(note) { const t = String(note || ""); for (const [cat, rx] of CASH_KEYWORDS) { const m = t.match(rx); if (m) return { category: cat, word: m[0] }; } return null; }
 
 function actorInfo(req, db) {
   if (req.auth.role === "owner") return { type: "owner", id: "owner", name: "Owner" };
@@ -1733,7 +1751,7 @@ app.post("/api/manager/cash-entries", requireManager, (req, res) => {
     if (twin) return res.status(409).json({ needsConfirm: "duplicate", error: `${twin.enteredByName || "Someone"} already logged ${type === "bankDeposit" ? "a deposit" : "a cash-out"} of exactly $${amt.toFixed(2)} ${new Date(twin.timestamp).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}. This may be the same one entered twice.` });
   }
   if (type === "bankDeposit" && !req.body.confirmOverdraw) {
-    const sum = (t) => db.cashEntries.filter((e) => e.type === t).reduce((a, e) => a + (Number(e.amount) || 0), 0);
+    const sum = (t) => db.cashEntries.filter((e) => e.type === t && !(t === "bankDeposit" && e.notCash)).reduce((a, e) => a + (Number(e.amount) || 0), 0);
     const inDrawer = (Number(db.cashOpeningBalance) || 0) + sum("cashIn") - sum("cashOut") - sum("bankDeposit");
     if (amt > Math.max(inDrawer, 0) + 0.005) return res.status(409).json({ needsConfirm: "overdraw", error: `A $${amt.toFixed(2)} deposit is more than the cash that has been recorded as coming in. Please check the amount for a typo, and that this is cash from the drawer.` });
   }
@@ -1784,6 +1802,12 @@ app.patch("/api/manager/cash-entries/:id", requireManager, (req, res) => {
   }
   if (req.body.note !== undefined) entry.note = req.body.note.trim();
   if (req.body.isOnline !== undefined) entry.isOnline = !!req.body.isOnline;
+  if (req.body.notCash !== undefined) {
+    if (actor.type !== "owner") return res.status(403).json({ error: "Only the owner can mark a deposit as not drawer cash." });
+    if (entry.type !== "bankDeposit") return res.status(400).json({ error: "Only a bank deposit can be marked as not drawer cash." });
+    if (!!req.body.notCash !== !!entry.notCash) logChange("notCash", !!entry.notCash, !!req.body.notCash);
+    entry.notCash = !!req.body.notCash;
+  }
   saveDB(db);
   res.json({ ok: true });
 });
@@ -1829,49 +1853,45 @@ app.post("/api/manager/cash-entries/:id/receipt", requireManager, receiptUpload.
 
 // Full visibility, owner-only — every entry from every manager, plus real totals.
 app.get("/api/owner/cash-entries", requireOwner, (req, res) => {
-  const db = loadDB();
+  const db = loadDB(), round2 = (n) => Math.round(n * 100) / 100;
   const { start, end } = dateRangeFor(req.query);
   const entries = db.cashEntries.filter((e) => e.timestamp >= start && e.timestamp <= end);
-  // "Cash in" specifically means cash collected from customers - the money that actually
-  // enters the drawer. Depositing that cash into the bank is a separate, later event, and
-  // reduces cash on hand the same way an expense would, but gets tracked as its own real
-  // number rather than lumped in with generic spending.
-  const totalCashIn = entries.filter((e) => e.type === "cashIn").reduce((a, e) => a + (Number(e.amount) || 0), 0);
-  const totalCashOut = entries.filter((e) => e.type === "cashOut").reduce((a, e) => a + (Number(e.amount) || 0), 0);
-  const totalCardExpense = entries.filter((e) => e.type === "cardExpense").reduce((a, e) => a + (Number(e.amount) || 0), 0);
-  const totalBankDeposits = entries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + (Number(e.amount) || 0), 0);
-  const byCategory = {};
-  entries.filter((e) => e.type !== "cashIn" && e.type !== "bankDeposit").forEach((e) => { byCategory[e.category] = (byCategory[e.category] || 0) + e.amount; });
-  // Net Cash on Hand is a running balance - what's actually sitting in the drawer right
-  // now - not a per-period metric. It's calculated from every entry ever logged, completely
-  // independent of whatever Day/Week/Month/Year is selected above, plus an optional opening
-  // balance for cash that was already in the drawer before tracking began.
-  // It is deliberately NOT floored at zero. When deposits and cash-outs add up to more than the cash recorded as
-  // coming in (typically a catch-up deposit for cash from before tracking started), flooring it to $0 made the
-  // page look broken - "$550 in from customers, no deposits, $0 on hand" - with no way to see why. The honest
-  // number, plus the numbers behind it, lets the owner see and fix the cause (usually by setting the opening balance).
-  const allEntries = db.cashEntries;
-  const allTimeCashIn = allEntries.filter((e) => e.type === "cashIn").reduce((a, e) => a + (Number(e.amount) || 0), 0);
-  const allTimeCashOut = allEntries.filter((e) => e.type === "cashOut").reduce((a, e) => a + (Number(e.amount) || 0), 0);
-  const allTimeBankDeposits = allEntries.filter((e) => e.type === "bankDeposit").reduce((a, e) => a + (Number(e.amount) || 0), 0);
-  const openingBalance = Number(db.cashOpeningBalance) || 0;
-  const round2 = (n) => Math.round(n * 100) / 100;
-  const inPeriod = new Set(entries.map((e) => e.id));
-  // Cash that left the drawer in some OTHER period than the one on screen - the usual reason on-hand looks lower than
-  // this period's numbers suggest.
-  const outflowsOutsidePeriod = allEntries
-    .filter((e) => (e.type === "cashOut" || e.type === "bankDeposit") && !inPeriod.has(e.id))
-    .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)).slice(0, 15)
+  const sum = (list, t) => list.filter((e) => e.type === t).reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const totalCashIn = sum(entries, "cashIn"), totalCashOut = sum(entries, "cashOut"), totalCardExpense = sum(entries, "cardExpense"), totalBankDeposits = sum(entries, "bankDeposit");
+  const notCashInPeriod = entries.filter((e) => e.type === "bankDeposit" && e.notCash).reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const cats = {};
+  entries.filter((e) => e.type === "cashOut" || e.type === "cardExpense").forEach((e) => { const k = catLabel(e.category), c = cats[k] || (cats[k] = { total: 0, count: 0 }); c.total += Number(e.amount) || 0; c.count += 1; });
+  // Cash in the drawer is a running balance over EVERY entry, whatever period is on screen. A deposit marked "not drawer cash" (a card payout, Zelle, a check) is still on record but does not come out of the drawer.
+  const all = db.cashEntries, drawerDeposit = (e) => e.type === "bankDeposit" && !e.notCash;
+  const allCashIn = sum(all, "cashIn"), allCashOut = sum(all, "cashOut"), allDeposits = all.filter(drawerDeposit).reduce((a, e) => a + (Number(e.amount) || 0), 0), allNotCash = all.filter((e) => e.type === "bankDeposit" && e.notCash).reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const openingBalance = Number(db.cashOpeningBalance) || 0, inPeriod = new Set(entries.map((e) => e.id));
+  const outflowsOutsidePeriod = all.filter((e) => (e.type === "cashOut" || drawerDeposit(e)) && !inPeriod.has(e.id)).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)).slice(0, 15)
     .map((e) => ({ id: e.id, type: e.type, category: e.category, amount: e.amount, note: e.note || "", enteredByName: e.enteredByName || "", timestamp: e.timestamp }));
+  const CAP = 2000, shown = entries.slice(0, CAP).map((e) => { const unsorted = (e.type === "cashOut" || e.type === "cardExpense") && catLabel(e.category) === "Other";
+    return { ...e, editLog: undefined, categoryLabel: catLabel(e.category), suggestion: unsorted ? suggestCategory(e.note) : null }; });
   res.json({
-    entries: entries.slice(0, 200),
-    totalCashIn, totalCashOut, totalCardExpense, totalBankDeposits,
-    netCash: round2(openingBalance + allTimeCashIn - allTimeCashOut - allTimeBankDeposits),
+    entries: shown, entriesTruncated: entries.length > CAP,
+    totalCashIn, totalCashOut, totalCardExpense, totalBankDeposits, totalNotCashDeposits: round2(notCashInPeriod),
+    netCash: round2(openingBalance + allCashIn - allCashOut - allDeposits),
     openingBalance, openingBalanceSetAt: db.cashOpeningSetAt || null,
-    allTime: { cashIn: round2(allTimeCashIn), cashOut: round2(allTimeCashOut), bankDeposits: round2(allTimeBankDeposits) },
+    allTime: { cashIn: round2(allCashIn), cashOut: round2(allCashOut), bankDeposits: round2(allDeposits), notCashDeposits: round2(allNotCash) },
     outflowsOutsidePeriod,
-    byCategory: Object.entries(byCategory).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total),
+    needsSorting: shown.filter((e) => (e.type === "cashOut" || e.type === "cardExpense") && e.categoryLabel === "Other").length,
+    byCategory: Object.entries(cats).map(([category, v]) => ({ category, total: round2(v.total), count: v.count })).sort((a, b) => b.total - a.total),
   });
+});
+// Sort many entries at once (accepting the suggestions): the owner only, expenses only, never a job's automatic cash-in. Each change is logged on the entry.
+app.post("/api/owner/cash-entries/recategorize", requireOwner, (req, res) => {
+  const db = loadDB(), items = Array.isArray((req.body || {}).items) ? req.body.items : [];
+  if (!items.length || items.length > 500) return res.status(400).json({ error: "Send between 1 and 500 entries." });
+  let changed = 0;
+  for (const it of items) {
+    const e = db.cashEntries.find((x) => x.id === it.id);
+    if (!e || e.autoFromJob || !(e.type === "cashOut" || e.type === "cardExpense") || !CASH_CATEGORY_CHOICES.includes(it.category) || e.category === it.category) continue;
+    e.editLog = e.editLog || []; e.editLog.push({ at: new Date().toISOString(), by: "Owner", field: "category", from: e.category, to: it.category });
+    e.category = it.category; changed++;
+  }
+  saveDB(db); res.json({ ok: true, changed });
 });
 
 // Looks through every cash entry for the mistakes that make "cash on hand" wrong, and says exactly which entries they are:
@@ -1887,7 +1907,7 @@ function cashAuditFor(db) {
   const deposits = [];
   all.slice().sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0)).forEach((e) => {
     if (e.type === "cashIn") balance += e.amount;
-    else if (e.type === "cashOut" || e.type === "bankDeposit") {
+    else if (e.type === "cashOut" || (e.type === "bankDeposit" && !e.notCash)) {
       if (e.type === "bankDeposit") {
         const over = Math.max(0, e.amount - Math.max(balance, 0));
         deposits.push({ ...show(e), balanceBefore: round2(balance), overdrawn: over > 0.005, overdrawsBy: round2(over) });
@@ -1901,7 +1921,7 @@ function cashAuditFor(db) {
   const groups = {};
   // Only deposits and larger cash-outs: two customers paying the same round amount in cash on one day is normal, so
   // matching Cash-in amounts say nothing about a repeat.
-  all.filter((e) => !e.autoFromJob && !e.auditDismissed && ((e.type === "bankDeposit" && e.amount >= 25) || (e.type === "cashOut" && e.amount >= 250)))
+  all.filter((e) => !e.autoFromJob && !e.auditDismissed && ((e.type === "bankDeposit" && !e.notCash && e.amount >= 25) || (e.type === "cashOut" && e.amount >= 250)))
     .forEach((e) => { const k = `${e.type}|${e.amount.toFixed(2)}`; (groups[k] = groups[k] || []).push(e); });
   const duplicates = [];
   Object.values(groups).forEach((g) => {
@@ -2181,7 +2201,7 @@ app.get("/api/cross-location/people-pay", (req, res) => {
       changedSinceRun: !!(runLine && payRound(l.subtotal) !== runLine.subtotal) });
   });
   let warnings = [];
-  try { warnings = payrollPreview(db, period).warnings.map((w) => ({ code: w.code, count: w.count, text: w.text, items: (w.items || []).slice(0, 12) })); } catch (e) { warnings = []; }
+  try { warnings = payrollPreview(db, period).warnings.map((w) => ({ code: w.code, count: w.count, text: w.text, items: (w.items || []).slice(0, 12), periodId: w.periodId || null, periodStart: w.periodStart || null, periodEnd: w.periodEnd || null })); } catch (e) { warnings = []; }
   res.json({ location: SHOP_LOCATION_LABEL, warnings, state: run ? (run.skipped ? "skipped" : "run") : "open", runClosedAt: run && !run.skipped ? run.closedAt : null,
     period: { id: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind, workDays: period.workDays, submit: period.submit || null, paid: period.paid || null },
     people, ...(req.query.list ? { containingIndex, periods: all.map((p) => ({ id: p.id, start: p.start, end: p.end, name: p.name, kind: p.kind, paid: p.paid || null })) } : {}) });
@@ -3808,7 +3828,7 @@ function payrollPreview(db, period) {
   // Corrections made to an EARLIER check after it was run that nobody has put on a check yet: say so now, so an underpayment isn't forgotten.
   payRuns(db).filter((r) => !r.skipped && r.end < period.start).sort((x, y) => (x.start < y.start ? -1 : 1)).forEach((r) => {
     const d = payrollDiff(db, r);
-    if (d.under.length) warnings.push({ code: "corrections", count: d.under.length, text: `${payShortDate(r.start)} - ${payShortDate(r.end)} payroll has ${payPlural(d.under.length, "correction")} since it was run that no check has picked up yet. Open that period: press "Re-run this payroll" if its checks have not gone out yet, or "Add the underpayments to the next check" if they have.`, items: d.under.map((x) => `${x.name}: +$${x.delta.toFixed(2)}`) });
+    if (d.under.length) warnings.push({ code: "corrections", count: d.under.length, text: `${payShortDate(r.start)} - ${payShortDate(r.end)} payroll has ${payPlural(d.under.length, "correction")} since it was run that no check has picked up yet. Open that period: press "Re-run this payroll" if its checks have not gone out yet, or "Add the underpayments to the next check" if they have.`, items: d.under.map((x) => `${x.name}: +$${x.delta.toFixed(2)}`), periodId: r.periodId, periodStart: r.start, periodEnd: r.end });
   });
   return { warnings, workDays: days.length };
 }
