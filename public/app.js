@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-28-payperiods";
+const UI_BUILD = "2026-10-29-cash";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -148,13 +148,15 @@ function nearestValidPayPeriodEnd(referenceDateStr, anchorOverride) {
 // The real pay schedule (Thursday to Wednesday, with the short transition periods), loaded once after sign-in. Any "Pay period" button that doesn't bring its own cadence (the Dashboard,
 // Statistics, Cash, the printable report, and every manager and tech screen) follows it, so they all show the same periods as Payroll. The sales screens keep their own cadence.
 let payScheduleCache = null;
+let pendingPayrollRange = null;                      // set by a link like /#payroll=2026-10-13_2026-10-21, used once by the owner's Payroll screen
+const takePendingRange = () => { const r = pendingPayrollRange; pendingPayrollRange = null; return r; };
 async function loadPayScheduleCache() {
   try { const sc = await api("/api/pay-schedule"); payScheduleCache = { periods: sc.periods }; } catch (e) { payScheduleCache = null; }        // if it can't be loaded the picker simply behaves as it did before
 }
 
 // teamSchedule (techs and managers only) is the server's pay schedule: { periods, currentIndex }. Without it, or for sales reps (who pass their own
 // anchor), the picker behaves exactly as it always did.
-function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor, teamSchedule) {
+function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor, teamSchedule, initialRange) {
   if (!payPeriodAnchor && !teamSchedule && payScheduleCache && payScheduleCache.periods.length) {
     const t = easternToday(), ps = payScheduleCache.periods;                 // worked out fresh each time, so it moves on at midnight
     let idx = ps.findIndex((p) => p.start <= t && t <= p.end); if (idx < 0) idx = Math.max(0, ps.findIndex((p) => p.start > t));
@@ -170,6 +172,7 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor, 
     return inside >= 0 ? inside : Math.max(0, ps.findIndex((p) => p.start > t));
   };
   let teamIdx = teamMode ? Math.max(0, Math.min(teamSchedule.periods.length - 1, teamSchedule.currentIndex)) : 0;
+  if (teamMode && initialRange) { const i = teamSchedule.periods.findIndex((p) => p.start === initialRange.start && p.end === initialRange.end); if (i >= 0) teamIdx = i; }
   let period = defaultPeriod;
   const today = easternToday();
   const vis = (key) => (period === key ? "" : "display:none");
@@ -287,6 +290,8 @@ let currentTab = localStorage.getItem("lastTab") || "jobs";
 async function boot() {
   session = await api("/api/session");
   if (session.role && !payScheduleCache) await loadPayScheduleCache();
+  const hm = /^#payroll=(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})$/.exec(location.hash || "");
+  if (hm && session.role === "owner") { pendingPayrollRange = { start: hm[1], end: hm[2] }; currentTab = "owner-payroll"; localStorage.setItem("lastTab", currentTab); history.replaceState(null, "", location.pathname + location.search); }
   render();
 }
 
@@ -1141,7 +1146,7 @@ function clearEl(node) { while (node.firstChild) node.removeChild(node.firstChil
 
 // Re-run a payroll that has already been run, so the checks come out right after something was corrected (a job marked paid late, attendance fixed, a tip added).
 // It always shows what would change FIRST, and nothing happens until the owner confirms. After the pay date it also asks for confirmation that the checks have not gone out.
-function renderRerunSection(run, again) {
+function renderRerunSection(run, again, opts) {
   const wrap = el("div", { "data-part": "rerun" });
   const panel = el("div");
   const note = (text, extra) => el("div", { class: "muted", style: `font-size:12px;margin:6px 0;${extra || ""}`, text });
@@ -1176,7 +1181,7 @@ function renderRerunSection(run, again) {
     box.appendChild(el("button", { class: "ghost", style: "margin-top:6px", text: "Cancel", onclick: () => clearEl(panel) }));
     panel.appendChild(box);
   } }));
-  wrap.appendChild(note("Use this when this period's checks have not gone out yet. If they already have, use \"Add the underpayments to the next check\" instead. The earlier version is kept."));
+  wrap.appendChild(note(opts && opts.noChanges ? "Nothing has changed since this was run, but you can re-run it any time, for example after correcting attendance. It shows exactly what would change before it saves anything, and the earlier version is kept." : "Use this when this period's checks have not gone out yet. If they already have, use \"Add the underpayments to the next check\" instead. The earlier version is kept."));
   wrap.appendChild(panel);
   return wrap;
 }
@@ -1187,7 +1192,7 @@ async function renderOwnerPayroll(content) {
   // the period that is ready to run, or on the one we're in. Sales reps have their own section below and are not part of this.
   let teamSchedule;
   try { const sc = await api("/api/owner/pay-schedule"); teamSchedule = { periods: sc.periods, today: sc.today, mode: "runnable", currentIndex: sc.runnableIndex >= 0 ? sc.runnableIndex : sc.containingIndex }; } catch (e) { teamSchedule = undefined; }
-  const picker = renderPeriodPicker((params) => load(params), "payperiod", undefined, teamSchedule);
+  const picker = renderPeriodPicker((params) => load(params), "payperiod", undefined, teamSchedule, takePendingRange());
   const payrollEmployees = await api("/api/employees");
   const payrollManagers = await api("/api/managers");
   const payrollSalesReps = await api("/api/salesreps");
@@ -1473,6 +1478,8 @@ async function renderOwnerPayroll(content) {
         if (d.over.length) box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:4px", text: "Nothing is deducted automatically. If someone was overpaid, sort it out with them first (many states need written permission to deduct); you can add an adjustment on the next check once you've agreed." }));
         box.appendChild(renderRerunSection(run, again));
         card.appendChild(box);
+      } else if (!run.skipped) {
+        card.appendChild(el("div", { style: "margin-top:12px", "data-part": "rerun-standalone" }, [renderRerunSection(run, again, { noChanges: true })]));      // no change detected, but the option must never disappear
       }
       if (st.pending.length > 0) card.appendChild(note(`${payPluralJs(st.pending.length, "adjustment")} waiting for the next check: ${st.pending.map((a) => `${a.personName} ${moneySigned(a.amount)}`).join(", ")}.`, "color:var(--cyan);"));
       if (nextBtn) card.appendChild(nextBtn);
@@ -1496,6 +1503,7 @@ async function renderOwnerPayroll(content) {
       warnings.forEach((w) => card.appendChild(el("div", { style: "margin:8px 0" }, [
         el("div", { style: "color:var(--amber);font-size:12.5px;font-weight:600", text: `⚠ ${w.text}` }),
         ...w.items.map((i) => el("div", { class: "muted", style: "font-size:11.5px;margin-left:16px", text: i })),
+        w.code === "corrections" && w.periodId && picker.team ? el("button", { class: "ghost", "data-act": "goto-correction", style: "margin:4px 0 0 16px;font-size:12px", text: `Go to ${ymdShort(w.periodStart)} \u2013 ${ymdShort(w.periodEnd)} to re-run it`, onclick: () => picker.team.goTo(w.periodId) }) : null,
       ])));
       const runBtn = el("button", { class: "primary", style: "margin-top:8px", text: warnings.length ? `Run payroll anyway: ${rangeText}` : `Run payroll: ${rangeText}`, onclick: async () => {
         if (warnings.length && !confirm(`${payPluralJs(warnings.length, "thing")} still to check:\n\n${warnings.map((w) => `• ${w.text}`).join("\n")}\n\nRun payroll anyway?`)) return;
@@ -1919,7 +1927,7 @@ function renderYearGrid(sales, yearStr) {
 // Shared entry-logging form - used by both the manager's Cash Log and the owner's Cash &
 // Expenses page, so logging works identically for everyone regardless of role.
 function renderCashEntryForm(onSaved) {
-  const CATEGORIES = ["Customer Payment", "Supplies", "Tools", "Misc", "Other"];
+  const CATEGORIES = ["Customer Payment", "Film & materials", "Shop supplies", "Tools & equipment", "Rent & utilities", "Payroll & labor", "Marketing", "Vehicle & fuel", "Software & fees", "Insurance & licenses", "Refunds", "Owner draw", "Meals & misc", "Other"];
   let selectedType = "cashOut";
   const amountInput = el("input", { type: "number", placeholder: "0.00", style: "max-width:140px" });
   const categorySelect = el("select", {}, CATEGORIES.map((c) => el("option", { value: c, text: c })));
@@ -2202,98 +2210,135 @@ function renderCashAudit(a, reload) {
 }
 
 // Owner Cash & Expenses — full visibility across every manager, real totals, editable.
+// ---------- Cash & Expenses: grouped by what it is, not one long list ----------
+const CASH_CHOICES = ["Film & materials", "Shop supplies", "Tools & equipment", "Rent & utilities", "Payroll & labor", "Marketing", "Vehicle & fuel", "Software & fees", "Insurance & licenses", "Refunds", "Owner draw", "Meals & misc", "Other"];
+const cashDay = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+const cashDayLabel = (ymd) => new Date(ymd + "T12:00:00Z").toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+const cashTime = (iso) => new Date(iso).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" });
+const CASH_TYPE = { cashIn: ["Cash in", "var(--green)"], cashOut: ["Cash out", "var(--red)"], cardExpense: ["Card", "var(--red)"], bankDeposit: ["Deposit", "var(--cyan)"] };
 async function renderOwnerCash(content) {
-  const body = el("div");
+  let view = "spending", showWhy = false, showForm = false, data = null, firstDraw = true;
+  const open = new Set(), body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "month");
+  const signed = (n) => (n < 0 ? "\u2212" + money(-n) : money(n));
   async function load(params) {
     const p = params || picker.getParams();
-    const qs = new URLSearchParams(p).toString();
-    const d = await api(`/api/owner/cash-entries?${qs}`);
+    data = await api(`/api/owner/cash-entries?${new URLSearchParams(p).toString()}`);
+    data.audit = await api("/api/owner/cash-audit");
+    draw();
+  }
+  const reload = () => load();
+  const run = (fn) => async () => { try { await fn(); await reload(); } catch (e) { if (e && e.message) alert(e.message); } };
+  const chip = (text, color) => el("span", { class: "rchip", style: color ? `color:${color};border-color:${color}` : "", text });
+  function categorySelect(e) {
+    const sel = el("select", { "aria-label": "Category", "data-field": "category", style: "max-width:175px;min-height:34px;padding:4px 8px;font-size:12.5px" }, CASH_CHOICES.map((c) => el("option", { value: c, text: c })));
+    sel.value = CASH_CHOICES.includes(e.categoryLabel) ? e.categoryLabel : "Other";
+    sel.addEventListener("change", run(() => api(`/api/manager/cash-entries/${e.id}`, { method: "PATCH", body: JSON.stringify({ category: sel.value }) })));
+    return sel;
+  }
+  function entryRow(e, o) {
+    o = o || {};
+    const [tl, tc] = CASH_TYPE[e.type] || ["", ""];
+    const controls = [];
+    if ((e.type === "cashOut" || e.type === "cardExpense") && !e.autoFromJob) controls.push(categorySelect(e));
+    if (e.type === "bankDeposit") controls.push(el("button", { class: "ghost", "data-act": "notcash", style: `font-size:12px;padding:5px 11px;min-height:34px;${e.notCash ? "color:var(--warn);border-color:var(--warn)" : ""}`, text: e.notCash ? "Not drawer cash \u2713" : "Mark as not drawer cash",
+      onclick: run(() => api(`/api/manager/cash-entries/${e.id}`, { method: "PATCH", body: JSON.stringify({ notCash: !e.notCash }) })) }));
+    if (e.suggestion && o.suggest) controls.push(el("button", { class: "primary", "data-act": "accept", title: `Matched "${e.suggestion.word}"`, style: "font-size:12.5px;padding:5px 12px;min-height:34px", text: `Use ${e.suggestion.category}`, onclick: run(() => api(`/api/manager/cash-entries/${e.id}`, { method: "PATCH", body: JSON.stringify({ category: e.suggestion.category }) })) }));
+    if (e.receiptPhoto) controls.push(el("button", { class: "ghost", style: "font-size:11.5px;padding:4px 9px;min-height:30px", text: "Receipt", onclick: () => showImageModal(`/api/photos/${e.receiptPhoto}`, "Receipt") }));
+    controls.push(el("button", { class: "icon-danger", style: "font-size:11.5px;padding:4px 9px", text: "Delete", onclick: run(async () => { if (!confirm(`Delete this ${money(e.amount)} entry (${e.note || tl})?`)) throw new Error(""); await api(`/api/manager/cash-entries/${e.id}`, { method: "DELETE" }); }) }));
+    return el("div", { class: "crow", "data-part": "entry", "data-type": e.type }, [
+      el("div", { style: "min-width:0;flex:1" }, [
+        el("div", { style: "font-size:14px;line-height:1.3;overflow-wrap:anywhere", text: e.note || "(no description)" }),
+        el("div", { class: "muted", style: "font-size:11.5px", text: `${o.noDate ? "" : cashDayLabel(cashDay(e.timestamp)) + " \u00B7 "}${cashTime(e.timestamp)} \u00B7 ${e.enteredByName || ""}${e.autoFromJob ? " \u00B7 from Job Status" : ""}${e.isOnline ? " \u00B7 online" : ""}${o.showType ? " \u00B7 " + tl : ""}` }),
+        el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px" }, controls),
+      ]),
+      el("div", { class: "mono", style: `font-size:19px;font-weight:700;white-space:nowrap;color:${e.type === "bankDeposit" && e.notCash ? "var(--muted)" : e.type === "cashIn" ? "var(--green)" : "var(--text)"}`, text: money(e.amount) }),
+    ]);
+  }
+  function group(id, title, sub, total, rows, opts) {
+    opts = opts || {};
+    const key = view + ":" + id, isOpen = open.has(key);
+    const head = el("button", { class: "cgroup-head", "data-part": "group-head", "aria-expanded": String(isOpen), onclick: () => { isOpen ? open.delete(key) : open.add(key); draw(); } }, [
+      el("span", { class: "cg-caret", text: isOpen ? "\u25BE" : "\u25B8" }),
+      el("span", { class: "cg-main" }, [el("span", { class: "cg-title", text: title }), el("span", { class: "cg-sub", text: sub }), opts.flag ? chip(opts.flag, "var(--warn)") : null]),
+      el("span", { class: "mono cg-total", text: money(total) }),
+    ]);
+    const kids = [head];
+    if (opts.pct !== undefined) kids.push(el("div", { class: "cbar" }, [el("div", { style: `width:${Math.max(2, Math.min(100, opts.pct))}%` })]));
+    if (isOpen) kids.push(el("div", { class: "cgroup-body" }, rows()));
+    return el("div", { class: "cgroup", "data-part": "group", "data-id": id }, kids);
+  }
+  function draw() {
     clearHeightLocked(body);
-    const signed = (n) => (n < 0 ? "−" + money(-n) : money(n));
-    body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text: "Cash in, Cash out, Card expenses and Bank deposits follow the period you pick above. Net cash on hand is everything, all time." }));
-    body.appendChild(el("div", { class: "metric-grid" }, [
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash in (from customers)" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.totalCashIn) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash out" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCashOut) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Card expenses" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(d.totalCardExpense) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Bank deposits" }), el("div", { class: "metric-value mono", style: "color:var(--amber)", text: money(d.totalBankDeposits) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Net cash on hand (all time)" }), el("div", { class: "metric-value mono", style: `color:${d.netCash >= 0 ? "var(--green)" : "var(--red)"}`, text: signed(d.netCash) })]),
+    const d = data, entries = d.entries;
+    const spent = d.totalCashOut + d.totalCardExpense;
+    if (firstDraw) { firstDraw = false; open.add("spending:__needs"); }
+    body.appendChild(el("div", { class: "metric-grid", "data-part": "tiles" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash from customers" }), el("div", { class: "metric-value mono", style: "color:var(--green)", text: money(d.totalCashIn) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Spent (cash + card)" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: money(spent) }), el("div", { class: "muted", style: "font-size:11.5px", text: `Cash ${money(d.totalCashOut)} \u00B7 Card ${money(d.totalCardExpense)}` })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Deposited to the bank" }), el("div", { class: "metric-value mono", style: "color:var(--cyan)", text: money(d.totalBankDeposits) }), d.totalNotCashDeposits ? el("div", { class: "muted", style: "font-size:11.5px", text: `${money(d.totalNotCashDeposits)} not drawer cash` }) : null]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cash in the drawer (all time)" }), el("div", { class: "metric-value mono", "data-part": "net", style: `color:${d.netCash >= 0 ? "var(--green)" : "var(--red)"}`, text: signed(d.netCash) })]),
     ]));
-    // Show the math behind "cash on hand", so it is never a mystery number.
-    const line = (label, value, strong) => el("div", { class: "row", style: `font-size:13px;margin-bottom:4px;${strong ? "font-weight:600;border-top:0.5px solid var(--border);padding-top:6px;margin-top:6px" : ""}` }, [el("span", { text: label }), el("span", { class: "mono", text: value })]);
-    const openingInput = el("input", { type: "number", step: "0.01", min: "0", placeholder: "0.00", value: d.openingBalance ? String(d.openingBalance) : "", style: "max-width:140px" });
-    const openingNote = el("div", { style: "font-size:12px;margin-top:4px" });
-    const saveOpening = el("button", { class: "ghost", style: "font-size:12px", text: "Save opening balance", onclick: async () => {
-      openingNote.textContent = ""; openingNote.style.color = "";
-      try { await api("/api/owner/cash-opening-balance", { method: "POST", body: JSON.stringify({ amount: openingInput.value === "" ? 0 : Number(openingInput.value) }) }); load(); }
-      catch (err) { openingNote.style.color = "var(--red)"; openingNote.textContent = err.message || "Couldn't save that."; }
-    } });
-    const outsideCount = (d.outflowsOutsidePeriod || []).length;
-    const outsideList = el("div", { style: `margin-top:8px;display:${d.netCash < 0 ? "block" : "none"}` }, (d.outflowsOutsidePeriod || []).map((e) => el("div", { class: "row", style: "font-size:12px;padding:4px 0;border-top:0.5px solid var(--border)" }, [
-      el("span", { text: `${formatDateTime(e.timestamp)} · ${e.type === "bankDeposit" ? "Bank deposit" : "Cash out"} · ${e.category}${e.enteredByName ? " · " + e.enteredByName : ""}${e.note ? " · " + e.note : ""}` }),
-      el("span", { class: "mono", text: money(e.amount) }),
-    ])));
-    const outsideToggle = outsideCount ? el("button", { class: "ghost", style: "font-size:12px;margin-top:8px", text: `${d.netCash < 0 ? "▾" : "▸"} Cash out and deposits from OTHER periods (${outsideCount})`, onclick: () => {
-      const open = outsideList.style.display !== "none";
-      outsideList.style.display = open ? "none" : "block";
-      outsideToggle.textContent = `${open ? "▸" : "▾"} Cash out and deposits from OTHER periods (${outsideCount})`;
-    } }) : null;
-    if (d.netCash < 0) {
-      body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [
-        el("div", { style: "font-weight:600;color:var(--red);margin-bottom:4px", text: `Cash out and deposits add up to ${money(-d.netCash)} MORE than the cash recorded as coming in` }),
-        el("div", { class: "muted", style: "font-size:12.5px", text: "That usually means a bank deposit or expense was logged for cash that came in before cash was being tracked here. Set the opening balance below to what was in the drawer when tracking began, or find and fix the entry that doesn't belong." }),
+    if (d.netCash < 0) body.appendChild(el("div", { class: "cwarn", "data-part": "negative" }, [el("span", { text: `The drawer shows ${signed(d.netCash)}: more has been deposited or paid out than the cash that came in.` }), el("button", { class: "ghost", "data-act": "why", style: "font-size:12.5px;padding:5px 12px;min-height:34px", text: showWhy ? "Hide" : "Why?", onclick: () => { showWhy = !showWhy; draw(); } })]));
+    else body.appendChild(el("div", { style: "margin:-4px 0 10px" }, [el("button", { class: "ghost", "data-act": "why", style: "font-size:12px;padding:4px 11px;min-height:32px", text: showWhy ? "Hide how it adds up" : "How cash in the drawer adds up", onclick: () => { showWhy = !showWhy; draw(); } })]));
+    if (showWhy) body.appendChild(whyCard());
+    body.appendChild(el("div", { class: "seg2", role: "tablist", "aria-label": "View" }, [["spending", "Spending"], ["deposits", "Deposits"], ["cashin", "Cash in"], ["all", "Everything"]].map(([k, l]) => el("button", { class: "tab-btn" + (view === k ? " active" : ""), role: "tab", "data-view": k, "aria-selected": String(view === k), onclick: () => { view = k; draw(); }, text: l }))));
+    if (d.entriesTruncated) body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text: "This period has more than 2,000 entries; showing the newest 2,000." }));
+    if (!entries.length) body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "Nothing logged in this period." }));
+    else if (view === "spending") drawSpending(entries, spent); else if (view === "deposits") drawDeposits(entries); else if (view === "cashin") drawByDay(entries.filter((e) => e.type === "cashIn"), "Cash from customers, by day", false); else drawByDay(entries, "Everything, by day", true);
+  }
+  function whyCard() {
+    const d = data, a = d.allTime, ratio = a.cashIn > 0 ? ((a.bankDeposits + a.cashOut) / a.cashIn) : 0;
+    const line = (l, v, strong) => el("div", { class: "row", style: `font-size:13px;margin-bottom:4px;${strong ? "font-weight:600;border-top:0.5px solid var(--border);padding-top:6px;margin-top:6px" : ""}` }, [el("span", { text: l }), el("span", { class: "mono", text: v })]);
+    const openingInput = el("input", { type: "number", step: "0.01", min: "0", placeholder: "0.00", value: d.openingBalance ? String(d.openingBalance) : "", style: "max-width:140px" }), openingNote = el("div", { style: "font-size:12px;margin-top:4px" });
+    const kids = [
+      el("div", { style: "font-weight:600;margin-bottom:6px", text: "How cash in the drawer adds up (all time, whatever period is on screen)" }),
+      line("Opening balance (in the drawer before tracking started)", money(d.openingBalance)), line("+ All cash collected from customers", money(a.cashIn)), line("\u2212 All cash paid out", money(a.cashOut)), line("\u2212 All deposits counted as drawer cash", money(a.bankDeposits)), line("= Cash in the drawer", signed(d.netCash), true),
+      a.notCashDeposits ? el("div", { class: "muted", style: "font-size:12.5px;margin-top:6px", text: `${money(a.notCashDeposits)} of deposits are marked "not drawer cash" and are left out.` }) : null,
+    ];
+    if (d.netCash < 0) kids.push(el("div", { class: "cexplain", "data-part": "explain", text: `Cash paid out and deposited (${money(a.cashOut + a.bankDeposits)}) is ${ratio.toFixed(1)} times the cash collected from customers (${money(a.cashIn)}). A drawer can't hand over more than it took in, so some of those deposits were probably money that never went through the drawer (card payouts, Zelle, checks), or were entered wrong. In the Deposits tab, mark those as "Not drawer cash" and this number fixes itself.` }));
+    kids.push(el("div", { style: "display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap" }, [el("span", { class: "muted", style: "font-size:12px", text: "Opening balance $" }), openingInput, el("button", { class: "ghost", style: "font-size:12px", text: "Save opening balance", onclick: async () => { openingNote.textContent = ""; try { await api("/api/owner/cash-opening-balance", { method: "POST", body: JSON.stringify({ amount: openingInput.value === "" ? 0 : Number(openingInput.value) }) }); reload(); } catch (err) { openingNote.style.color = "var(--red)"; openingNote.textContent = err.message || "Couldn't save that."; } } })]), openingNote);
+    const au = d.audit;
+    if (au && au.deposits.overdrawnCount + au.duplicates.length + au.wrongDirection.length > 0) kids.push(renderCashAudit(au, reload));
+    return el("div", { class: "card", "data-part": "why" }, kids);
+  }
+  function drawSpending(entries, spent) {
+    const exp = entries.filter((e) => e.type === "cashOut" || e.type === "cardExpense");
+    if (!exp.length) { body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "No spending logged in this period." })); return; }
+    const needs = exp.filter((e) => e.categoryLabel === "Other"), withSug = needs.filter((e) => e.suggestion);
+    if (needs.length) {
+      const total = needs.reduce((t, e) => t + e.amount, 0);
+      const acceptAll = withSug.length ? el("button", { class: "primary", "data-act": "accept-all", style: "margin:2px 0 8px;font-size:13.5px;padding:8px 16px;min-height:40px", text: `Accept all ${withSug.length} suggestion${withSug.length === 1 ? "" : "s"}`, onclick: run(async () => { if (!confirm(`Move ${withSug.length} entries to the categories suggested for them? You can still change any of them after.`)) throw new Error(""); await api("/api/owner/cash-entries/recategorize", { method: "POST", body: JSON.stringify({ items: withSug.map((e) => ({ id: e.id, category: e.suggestion.category })) }) }); }) }) : null;
+      body.appendChild(el("div", { class: "cneeds", "data-part": "needs-sorting" }, [
+        group("__needs", `Needs sorting (${needs.length})`, `${money(total)} filed as Other${withSug.length ? " \u00B7 " + withSug.length + " have a suggestion" : ""}`, total, () => [acceptAll, ...needs.map((e) => entryRow(e, { suggest: true, showType: true }))].filter(Boolean)),
       ]));
     }
-    body.appendChild(el("div", { class: "card" }, [
-      el("div", { class: "muted", style: "margin-bottom:8px", text: "HOW CASH ON HAND ADDS UP (all time, not just this period)" }),
-      line("Opening balance (in the drawer before tracking started)", money(d.openingBalance)),
-      line("+ All cash in from customers", money(d.allTime.cashIn)),
-      line("− All cash out", money(d.allTime.cashOut)),
-      line("− All bank deposits", money(d.allTime.bankDeposits)),
-      line("= Cash on hand", signed(d.netCash), true),
-      el("div", { style: "display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap" }, [el("span", { class: "muted", style: "font-size:12px", text: "Opening balance $" }), openingInput, saveOpening]),
-      openingNote,
-      outsideToggle,
-      outsideCount ? outsideList : null,
-    ]));
-    // The entries that are actually causing it, with one-tap fixes.
-    const audit = await api("/api/owner/cash-audit");
-    if (audit.deposits.overdrawnCount + audit.duplicates.length + audit.wrongDirection.length > 0) body.appendChild(renderCashAudit(audit, load));
-    if (d.byCategory.length) {
-      body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "muted", style: "margin-bottom:8px", text: "BY CATEGORY" }),
-        ...d.byCategory.map((c) => el("div", { class: "row", style: "font-size:13px;margin-bottom:4px" }, [
-          el("span", { text: c.category }), el("span", { class: "mono", text: money(c.total) }),
-        ])),
-      ]));
-    }
-    body.appendChild(el("div", { class: "muted", style: "margin:14px 0 8px", text: "ALL ENTRIES" }));
-    if (d.entries.length === 0) body.appendChild(el("div", { class: "muted", text: "Nothing logged in this period." }));
-    d.entries.forEach((e) => {
-      const typeLabel = e.type === "cashIn" ? "Cash in" : e.type === "cashOut" ? "Cash out" : e.type === "bankDeposit" ? "Bank Deposit" : "Card expense";
-      const typeColor = e.type === "cashIn" ? "var(--green)" : "var(--red)";
-      body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "row" }, [
-          el("div", {}, [
-            el("div", { style: "font-weight:500", text: `${e.category}${e.isOnline ? " · Online" : ""}` }),
-            el("div", { class: "muted", style: "font-size:12.5px", text: (e.note || "(no description)") + (e.autoFromJob ? " · from Job Status" : "") }),
-            el("div", { class: "muted", style: "font-size:11px", text: `${e.enteredByName} · ${formatDateTime(e.timestamp)}` }),
-          ]),
-          el("div", { style: "text-align:right" }, [
-            el("div", { style: `color:${typeColor};font-size:12px;font-weight:600`, text: typeLabel }),
-            el("div", { class: "mono", style: "font-weight:600", text: money(e.amount) }),
-          ]),
-        ]),
-        el("div", { style: "display:flex;gap:8px;margin-top:6px;justify-content:flex-end" }, [
-          e.receiptPhoto ? el("button", { class: "ghost", style: "font-size:10px;padding:3px 7px", onclick: () => showImageModal(`/api/photos/${e.receiptPhoto}`, "Receipt"), text: "View receipt" }) : null,
-          el("button", { class: "icon-danger", style: "font-size:10px;padding:3px 7px", onclick: async () => { await api(`/api/manager/cash-entries/${e.id}`, { method: "DELETE" }); load(); }, text: "Delete" }),
-        ]),
-      ]));
+    const cats = {};
+    exp.filter((e) => e.categoryLabel !== "Other").forEach((e) => { (cats[e.categoryLabel] = cats[e.categoryLabel] || []).push(e); });
+    Object.entries(cats).map(([c, list]) => [c, list, list.reduce((t, e) => t + e.amount, 0)]).sort((a, b) => b[2] - a[2]).forEach(([c, list, total]) =>
+      body.appendChild(group(c, c, `${list.length} entr${list.length === 1 ? "y" : "ies"} \u00B7 ${Math.round((total / spent) * 100)}%`, total, () => list.map((e) => entryRow(e, { showType: true })), { pct: (total / spent) * 100 })));
+  }
+  function drawDeposits(entries) {
+    const dep = entries.filter((e) => e.type === "bankDeposit");
+    if (!dep.length) { body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "No bank deposits in this period." })); return; }
+    const counted = dep.filter((e) => !e.notCash).reduce((t, e) => t + e.amount, 0), not = dep.filter((e) => e.notCash).reduce((t, e) => t + e.amount, 0);
+    body.appendChild(el("div", { class: "card", "data-part": "deposit-help" }, [el("div", { style: "font-weight:500", text: `${dep.length} deposit${dep.length === 1 ? "" : "s"} \u00B7 ${money(counted)} counted as drawer cash${not ? " \u00B7 " + money(not) + " not" : ""}` }), el("div", { class: "muted", style: "font-size:12.5px;margin-top:4px", text: "Only cash that was in the drawer should come out of it. Card payouts, Zelle and checks go straight to the bank, so mark those \"Not drawer cash\". A day is flagged when more was deposited than cash was collected that day." })]));
+    const cashByDay = {}; entries.filter((e) => e.type === "cashIn").forEach((e) => { const k = cashDay(e.timestamp); cashByDay[k] = (cashByDay[k] || 0) + e.amount; });
+    const days = {}; dep.forEach((e) => { (days[cashDay(e.timestamp)] = days[cashDay(e.timestamp)] || []).push(e); });
+    Object.keys(days).sort().reverse().forEach((k) => {
+      const list = days[k], total = list.reduce((t, e) => t + e.amount, 0), drawer = list.filter((e) => !e.notCash).reduce((t, e) => t + e.amount, 0), cash = cashByDay[k] || 0;
+      body.appendChild(group(k, cashDayLabel(k), `${list.length} deposit${list.length === 1 ? "" : "s"} \u00B7 ${money(cash)} cash collected`, total, () => list.map((e) => entryRow(e, { noDate: true })), { flag: drawer > cash + 0.005 ? "More than the cash collected" : null }));
     });
   }
-  content.appendChild(renderCashEntryForm(load));
-  content.appendChild(picker.el);
-  content.appendChild(body);
+  function drawByDay(list, title, showType) {
+    if (!list.length) { body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "Nothing in this period." })); return; }
+    const days = {}; list.forEach((e) => { (days[cashDay(e.timestamp)] = days[cashDay(e.timestamp)] || []).push(e); });
+    Object.keys(days).sort().reverse().forEach((k) => { const l = days[k]; body.appendChild(group(k, cashDayLabel(k), `${l.length} entr${l.length === 1 ? "y" : "ies"}`, l.reduce((t, e) => t + e.amount, 0), () => l.map((e) => entryRow(e, { noDate: true, showType })))); });
+  }
+  const formWrap = el("div", { style: "display:none" }, [renderCashEntryForm(reload)]);
+  const addBtn = el("button", { class: "primary", "data-act": "add-entry", text: "+ Add an entry", onclick: () => { showForm = !showForm; formWrap.style.display = showForm ? "block" : "none"; addBtn.textContent = showForm ? "Close" : "+ Add an entry"; } });
+  content.appendChild(el("div", { class: "row", style: "margin-bottom:10px" }, [el("div", { class: "muted", style: "font-size:13px", text: "Sort what was spent, and see where the cash went." }), addBtn]));
+  content.appendChild(formWrap); content.appendChild(picker.el); content.appendChild(body);
   await load();
 }
 
