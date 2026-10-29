@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-29-ghlauto";
+const UI_BUILD = "2026-10-30-va";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -590,7 +590,7 @@ async function renderStatistics(content) {
 const TAB_ICONS = {
   "owner-summary": "📊", "owner-stats": "📈", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
   "owner-serviced": "✅", "owner-audit": "🕐", "owner-edit-history": "📝",
-  "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
+  "owner-redos": "\u{1F501}", "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
   "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
   "manager-performance": "📈", "manager-shop": "🏪", "sales-schedule": "📋", "sales-fullschedule": "🗓",
   "sales-performance": "📈", "schedule": "🗓", "performance": "📈",
@@ -618,10 +618,10 @@ function tabIcon(key) {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
-    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
+    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
     primaryKeys = ["manager-jobs", "owner-attendance", "owner-search", "manager-performance"];
   } else if (session.role === "sales") {
     allTabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
@@ -672,9 +672,9 @@ function closeMoreSheet() {
 // The More menu: every tab that does not fit in the bottom bar, sorted into labeled groups and laid out as two-column tiles with icons, so it reads at a glance and
 // fits on a phone without a long scroll. A tab that is not listed in a group below still shows (under "More"), so a new tab can never go missing.
 const MORE_GROUPS = [
-  ["Money", ["owner-cash", "manager-cash", "owner-unpaid", "owner-stats"]],
+  ["Money", ["owner-cash", "manager-cash", "owner-unpaid", "owner-stats", "owner-deadbookings"]],
   ["Jobs", ["owner-serviced", "owner-arrived", "owner-search", "owner-cleanup"]],
-  ["Records", ["owner-audit", "owner-edit-history", "owner-attendance", "manager-shop"]],
+  ["Records", ["owner-audit", "owner-edit-history", "owner-attendance", "manager-shop", "owner-redos"]],
   ["People", ["owner-team", "owner-managers", "owner-salesreps"]],
   ["Tools", ["owner-test"]],
 ];
@@ -686,6 +686,8 @@ const MORE_ICONS = {
   "owner-serviced": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>`,
   "owner-arrived": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>`,
   "owner-search": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>`,
+  "owner-redos": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>`,
+  "owner-deadbookings": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M17 8l5 5M22 8l-5 5"/></svg>`,
   "owner-cleanup": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16M7 20l2-8h6l2 8M10 12V5a2 2 0 014 0v7"/></svg>`,
   "owner-audit": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>`,
   "owner-edit-history": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/></svg>`,
@@ -1060,6 +1062,8 @@ async function renderManagerTabContent(content) {
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);
   if (currentTab === "owner-cleanup") return renderCleanup(content);
+  if (currentTab === "owner-redos") return renderRedos(content);
+  if (currentTab === "owner-deadbookings") return renderDeadBookings(content);
   if (currentTab === "owner-team") return renderOwnerTeam(content);
   if (currentTab === "manager-cash") return renderCashLog(content);
   if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
@@ -1127,6 +1131,8 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-salesreps") return renderOwnerSalesReps(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);
   if (currentTab === "owner-cleanup") return renderCleanup(content);
+  if (currentTab === "owner-redos") return renderRedos(content);
+  if (currentTab === "owner-deadbookings") return renderDeadBookings(content);
   if (currentTab === "manager-jobs") return renderManagerJobs(content);
   if (currentTab === "owner-search") return renderSearch(content);
   if (currentTab === "owner-test") return renderTestTool(content);
@@ -3303,6 +3309,151 @@ async function renderAttendance(content) {
 }
 
 // ---------------- Cleanup — find and fix every job missing a price or a sales rep ----------------
+// ---------- Redos: who gets the most, and the redo section on each appointment ----------
+const redoShort = (r) => (r || "").replace(/ \(.*\)$/, "");
+function renderRedoSection(job, onDone) {
+  const wrap = el("div", { "data-part": "redo", style: "margin-top:12px;border-top:0.5px solid var(--border);padding-top:10px" });
+  const box = el("div"); wrap.appendChild(box);
+  const run = (fn) => async () => { try { await fn(); onDone(); } catch (e) { if (e && e.message) alert(e.message); } };
+  function draw(d) {
+    box.innerHTML = "";
+    box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "REDOS" }));
+    if (d.redoOf) {
+      box.appendChild(el("div", { style: "font-size:13px", "data-part": "redo-of", text: `This is a redo of: ${d.redoOf.car} (${d.redoOf.date}). Counted against ${d.redoOf.people || "nobody"}.` }));
+      box.appendChild(el("button", { class: "ghost", "data-act": "redo-unlink", style: "font-size:12px;margin-top:6px", text: "Not linked correctly? Unlink", onclick: run(() => api(`/api/manager/redos/${d.redoOf.eventId}`, { method: "DELETE" })) }));
+      return;
+    }
+    if (job.isRedo) {
+      box.appendChild(el("div", { style: "font-size:13px;color:var(--warn);margin-bottom:6px", text: "This redo isn't linked to the original job yet, so nobody is counted for it. Which job did it come from?" }));
+      d.candidates.forEach((c) => box.appendChild(el("button", { class: "ghost", "data-act": "redo-link", style: "display:block;font-size:12.5px;margin:0 0 6px;text-align:left", text: `${c.car} on ${c.date} (${c.people || "no tech"})`,
+        onclick: run(() => api(`/api/manager/jobs/${c.id}/redo`, { method: "POST", body: JSON.stringify({ reason: "Not set yet", redoSaleId: job.id }) })) })));
+      if (!d.candidates.length) box.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:6px", text: "No earlier finished job for this customer was found. Open the original job and use \"Car came back for a redo\" there." }));
+      box.appendChild(el("button", { class: "ghost", "data-act": "redo-dismiss", style: "font-size:12px", text: "No original job (don't track)", onclick: run(() => api("/api/manager/redos/dismiss", { method: "POST", body: JSON.stringify({ saleId: job.id }) })) }));
+      return;
+    }
+    d.events.forEach((e) => box.appendChild(el("div", { class: "row", "data-part": "redo-event", style: "align-items:flex-start;gap:8px;margin-bottom:6px" }, [
+      el("div", { style: "flex:1;min-width:0;font-size:13px" }, [el("div", { text: `${e.date} \u00B7 ${redoShort(e.reason)}${e.notFault ? " \u00B7 not the tech's fault" : ""}` }), el("div", { class: "muted", style: "font-size:11.5px", text: `${e.people.map((p) => p.name).join(", ") || "nobody"}${e.note ? " \u00B7 " + e.note : ""}` })]),
+      el("button", { class: "icon-danger", style: "font-size:11.5px;padding:4px 9px", text: "Remove", onclick: run(async () => { if (!confirm("Remove this redo?")) throw new Error(""); await api(`/api/manager/redos/${e.id}`, { method: "DELETE" }); }) })])));
+    const form = el("div", { style: "display:none;margin-top:6px", "data-part": "redo-form" });
+    const open = el("button", { class: "ghost", "data-act": "redo-open", text: "Car came back for a redo", onclick: () => { form.style.display = form.style.display === "none" ? "block" : "none"; if (form.style.display === "block" && !form.firstChild) buildForm(d, form); } });
+    box.appendChild(open); box.appendChild(form);
+  }
+  function buildForm(d, form) {
+    const reason = el("select", { "data-field": "redo-reason", style: "width:100%;margin-bottom:6px" }, [el("option", { value: "", text: "What went wrong?" }), ...d.reasons.filter((r) => r !== "Not set yet").map((r) => el("option", { value: r, text: r }))]);
+    const note = el("input", { type: "text", "data-field": "redo-note", placeholder: "Note (optional): which window, what you saw", style: "width:100%;margin-bottom:6px" });
+    const checks = d.roster.map((p) => { const cb = el("input", { type: "checkbox", checked: "true", "data-person": `${p.type}:${p.id}` }); cb.checked = true; return [cb, p]; });
+    const who = el("div", { style: "margin-bottom:6px" }, [el("div", { class: "muted", style: "font-size:11.5px", text: "WHO IS THIS COUNTED AGAINST?" }), ...checks.map(([cb, p]) => el("label", { style: "display:flex;gap:8px;align-items:center;font-size:13.5px;padding:3px 0" }, [cb, el("span", { text: p.name + (p.type === "manager" ? " (manager)" : "") })]))]);
+    const nf = el("input", { type: "checkbox", "data-field": "redo-notfault" });
+    const date = el("input", { type: "date", "data-field": "redo-date", value: new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }), style: "margin-bottom:6px" });
+    const msg = el("div", { style: "font-size:12px;min-height:14px;color:var(--red);margin-bottom:4px" });
+    async function save(confirmDuplicate) {
+      msg.textContent = "";
+      if (!reason.value) { msg.textContent = "Pick what went wrong."; return; }
+      try { await api(`/api/manager/jobs/${job.id}/redo`, { method: "POST", body: JSON.stringify({ reason: reason.value, note: note.value, notFault: nf.checked, date: date.value, confirmDuplicate, people: checks.filter(([cb]) => cb.checked).map(([, p]) => `${p.type}:${p.id}`) }) }); onDone(); }
+      catch (e) { if (e.data && e.data.needsConfirm && confirm(e.message)) return save(true); msg.textContent = e.message || "Couldn't save that."; }
+    }
+    form.appendChild(reason); form.appendChild(note); form.appendChild(who);
+    form.appendChild(el("label", { style: "display:flex;gap:8px;align-items:center;font-size:13.5px;padding:3px 0;margin-bottom:6px" }, [nf, el("span", { text: "Not the tech's fault (customer damage, etc.). Record it, but don't count it against anyone." })]));
+    form.appendChild(el("div", { class: "muted", style: "font-size:11.5px", text: "DATE IT CAME BACK" })); form.appendChild(date); form.appendChild(msg);
+    form.appendChild(el("button", { class: "primary", "data-act": "redo-save", text: "Save redo", onclick: () => save(false) }));
+  }
+  api(`/api/manager/jobs/${job.id}/redos`).then(draw, () => { box.textContent = ""; });
+  return wrap;
+}
+async function renderRedos(content) {
+  let data = null, view = "people"; const open = new Set(), body = el("div");
+  const picker = renderPeriodPicker((p) => load(p), "month");
+  async function load(params) { data = await api(`/api/manager/redos?${new URLSearchParams(params || picker.getParams()).toString()}`); draw(); }
+  const reload = () => load();
+  const run = (fn) => async () => { try { await fn(); await reload(); } catch (e) { if (e && e.message) alert(e.message); } };
+  const reasonSelect = (e) => { const sel = el("select", { "data-field": "event-reason", style: "max-width:230px;min-height:34px;padding:4px 8px;font-size:12.5px" }, data.reasonsList.map((r) => el("option", { value: r, text: r }))); sel.value = e.reason; sel.addEventListener("change", run(() => api(`/api/manager/redos/${e.id}`, { method: "PATCH", body: JSON.stringify({ reason: sel.value }) }))); return sel; };
+  function eventRow(e) {
+    return el("div", { class: "crow", "data-part": "redo-row" }, [el("div", { style: "min-width:0;flex:1" }, [
+      el("div", { style: "font-size:14px;overflow-wrap:anywhere", text: `${e.car}${e.customerName ? " \u00B7 " + e.customerName : ""}` }),
+      el("div", { class: "muted", style: "font-size:11.5px", text: `Came back ${e.date} \u00B7 done ${e.originalDate || "?"} \u00B7 ${e.people.map((p) => p.name).join(", ") || "nobody"}${e.note ? " \u00B7 " + e.note : ""}${e.auto ? " \u00B7 linked automatically" : ""}` }),
+      el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px" }, [reasonSelect(e),
+        el("button", { class: "ghost", "data-act": "toggle-fault", style: `font-size:12px;padding:5px 11px;min-height:34px;${e.notFault ? "color:var(--warn);border-color:var(--warn)" : ""}`, text: e.notFault ? "Not their fault \u2713" : "Counts against them", onclick: run(() => api(`/api/manager/redos/${e.id}`, { method: "PATCH", body: JSON.stringify({ notFault: !e.notFault }) })) }),
+        el("button", { class: "icon-danger", style: "font-size:11.5px;padding:4px 9px", text: "Delete", onclick: run(async () => { if (!confirm("Delete this redo?")) throw new Error(""); await api(`/api/manager/redos/${e.id}`, { method: "DELETE" }); }) })])])]);
+  }
+  function draw() {
+    clearHeightLocked(body); const d = data, t = d.totals;
+    body.appendChild(el("div", { class: "metric-grid", "data-part": "tiles" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Redos" }), el("div", { class: "metric-value mono", style: "color:" + (t.redos ? "var(--red)" : "var(--green)"), text: String(t.redos) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars worked" }), el("div", { class: "metric-value mono", text: String(t.cars) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Redo rate" }), el("div", { class: "metric-value mono", text: t.rate == null ? "\u2014" : t.rate + "%" })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Not the tech's fault" }), el("div", { class: "metric-value mono", text: String(t.notTechFault) })]),
+    ]));
+    if (d.needsLinking.length) body.appendChild(el("div", { class: "cneeds", "data-part": "needs-linking" }, [el("div", { class: "cgroup" }, [
+      el("div", { style: "padding:10px 14px;font-weight:500", text: `Needs linking (${d.needsLinking.length})` }),
+      el("div", { class: "muted", style: "padding:0 14px 6px;font-size:12.5px", text: "These redo appointments aren't tied to the original job yet, so nobody is counted. Pick the job it came from." }),
+      el("div", { class: "cgroup-body" }, d.needsLinking.map((n) => el("div", { class: "crow", "data-part": "link-row" }, [el("div", { style: "flex:1;min-width:0" }, [
+        el("div", { style: "font-size:14px;overflow-wrap:anywhere", text: `${n.car}${n.customerName ? " \u00B7 " + n.customerName : ""}` }), el("div", { class: "muted", style: "font-size:11.5px", text: `Redo booked for ${n.date}` }),
+        el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px" }, [...n.candidates.map((c) => el("button", { class: "ghost", "data-act": "pick-original", style: "font-size:12px;min-height:34px;padding:5px 11px", text: `${c.car.slice(0, 38)} \u00B7 ${c.date} \u00B7 ${c.people || "no tech"}`, onclick: run(() => api(`/api/manager/jobs/${c.id}/redo`, { method: "POST", body: JSON.stringify({ reason: "Not set yet", redoSaleId: n.saleId }) })) })),
+          el("button", { class: "ghost", "data-act": "dismiss-redo", style: "font-size:12px;min-height:34px;padding:5px 11px", text: "No original job", onclick: run(() => api("/api/manager/redos/dismiss", { method: "POST", body: JSON.stringify({ saleId: n.saleId }) })) })])])])))])]));
+    body.appendChild(el("div", { class: "seg2", role: "tablist" }, [["people", "Who gets the most"], ["recent", "Every redo"], ["reasons", "Why"]].map(([k, l]) => el("button", { class: "tab-btn" + (view === k ? " active" : ""), "data-view": k, role: "tab", onclick: () => { view = k; draw(); }, text: l }))));
+    if (view === "people") {
+      if (!d.people.length) body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "No cars or redos in this period." }));
+      d.people.forEach((p, i) => {
+        const key = "p:" + p.key, isOpen = open.has(key), mine = d.events.filter((e) => e.people.some((x) => `${x.type}:${x.id}` === p.key));
+        const top = Object.entries(p.reasons).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([r, c]) => `${redoShort(r)} ${c}`).join(" \u00B7 ");
+        body.appendChild(el("div", { class: "cgroup", "data-part": "person", "data-key": p.key }, [
+          el("button", { class: "cgroup-head", "data-part": "group-head", "aria-expanded": String(isOpen), onclick: () => { isOpen ? open.delete(key) : open.add(key); draw(); } }, [
+            el("span", { class: "cg-caret", text: isOpen ? "\u25BE" : "\u25B8" }),
+            el("span", { class: "cg-main" }, [el("span", { class: "cg-title", text: `${p.redos > 0 ? "#" + (i + 1) + "  " : ""}${p.name}${p.type === "manager" ? " (manager)" : ""}` }), el("span", { class: "cg-sub", text: `${p.cars} car${p.cars === 1 ? "" : "s"} worked${p.rate != null ? " \u00B7 " + p.rate + "% redo rate" : ""}${top ? " \u00B7 " + top : ""}` })]),
+            el("span", { class: "mono cg-total", style: "color:" + (p.redos ? "var(--red)" : "var(--green)"), text: String(p.redos) })]),
+          isOpen ? el("div", { class: "cgroup-body" }, mine.length ? mine.map(eventRow) : [el("div", { class: "muted", style: "padding:8px 0;font-size:13px", text: "No redos in this period." })]) : null]));
+      });
+    } else if (view === "recent") {
+      if (!d.events.length) body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "No redos in this period." }));
+      else body.appendChild(el("div", { class: "cgroup" }, [el("div", { class: "cgroup-body" }, d.events.map(eventRow))]));
+    } else {
+      if (!d.reasons.length) body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "No redos in this period." }));
+      const max = Math.max(1, ...d.reasons.map((r) => r.count));
+      d.reasons.forEach((r) => body.appendChild(el("div", { class: "cgroup", "data-part": "reason" }, [el("div", { class: "cgroup-head", style: "cursor:default" }, [el("span", { class: "cg-main" }, [el("span", { class: "cg-title", text: r.reason }), el("span", { class: "cg-sub", text: `${Math.round((r.count / Math.max(1, d.totals.redos)) * 100)}% of redos` })]), el("span", { class: "mono cg-total", text: String(r.count) })]), el("div", { class: "cbar" }, [el("div", { style: `width:${Math.max(3, (r.count / max) * 100)}%` })])])));
+    }
+  }
+  content.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", text: "A redo counts against the techs who worked the original car. Log one from the car's appointment: open the job and press \"Car came back for a redo\"." }));
+  content.appendChild(picker.el); content.appendChild(body);
+  await load();
+}
+
+// ---------- No-shows and cancellations ----------
+async function renderDeadBookings(content) {
+  let data = null; const open = new Set(), body = el("div");
+  const picker = renderPeriodPicker((p) => load(p), "month");
+  async function load(params) { data = await api(`/api/manager/dead-bookings?${new URLSearchParams(params || picker.getParams()).toString()}`); draw(); }
+  const day = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const dayLabel = (ymd) => new Date(ymd + "T12:00:00Z").toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+  const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" });
+  const list = (items, label) => el("div", { class: "card", "data-part": "dead-" + label.toLowerCase().replace(/\W+/g, "-"), style: "padding:12px 14px;margin-bottom:10px" }, [el("div", { style: "font-weight:500;margin-bottom:6px", text: label }), ...items.slice(0, 8).map((g) => el("div", { class: "row", style: "font-size:13px;padding:2px 0" }, [el("span", { text: g.name }), el("span", { class: "muted", text: `${g.noShow} no-show${g.noShow === 1 ? "" : "s"} \u00B7 ${g.cancelled} cancelled` })]))]);
+  function draw() {
+    clearHeightLocked(body); const t = data.totals;
+    body.appendChild(el("div", { class: "metric-grid", "data-part": "tiles" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "No-shows" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: String(t.noShow) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cancelled" }), el("div", { class: "metric-value mono", style: "color:var(--warn)", text: String(t.cancelled) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Booked" }), el("div", { class: "metric-value mono", text: String(t.booked) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Lost to no-show or cancel" }), el("div", { class: "metric-value mono", text: t.rate == null ? "\u2014" : t.rate + "%" })]),
+    ]));
+    if (data.byRep.length) body.appendChild(list(data.byRep, "By sales rep"));
+    if (data.byService.length) body.appendChild(list(data.byService, "By service"));
+    if (!data.rows.length) { body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "No no-shows or cancellations in this period." })); return; }
+    const days = {}; data.rows.forEach((r) => { (days[day(r.date)] = days[day(r.date)] || []).push(r); });
+    Object.keys(days).sort().reverse().forEach((k) => {
+      const l = days[k], ns = l.filter((r) => r.status === "no_show").length, cx = l.length - ns, isOpen = open.has(k);
+      body.appendChild(el("div", { class: "cgroup", "data-part": "group" }, [
+        el("button", { class: "cgroup-head", "data-part": "group-head", "aria-expanded": String(isOpen), onclick: () => { isOpen ? open.delete(k) : open.add(k); draw(); } }, [el("span", { class: "cg-caret", text: isOpen ? "\u25BE" : "\u25B8" }), el("span", { class: "cg-main" }, [el("span", { class: "cg-title", text: dayLabel(k) }), el("span", { class: "cg-sub", text: `${ns} no-show${ns === 1 ? "" : "s"} \u00B7 ${cx} cancelled` })]), el("span", { class: "mono cg-total", text: String(l.length) })]),
+        isOpen ? el("div", { class: "cgroup-body" }, l.map((r) => el("div", { class: "crow", "data-part": "dead-row", "data-status": r.status }, [el("div", { style: "min-width:0;flex:1" }, [
+          el("div", { style: "font-size:14px;overflow-wrap:anywhere", text: `${r.customerName || "(no name)"} \u00B7 ${r.car}` }),
+          el("div", { class: "muted", style: "font-size:11.5px", text: `${timeOf(r.date)} \u00B7 ${r.service}${r.salesRepName ? " \u00B7 " + r.salesRepName : ""}` }),
+          el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:5px" }, [el("span", { class: "rchip", style: `color:${r.status === "no_show" ? "var(--red)" : "var(--warn)"};border-color:${r.status === "no_show" ? "var(--red)" : "var(--warn)"}`, text: r.status === "no_show" ? "No-show" : "Cancelled" }), r.phone ? el("a", { href: "tel:" + r.phone, style: "font-size:12.5px", text: r.phone }) : null, r.rebooked ? el("span", { class: "rchip", style: "color:var(--green);border-color:var(--green)", "data-part": "rebooked", text: "Rebooked \u2713" }) : null])]),
+          el("div", { class: "mono", style: "font-size:17px;font-weight:700;white-space:nowrap", text: money(r.price) })]))) : null]));
+    });
+  }
+  content.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", text: "Every no-show and cancellation, by the appointment's date. Reschedule copies and free redos are left out." }));
+  content.appendChild(picker.el); content.appendChild(body);
+  await load();
+}
+
 async function renderCleanup(content) {
   // The live link to GHL: whether the tracker is mirroring GHL (edits and calendar moves), and a button to check right now.
   const ghlCard = el("div", { class: "card", "data-part": "ghl-card" });
@@ -4063,6 +4214,7 @@ async function renderManagerJobs(content) {
       sec("notes", part("notes")),
       sec("job", part("people")),
       sec("job", part("tips")),
+      sec("job", part("redo")),
       sec("notes", part("photos")),
       sec("edit", [editToggle, editGroup]),
     ]);
@@ -4598,6 +4750,7 @@ async function renderManagerJobs(content) {
         tagPart("tips", renderTipsSection(job, () => load())),
         tagPart("photos", renderPhotoGrid(job, () => load())),
         tagPart("notes", renderNotesSection(job, () => load())),
+        tagPart("redo", renderRedoSection(job, () => load())),
       ]);
       entries.push(buildEntry(job, builtCard, cardStyle));
     });
