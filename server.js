@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-29-ghlauto";
+const BUILD = "2026-10-30-va";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1416,6 +1416,7 @@ app.post("/api/webhook/ghl", (req, res) => {
   }
   const sale = upsertSaleFromGHL(db, data);
   const merged = autoMergeDuplicates(db, sale.contactId || data.contactId);   // the same booking under a new id is folded in straight away
+  autoLinkRedos(db);                                                            // a redo appointment is linked back to the car's earlier job when that is clear
   saveDB(db);
   scheduleContactSync(sale.contactId || data.contactId, 2000);               // a moment later, ask GHL what this customer really has now
   res.json({ ok: true, saleId: merged.remap[sale.id] || sale.id, matchedEmployees: sale.employeeIds.length });
@@ -2866,6 +2867,7 @@ function patchJobHandler(req, res) {
     const flag = !!req.body.isRedo;
     logAudit(db, req, sale, "Redo (no charge)", !!sale.isRedo, flag);
     sale.isRedo = flag; sale.redoAuto = false;
+    if (flag) setImmediate(() => { try { const d2 = loadDB(); if (autoLinkRedos(d2)) saveDB(d2); } catch (e) {} });          // link it to the car's earlier job straight away when that is clear
     if (flag) {
       sale.redoDismissed = false;
       applyRedoRules(db, sale, { force: true, silent: true });
@@ -4405,7 +4407,144 @@ function autoMergeDuplicates(db, onlyContactId) {
   });
   return { count, remap };
 }
-function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db); if (r.count) saveDB(db); return r.count; }
+function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), l = autoLinkRedos(db); if (r.count || l) saveDB(db); return r.count; }
+
+// ===== REDO TRACKING =====
+// A redo record belongs to the ORIGINAL job and to the people who worked it (the techs, and any manager who helped hands-on), because their work is what came back.
+// Sources: a button on the appointment ("Car came back for a redo"), or a redo appointment (the booking says "redo" / flagged by hand) linked back to the car's earlier job,
+// automatically when there is exactly one earlier completed job for that customer and car, otherwise by the owner picking it from "Needs linking".
+const REDO_REASONS = ["Contamination (dust or dirt in the film)", "Bubbles or water pockets", "Peeling or lifting edges", "Scratch or damage", "Gap or missed spot", "Wrong cut or size", "Film or product defect", "Coating streaks or high spots", "Customer not happy with the look", "Other", "Not set yet"];
+const redoList = (db) => (db.redos = db.redos || []);
+function redoRoster(db, sale) {
+  const out = [];
+  saleEmployeeIds(sale).forEach((id) => { const e = db.employees.find((x) => x.id === id); out.push({ type: "employee", id, name: e ? e.name : (sale.employeeNames || "Removed employee") }); });
+  (sale.managerHelperIds || []).forEach((id) => { const m = db.managers.find((x) => x.id === id); out.push({ type: "manager", id, name: m ? m.name : "Removed manager" }); });
+  return out;
+}
+function redoActorName(db, req) { if (req.auth && req.auth.role === "owner") return "Owner"; const m = (db.managers || []).find((x) => req.auth && x.id === req.auth.id); return m ? m.name : "Manager"; }
+function createRedoEvent(db, orig, body, actor) {
+  const roster = redoRoster(db, orig), wanted = Array.isArray(body.people) ? body.people.map(String) : null;
+  const people = wanted ? roster.filter((p) => wanted.includes(`${p.type}:${p.id}`)) : roster;
+  const ev = { id: newId(), saleId: orig.id, redoSaleId: body.redoSaleId || null, people, reason: body.reason, note: String(body.note || "").trim().slice(0, 500), notFault: !!body.notFault,
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || "")) ? body.date : trackerToday(), car: orig.car, customerName: orig.customerName || "", service: orig.baseService || "", originalDate: String(orig.date || "").slice(0, 10),
+    auto: !!body.auto, enteredBy: actor, createdAt: new Date().toISOString() };
+  redoList(db).push(ev); return ev;
+}
+// The earlier completed job(s) a redo appointment could belong to: the same customer, the same car, finished before the redo, within a year.
+function redoCandidates(db, redoSale) {
+  const who = jobPersonKey(redoSale), at = Date.parse(redoSale.date);
+  return db.sales.filter((o) => o.id !== redoSale.id && !o.isRedo && o.status === "arrived" && jobPersonKey(o) === who && who && Date.parse(o.date) < at && at - Date.parse(o.date) <= 366 * 86400000)
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+function autoLinkRedos(db) {
+  let n = 0;
+  db.sales.filter((s) => s.isRedo && !s.redoNoOriginal && s.status !== "cancelled" && !redoList(db).some((e) => e.redoSaleId === s.id)).forEach((s) => {
+    const c = redoCandidates(db, s).filter((o) => !vehiclesDiffer(o.car, s.car));
+    if (c.length !== 1) return;                                                          // none, or can't tell which: it waits in "Needs linking"
+    createRedoEvent(db, c[0], { reason: "Not set yet", redoSaleId: s.id, auto: true, date: s.closedAt ? EASTERN_DAY_FMT.format(new Date(s.closedAt)) : trackerToday(), note: "Linked automatically from a redo appointment." }, "Auto (redo appointment)"); n++;
+  });
+  return n;
+}
+function redoStats(db, query) {
+  const { start, end } = dateRangeFor(query), startDay = EASTERN_DAY_FMT.format(new Date(start)), endDay = EASTERN_DAY_FMT.format(new Date(end));
+  const events = redoList(db).filter((e) => e.date >= startDay && e.date <= endDay).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.createdAt < b.createdAt ? 1 : -1)));
+  const people = new Map(), get = (p) => { const k = `${p.type}:${p.id}`; if (!people.has(k)) people.set(k, { key: k, type: p.type, id: p.id, name: p.name, redos: 0, cars: 0, reasons: {} }); return people.get(k); };
+  db.sales.filter((s) => s.status === "arrived" && !s.isRedo && s.date && EASTERN_DAY_FMT.format(new Date(s.date)) >= startDay && EASTERN_DAY_FMT.format(new Date(s.date)) <= endDay).forEach((s) => redoRoster(db, s).forEach((p) => { get(p).cars++; }));
+  events.filter((e) => !e.notFault).forEach((e) => e.people.forEach((p) => { const r = get(p); r.redos++; r.reasons[e.reason] = (r.reasons[e.reason] || 0) + 1; }));
+  const list = [...people.values()].map((p) => ({ ...p, rate: p.cars ? Math.round((p.redos / p.cars) * 1000) / 10 : null })).sort((a, b) => b.redos - a.redos || (b.rate || 0) - (a.rate || 0) || a.name.localeCompare(b.name));
+  const counted = events.filter((e) => !e.notFault), reasonCounts = {}; counted.forEach((e) => { reasonCounts[e.reason] = (reasonCounts[e.reason] || 0) + 1; });
+  const carsTotal = db.sales.filter((s) => s.status === "arrived" && !s.isRedo && s.date && EASTERN_DAY_FMT.format(new Date(s.date)) >= startDay && EASTERN_DAY_FMT.format(new Date(s.date)) <= endDay).length;
+  return { people: list, events: events.slice(0, 300), totals: { redos: counted.length, notTechFault: events.length - counted.length, cars: carsTotal, rate: carsTotal ? Math.round((counted.length / carsTotal) * 1000) / 10 : null },
+    reasons: Object.entries(reasonCounts).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count) };
+}
+app.get("/api/manager/redos", requireManager, (req, res) => {
+  const db = loadDB(), out = redoStats(db, req.query);
+  out.reasonsList = REDO_REASONS;
+  out.needsLinking = db.sales.filter((s) => s.isRedo && !s.redoNoOriginal && s.status !== "cancelled" && !redoList(db).some((e) => e.redoSaleId === s.id)).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 40)
+    .map((s) => ({ saleId: s.id, car: s.car, customerName: s.customerName || "", date: String(s.date || "").slice(0, 10), candidates: redoCandidates(db, s).slice(0, 6).map((o) => ({ id: o.id, car: o.car, date: String(o.date || "").slice(0, 10), people: redoRoster(db, o).map((p) => p.name).join(", ") })) }));
+  res.json(out);
+});
+app.get("/api/manager/jobs/:id/redos", requireManager, (req, res) => {
+  const db = loadDB(), sale = db.sales.find((s) => s.id === req.params.id);
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  const link = redoList(db).find((e) => e.redoSaleId === sale.id) || null, orig = link ? db.sales.find((s) => s.id === link.saleId) : null;
+  res.json({ roster: redoRoster(db, sale), reasons: REDO_REASONS, events: redoList(db).filter((e) => e.saleId === sale.id).sort((a, b) => (a.date < b.date ? 1 : -1)),
+    redoOf: link ? { eventId: link.id, saleId: link.saleId, car: orig ? orig.car : link.car, date: link.originalDate, people: link.people.map((p) => p.name).join(", ") } : null,
+    candidates: sale.isRedo && !link ? redoCandidates(db, sale).slice(0, 6).map((o) => ({ id: o.id, car: o.car, date: String(o.date || "").slice(0, 10), people: redoRoster(db, o).map((p) => p.name).join(", ") })) : [] });
+});
+app.post("/api/manager/jobs/:id/redo", requireManager, (req, res) => {
+  const db = loadDB(), orig = db.sales.find((s) => s.id === req.params.id), b = req.body || {};
+  if (!orig) return res.status(404).json({ error: "Job not found." });
+  if (!REDO_REASONS.includes(b.reason)) return res.status(400).json({ error: "Pick what went wrong." });
+  if (orig.isRedo) return res.status(400).json({ error: "That job is itself a redo. Log the redo against the ORIGINAL job." });
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || "")) ? b.date : trackerToday();
+  if (redoList(db).some((e) => e.saleId === orig.id && e.reason === b.reason && e.date === day && !b.confirmDuplicate)) return res.status(409).json({ needsConfirm: true, error: "This exact redo is already logged for that day. Log it again anyway?" });
+  if (b.redoSaleId && redoList(db).some((e) => e.redoSaleId === b.redoSaleId)) return res.status(409).json({ error: "That redo appointment is already linked to a job." });
+  const ev = createRedoEvent(db, orig, { ...b, date: day }, redoActorName(db, req));
+  if (!ev.people.length) { redoList(db).pop(); return res.status(400).json({ error: "Pick at least one person, or tick \"not the tech's fault\" if nobody is to blame." }); }
+  saveDB(db); res.json({ ok: true, id: ev.id });
+});
+app.patch("/api/manager/redos/:id", requireManager, (req, res) => {
+  const db = loadDB(), ev = redoList(db).find((e) => e.id === req.params.id), b = req.body || {};
+  if (!ev) return res.status(404).json({ error: "Redo not found." });
+  if (b.reason !== undefined) { if (!REDO_REASONS.includes(b.reason)) return res.status(400).json({ error: "Pick what went wrong." }); ev.reason = b.reason; }
+  if (b.note !== undefined) ev.note = String(b.note).trim().slice(0, 500);
+  if (b.notFault !== undefined) ev.notFault = !!b.notFault;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(b.date || ""))) ev.date = b.date;
+  if (Array.isArray(b.people)) { const orig = db.sales.find((s) => s.id === ev.saleId), roster = orig ? redoRoster(db, orig) : ev.people, keep = roster.filter((p) => b.people.includes(`${p.type}:${p.id}`)); if (keep.length) ev.people = keep; }
+  ev.editedBy = redoActorName(db, req); saveDB(db); res.json({ ok: true });
+});
+app.delete("/api/manager/redos/:id", requireManager, (req, res) => {
+  const db = loadDB(), i = redoList(db).findIndex((e) => e.id === req.params.id);
+  if (i < 0) return res.status(404).json({ error: "Redo not found." });
+  const ev = redoList(db)[i]; redoList(db).splice(i, 1);
+  const rs = ev.redoSaleId && db.sales.find((s) => s.id === ev.redoSaleId); if (rs) rs.redoNoOriginal = true;      // unlinking by hand: don't auto-link the same redo appointment straight back
+  saveDB(db); res.json({ ok: true });
+});
+app.post("/api/manager/redos/dismiss", requireManager, (req, res) => {
+  const db = loadDB(), s = db.sales.find((x) => x.id === (req.body || {}).saleId);
+  if (!s) return res.status(404).json({ error: "Job not found." });
+  s.redoNoOriginal = true; saveDB(db); res.json({ ok: true });
+});
+// Every shop's redo numbers for the combined owner site.
+app.get("/api/cross-location/redos", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const out = redoStats(loadDB(), req.query); out.locationLabel = SHOP_LOCATION_LABEL; res.json({ ...out, events: out.events.slice(0, 200) });
+});
+
+// ===== NO-SHOWS, CANCELLATIONS, AND THE VA'S CALL LISTS =====
+const deadStatus = (s) => s.status === "no_show" || s.status === "cancelled";
+const realBooking = (s) => !s.isReschedule && !s.isRedo && !redoFree(s);                      // a reschedule copy or a free redo is not a booking that was lost
+// The same customer booked the same car again afterwards and it is still alive: the lost booking was won back.
+function rebookedAfter(db, s) {
+  const who = jobPersonKey(s); if (!who) return null;
+  const made = Date.parse(s.closedAt || s.date) || 0;
+  const later = db.sales.filter((o) => o.id !== s.id && realBooking(o) && !deadStatus(o) && jobPersonKey(o) === who && (Date.parse(o.closedAt || o.date) || 0) > made && !vehiclesDiffer(o.car, s.car)).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+  return later ? { date: later.date, price: saleTotal(later) || 0, car: later.car } : null;
+}
+function deadBookingStats(db, query) {
+  const { start, end } = dateRangeFor(query);
+  const inR = db.sales.filter((s) => realBooking(s) && inRange(s.date, start, end));
+  const dead = inR.filter(deadStatus), noShow = dead.filter((s) => s.status === "no_show").length, cancelled = dead.length - noShow;
+  const group = (key) => { const m = {}; inR.forEach((s) => { const k = key(s) || "Unknown"; const g = m[k] || (m[k] = { name: k, noShow: 0, cancelled: 0, booked: 0 }); g.booked++; if (s.status === "no_show") g.noShow++; else if (s.status === "cancelled") g.cancelled++; });
+    return Object.values(m).filter((g) => g.noShow + g.cancelled > 0).sort((a, b) => (b.noShow + b.cancelled) - (a.noShow + a.cancelled)); };
+  return { totals: { booked: inR.length, noShow, cancelled, rate: inR.length ? Math.round((dead.length / inR.length) * 1000) / 10 : null },
+    byRep: group((s) => s.isWalkIn ? "Walk-in" : s.salesRepName || "No rep"), byService: group((s) => s.baseService),
+    rows: dead.sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 400).map((s) => ({ id: s.id, date: s.date, status: s.status, customerName: s.customerName || "", phone: String(s.customerPhone || "").replace(/[^\d+]/g, ""), car: s.car || "", service: s.baseService || "", salesRepName: s.salesRepName || "", price: saleTotal(s) || 0, rebooked: rebookedAfter(db, s) })) };
+}
+app.get("/api/manager/dead-bookings", requireManager, (req, res) => res.json(deadBookingStats(loadDB(), req.query)));
+// The VA's lists, for the combined rep tracker (it adds the VA's own call notes). Includes phone numbers, so it is secret-gated like every cross-location route.
+app.get("/api/cross-location/va-feed", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), kind = req.query.kind === "tomorrow" ? "tomorrow" : "dead", today = trackerToday(), dayOf = (s) => EASTERN_DAY_FMT.format(new Date(s.date));
+  const shift = (ymd, n) => new Date(Date.parse(ymd + "T12:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+  const row = (s) => ({ saleId: s.id, contactId: s.contactId || "", customerName: s.customerName || "", phone: String(s.customerPhone || "").replace(/[^\d+]/g, ""), car: s.car || "", service: s.baseService || "", date: s.date, status: s.status || "pending", salesRepName: s.salesRepName || "", price: saleTotal(s) || 0 });
+  let rows;
+  if (kind === "tomorrow") { const t = shift(today, 1); rows = db.sales.filter((s) => realBooking(s) && !deadStatus(s) && s.status !== "arrived" && s.date && dayOf(s) === t).sort((a, b) => (a.date < b.date ? -1 : 1)).map(row); }
+  else { const days = Math.min(120, Math.max(1, Number(req.query.days) || 30)), lo = shift(today, -days), hi = shift(today, 60);
+    rows = db.sales.filter((s) => realBooking(s) && deadStatus(s) && s.date && dayOf(s) >= lo && dayOf(s) <= hi).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 500).map((s) => ({ ...row(s), rebooked: rebookedAfter(db, s) })); }
+  res.json({ locationLabel: SHOP_LOCATION_LABEL, kind, rows });
+});
 
 // ===== LIVE MIRROR OF GHL =====
 // GHL sends no signal for a plain edit, and moving an appointment to another calendar can give it a NEW appointment id, which used to leave the old job behind as a duplicate.
