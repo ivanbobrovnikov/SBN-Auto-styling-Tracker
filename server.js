@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-29-cash";
+const BUILD = "2026-10-29-ghlauto";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -491,8 +491,11 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
   // Window Tint Booking on one day and Ceramic Coating Booking on another for the same car (both under one GHL id). Without this, the second booking was taken for
   // an edit of the first: the tint appointment was rewritten into the ceramic one and vanished, and the close kept its old time so it didn't count today.
   // (Only when BOTH calendars are known. A job saved before calendars were recorded falls through to the older rules below.)
+  // ...unless it is plainly the SAME booking sent again: identical title and the identical start time. The same appointment can reach us twice with a different calendar value
+  // (two workflows, or an update), and that must not become a second job: it would double the revenue and the rep's close. A genuinely different appointment has a different title or time.
+  const sameBooking = titlesMatch(existing.car, incomingTitle) && oldMs === newMs;
   if (incomingCalendarId && existing.calendarId) {
-    if (String(incomingCalendarId) !== String(existing.calendarId)) return true;
+    if (String(incomingCalendarId) !== String(existing.calendarId) && !sameBooking) return true;
   } else if (serviceLine(incomingService) && serviceLine(existing.baseService) && serviceLine(incomingService) !== serviceLine(existing.baseService)) {
     // The calendar isn't known on one side (a job saved before calendars were recorded, or a message that didn't carry it), so fall back to the SERVICE: a tint
     // booking and a ceramic booking for the same customer are two appointments far more often than one appointment switched between them, and a duplicate is
@@ -1412,8 +1415,10 @@ app.post("/api/webhook/ghl", (req, res) => {
     return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
   }
   const sale = upsertSaleFromGHL(db, data);
+  const merged = autoMergeDuplicates(db, sale.contactId || data.contactId);   // the same booking under a new id is folded in straight away
   saveDB(db);
-  res.json({ ok: true, saleId: sale.id, matchedEmployees: sale.employeeIds.length });
+  scheduleContactSync(sale.contactId || data.contactId, 2000);               // a moment later, ask GHL what this customer really has now
+  res.json({ ok: true, saleId: merged.remap[sale.id] || sale.id, matchedEmployees: sale.employeeIds.length });
 });
 
 // Price/Rep sync — a DIFFERENT matching strategy than everything else above. GHL's
@@ -2633,16 +2638,17 @@ function splitEarlierAppointment(db, req, saleId, originalIso, originalCar, opts
 //  - or the two don't look like the same customer's same booking.
 const jobPersonKey = (s) => s.contactId || String(s.customerPhone || "").replace(/\D/g, "") || String(s.customerName || "").trim().toLowerCase();
 function liveJobWorked(s) { return (!!s.status && s.status !== "pending") || !!s.paid || !!s.completed; }
-function mergeJobPair(db, req, liveId, earlierId) {
+function mergeJobPair(db, req, liveId, earlierId, opts) {
+  const force = !!(opts && opts.force);          // GHL itself has confirmed the earlier appointment no longer exists, so it was moved, not a second booking
   const live = db.sales.find((s) => s.id === liveId), earlier = db.sales.find((s) => s.id === earlierId);
   if (!live || !earlier || live.id === earlier.id) return { status: 404, error: "Job not found." };
   const linked = (earlier.ghlOpportunityId || "").startsWith(`${live.ghlOpportunityId}~earlier-`) && !!live.ghlOpportunityId;
   // Same customer (or the same GHL opportunity) AND the same car and service. Sharing an opportunity alone isn't enough:
   // a cancelled Camry job and a new BMW booking on the same opportunity are two different sales.
-  if (!((linked || (jobPersonKey(live) && jobPersonKey(live) === jobPersonKey(earlier))) && titlesMatch(live.car, earlier.car))) {
+  if (!force && !((linked || (jobPersonKey(live) && jobPersonKey(live) === jobPersonKey(earlier))) && titlesMatch(live.car, earlier.car))) {
     return { status: 409, error: "These two don't look like the same customer's same booking, so they weren't merged." };
   }
-  if (!isDeadBooking(earlier) && !isServiced(earlier)) return { status: 409, error: "That earlier booking is still coming up, so these look like two separate appointments (for example two cars), not a reschedule. Nothing was changed." };
+  if (!force && !isDeadBooking(earlier) && !isServiced(earlier)) return { status: 409, error: "That earlier booking is still coming up, so these look like two separate appointments (for example two cars), not a reschedule. Nothing was changed." };
   if (isServiced(earlier)) return { status: 409, error: "That earlier job was already completed or paid, so this is a separate deal, not a reschedule. Nothing was changed." };
   if (liveJobWorked(live)) return { status: 409, error: "The newer job has already been worked on (arrived, paid or completed), and merging would lose that. Use \"Don't count as a new close\" instead. Nothing was changed." };
   const fromDate = earlier.date;
@@ -2664,7 +2670,7 @@ function mergeJobPair(db, req, liveId, earlierId) {
   db.tips.forEach((t) => { if (t.saleId === live.id) t.saleId = earlier.id; });
   db.cashEntries.forEach((c) => { if (c.autoFromJob && c.saleId === live.id) c.saleId = earlier.id; });
   db.sales = db.sales.filter((s) => s.id !== live.id);
-  logAudit(db, req, earlier, "Merged back (it was a reschedule)", fromDate.slice(0, 10), earlier.date.slice(0, 10));
+  logAudit(db, req, earlier, (opts && opts.label) || "Merged back (it was a reschedule)", fromDate.slice(0, 10), earlier.date.slice(0, 10));
   return { ok: true, id: earlier.id };
 }
 // The key-based form: the newer job holds the GHL opportunity id and the earlier one was re-keyed "~earlier-".
@@ -4367,6 +4373,7 @@ async function runTitleSync() {
           updated++;
         }
       }
+      const mirrored = reconcileContact(db, contactId, events); updated += mirrored.titles + mirrored.times + mirrored.calendars + mirrored.merged; if (mirrored.seen) updated += 0, db.__mirrorSeen = true;
       await new Promise((r) => setTimeout(r, 200)); // same pacing as the bulk import - stays well under GHL's rate limits
     } catch (e) {
       // one bad lookup shouldn't stop the whole run - just skip it and keep going
@@ -4374,9 +4381,120 @@ async function runTitleSync() {
   }
   const repriced = backfillTitlePricing(db); // every job picks up the price its title carries, even if the title didn't change
   const reflagged = autoFlagRescheduleFromTitle(db); // a title that now says rescheduled, or an earlier booking that has just turned dead
-  if (updated > 0 || repriced > 0 || reflagged > 0) saveDB(db);
+  if (updated > 0 || repriced > 0 || reflagged > 0 || db.__mirrorSeen) { delete db.__mirrorSeen; saveDB(db); }
+  ghlLast = { at: new Date().toISOString(), result: { checked, updated } };
   return { skipped: false, candidateCount: candidates.length, checked, updated, ambiguous, repriced, reflagged };
 }
+
+// The same booking twice (same customer, same title, same start time, same price, both still open) is ONE appointment that reached us under two ids, for example after being moved
+// to another calendar. It is folded together automatically: when it arrives, at start-up and every 10 minutes, so nobody ever has to find and delete the copy.
+// The older job survives (its close time, rep credit, tips, notes and upsells). Two different cars, prices or times are never touched.
+function autoMergeDuplicates(db, onlyContactId) {
+  const remap = {}, groups = {};
+  const open = (s) => !["arrived", "no_show", "cancelled"].includes(s.status || "pending") && !liveJobWorked(s);
+  db.sales.filter((s) => open(s) && !s.isRedo && s.car && (!onlyContactId || s.contactId === onlyContactId)).forEach((s) => {
+    const who = jobPersonKey(s); if (!who) return;
+    const k = [who, normalizeTitle(s.car), Date.parse(s.date), parseFloat(s.basePrice) || 0].join("|");
+    (groups[k] = groups[k] || []).push(s);
+  });
+  let count = 0;
+  Object.values(groups).filter((g) => g.length > 1).forEach((g) => {
+    g.sort((a, b) => ((a.closedAt || "") < (b.closedAt || "") ? -1 : 1));
+    const keep = g[0];
+    g.slice(1).forEach((dup) => { const r = mergeJobPair(db, GHL_SYS, dup.id, keep.id, { force: true, label: "Merged back (the same booking arrived twice)" }); if (r.ok) { remap[dup.id] = keep.id; count++; } });
+  });
+  return { count, remap };
+}
+function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db); if (r.count) saveDB(db); return r.count; }
+
+// ===== LIVE MIRROR OF GHL =====
+// GHL sends no signal for a plain edit, and moving an appointment to another calendar can give it a NEW appointment id, which used to leave the old job behind as a duplicate.
+// So the tracker asks GHL directly: right after a booking arrives (about 2 seconds later), every 10 minutes for upcoming jobs, and on demand. For one customer it
+//  1) brings each job in line with its own appointment in GHL (title, time, calendar), and
+//  2) when a job's appointment has VANISHED from GHL (it had been seen there before) and exactly one new job for the same customer has appeared with a matching title, day or time, it was
+//     moved, not added: the new job is folded into the old one, which keeps its close time, rep credit, tips, notes and upsells.
+// It never touches a job that has been worked (arrived, paid, completed), never merges two appointments that both still exist in GHL, and does nothing if GHL doesn't answer.
+const ghlConfigured = () => !!(GHL_API_TOKEN && GHL_LOCATION_ID);
+const GHL_SYS = { auth: { label: "Auto-sync (GHL)", role: "system" } };
+let ghlLast = { at: null, result: null };
+async function ghlEventsFor(contactId) {
+  try {
+    const r = await fetch(`${GHL_API_BASE}/contacts/${contactId}/appointments`, { headers: { Authorization: `Bearer ${GHL_API_TOKEN}`, Version: "2021-07-28", Accept: "application/json" }, signal: AbortSignal.timeout(10000) });
+    const b = await r.json().catch(() => null);
+    return r.ok && b && Array.isArray(b.events) ? b.events : null;          // null = couldn't read it: never act on a failed read
+  } catch (e) { return null; }
+}
+const evCancelled = (e) => /cancel|invalid|deleted/i.test(String(e.appointmentStatus || e.status || ""));
+const evStartMs = (e) => { const iso = normalizeDate(e.startTime); return iso ? Date.parse(iso) : NaN; };
+function reconcileContact(db, contactId, events) {
+  const out = { titles: 0, times: 0, calendars: 0, merged: 0, seen: 0, mergedNames: [] };
+  if (!events || !events.length) return out;
+  const byId = new Map(events.filter((e) => e.id).map((e) => [e.id, e]));
+  const mine = () => db.sales.filter((s) => s.contactId === contactId && !s.isRedo);
+  const open = (s) => !["arrived", "no_show", "cancelled"].includes(s.status || "pending") && !liveJobWorked(s);
+  const note = (sale, field, from, to) => logAudit(db, GHL_SYS, sale, field, from, to);
+  mine().forEach((j) => {
+    const ev = j.ghlOpportunityId ? byId.get(j.ghlOpportunityId) : null;
+    if (!ev || evCancelled(ev)) return;
+    if (!j.ghlApptSeen) { j.ghlApptSeen = true; out.seen++; }                     // proof that this job's id really is a GHL appointment id
+    if (!open(j)) return;
+    const title = String(ev.title || "").trim();
+    if (title && title !== j.car && !j.titleLocked) { const was = j.car; j.car = title; applyTitleRules(db, j); note(j, "Car/Title", was, j.car); out.titles++; }
+    const ms = evStartMs(ev), jm = Date.parse(j.date);
+    if (!isNaN(ms) && (isNaN(jm) || Math.abs(ms - jm) > 60000)) { const was = j.date; j.date = new Date(ms).toISOString(); note(j, "Date/time", was ? String(was).slice(0, 16) : "", j.date.slice(0, 16)); out.times++; }
+    if (ev.calendarId && ev.calendarId !== j.calendarId) {
+      j.calendarId = ev.calendarId; out.calendars++;
+      const mapped = db.calendarServiceMap && db.calendarServiceMap[ev.calendarId];
+      if (mapped && mapped !== j.baseService) { note(j, "Service", j.baseService, mapped); j.baseService = mapped; }
+    }
+  });
+  const gone = (s) => !byId.has(s.ghlOpportunityId) || evCancelled(byId.get(s.ghlOpportunityId));
+  if (!db.ghlIdsAreAppointments && db.sales.filter((s) => s.ghlApptSeen).length >= 3) db.ghlIdsAreAppointments = true;
+  const stale = mine().filter((s) => open(s) && (s.ghlApptSeen || db.ghlIdsAreAppointments) && s.ghlOpportunityId && !String(s.ghlOpportunityId).includes("~") && gone(s)).sort((a, b) => (a.closedAt || "") < (b.closedAt || "") ? -1 : 1);
+  const fresh = mine().filter((s) => open(s) && s.ghlOpportunityId && byId.has(s.ghlOpportunityId) && !evCancelled(byId.get(s.ghlOpportunityId)));
+  const used = new Set(), day = (s) => EASTERN_DAY_FMT.format(new Date(s.date));
+  stale.forEach((a) => {
+    const score = (b) => (titlesMatch(a.car, b.car) ? 2 : 0) + (day(a) === day(b) ? 1 : 0) + (Math.abs(Date.parse(a.date) - Date.parse(b.date)) <= 15 * 60000 ? 1 : 0);
+    const cands = fresh.filter((b) => !used.has(b.id) && b.id !== a.id && (b.closedAt || "") >= (a.closedAt || "")).map((b) => [b, score(b)]).filter(([, sc]) => sc >= 1).sort((x, y) => y[1] - x[1]);
+    if (!cands.length || (cands.length > 1 && cands[0][1] === cands[1][1])) return;           // nothing similar, or can't tell which: leave both alone
+    const b = cands[0][0], bCal = b.calendarId, name = a.customerName || a.car;
+    const r = mergeJobPair(db, GHL_SYS, b.id, a.id, { force: true });
+    if (r.ok) { used.add(b.id); a.ghlApptSeen = true; if (bCal) a.calendarId = bCal; out.merged++; out.mergedNames.push(name); }
+  });
+  return out;
+}
+const syncTimers = new Map();
+async function syncContactNow(contactId) {
+  const events = await ghlEventsFor(contactId); if (!events) return null;
+  const db = loadDB(), r = reconcileContact(db, contactId, events);                         // load and save with nothing awaited in between
+  if (r.titles + r.times + r.calendars + r.merged + r.seen > 0 || db.ghlIdsAreAppointments) saveDB(db);
+  return r;
+}
+function scheduleContactSync(contactId, delayMs) {
+  if (!contactId || !ghlConfigured()) return;
+  if (syncTimers.has(contactId)) clearTimeout(syncTimers.get(contactId));
+  syncTimers.set(contactId, setTimeout(() => { syncTimers.delete(contactId); syncContactNow(contactId).catch(() => {}); }, delayMs == null ? 2000 : delayMs));
+}
+// "Check GHL now": every customer with an open job from two weeks back to three months ahead.
+async function runGhlHeal() {
+  if (!ghlConfigured()) return { configured: false };
+  const db0 = loadDB(), lo = Date.now() - 14 * 86400000, hi = Date.now() + 90 * 86400000;
+  const contacts = [...new Set(db0.sales.filter((s) => s.contactId && !s.isRedo && s.status !== "cancelled" && Date.parse(s.date) >= lo && Date.parse(s.date) <= hi).map((s) => s.contactId))].slice(0, 200);
+  const total = { configured: true, checked: 0, titles: 0, times: 0, calendars: 0, merged: 0, mergedNames: [], unreadable: 0 };
+  for (const c of contacts) {
+    const r = await syncContactNow(c);
+    if (!r) { total.unreadable++; continue; }
+    total.checked++; ["titles", "times", "calendars", "merged"].forEach((k) => { total[k] += r[k]; }); total.mergedNames.push(...r.mergedNames);
+    await new Promise((res) => setTimeout(res, 150));
+  }
+  ghlLast = { at: new Date().toISOString(), result: { checked: total.checked, titles: total.titles, times: total.times, calendars: total.calendars, merged: total.merged } };
+  return total;
+}
+app.post("/api/owner/ghl-heal", requireOwner, async (req, res) => res.json(await runGhlHeal()));
+app.get("/api/owner/ghl-sync-status", requireOwner, (req, res) => {
+  const db = loadDB(), openJobs = db.sales.filter((s) => s.contactId && !["arrived", "no_show", "cancelled"].includes(s.status || "pending") && Date.parse(s.date) >= Date.now() - 86400000);
+  res.json({ configured: ghlConfigured(), upcoming: openJobs.length, matched: openJobs.filter((s) => s.ghlApptSeen).length, lastRunAt: ghlLast.at, lastResult: ghlLast.result });
+});
 
 // Lets a manager see EXACTLY what GHL has for this job's customer, so the right title (and time) can be applied with one
 // tap when the automatic sync can't tell two appointments apart (for example two jobs that were bulk-imported with the
@@ -5044,7 +5162,9 @@ const server = app.listen(PORT, () => {
   // Same idea for title sync — GHL never tells us when a title gets edited, so this asks
   // directly, on its own, every 30 minutes, no manual click required.
   setTimeout(runTitleSync, 30 * 1000);
-  setInterval(runTitleSync, 30 * 60 * 1000);
+  setInterval(runTitleSync, 10 * 60 * 1000);
+  setTimeout(runAutoMerge, 20 * 1000);                 // duplicates already in the system are cleaned up by themselves, now and every 10 minutes
+  setInterval(runAutoMerge, 10 * 60 * 1000);
   // Jobs already in the tracker pick up the price their title carries right away (open, unlocked jobs only; paid and completed
   // jobs keep their price, and are listed in Cleanup if the title disagrees).
   try { const db = loadDB(); const a = backfillTitlePricing(db), b = autoFlagRescheduleFromTitle(db); if (a + b > 0) saveDB(db); } catch (e) { console.error("title price / reschedule backfill failed:", e.message); }
