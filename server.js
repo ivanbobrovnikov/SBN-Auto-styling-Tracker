@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-30-va";
+const BUILD = "2026-10-30-va2";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -4523,14 +4523,17 @@ function rebookedAfter(db, s) {
   return later ? { date: later.date, price: saleTotal(later) || 0, car: later.car } : null;
 }
 function deadBookingStats(db, query) {
-  const { start, end } = dateRangeFor(query);
+  const { start, end } = dateRangeFor(query), r2 = (n) => Math.round(n * 100) / 100, val = (s) => saleTotal(s) || 0, sumVal = (list) => r2(list.reduce((t, s) => t + val(s), 0));
   const inR = db.sales.filter((s) => realBooking(s) && inRange(s.date, start, end));
-  const dead = inR.filter(deadStatus), noShow = dead.filter((s) => s.status === "no_show").length, cancelled = dead.length - noShow;
-  const group = (key) => { const m = {}; inR.forEach((s) => { const k = key(s) || "Unknown"; const g = m[k] || (m[k] = { name: k, noShow: 0, cancelled: 0, booked: 0 }); g.booked++; if (s.status === "no_show") g.noShow++; else if (s.status === "cancelled") g.cancelled++; });
-    return Object.values(m).filter((g) => g.noShow + g.cancelled > 0).sort((a, b) => (b.noShow + b.cancelled) - (a.noShow + a.cancelled)); };
-  return { totals: { booked: inR.length, noShow, cancelled, rate: inR.length ? Math.round((dead.length / inR.length) * 1000) / 10 : null },
-    byRep: group((s) => s.isWalkIn ? "Walk-in" : s.salesRepName || "No rep"), byService: group((s) => s.baseService),
-    rows: dead.sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 400).map((s) => ({ id: s.id, date: s.date, status: s.status, customerName: s.customerName || "", phone: String(s.customerPhone || "").replace(/[^\d+]/g, ""), car: s.car || "", service: s.baseService || "", salesRepName: s.salesRepName || "", price: saleTotal(s) || 0, rebooked: rebookedAfter(db, s) })) };
+  const dead = inR.filter(deadStatus), noShowList = dead.filter((s) => s.status === "no_show"), cancelList = dead.filter((s) => s.status !== "no_show");
+  const all = dead.sort((a, b) => (a.date < b.date ? 1 : -1)).map((s) => ({ id: s.id, date: s.date, status: s.status, customerName: s.customerName || "", phone: String(s.customerPhone || "").replace(/[^\d+]/g, ""), car: s.car || "", service: s.baseService || "", salesRepName: s.salesRepName || "", price: val(s), rebooked: rebookedAfter(db, s) }));
+  const won = all.filter((r) => r.rebooked);
+  const group = (key) => { const m = {}; inR.forEach((s) => { const k = key(s) || "Unknown"; const g = m[k] || (m[k] = { name: k, noShow: 0, cancelled: 0, booked: 0, noShowValue: 0, cancelledValue: 0 }); g.booked++; if (s.status === "no_show") { g.noShow++; g.noShowValue += val(s); } else if (s.status === "cancelled") { g.cancelled++; g.cancelledValue += val(s); } });
+    return Object.values(m).filter((g) => g.noShow + g.cancelled > 0).map((g) => ({ ...g, noShowValue: r2(g.noShowValue), cancelledValue: r2(g.cancelledValue), lostValue: r2(g.noShowValue + g.cancelledValue) })).sort((a, b) => b.lostValue - a.lostValue || (b.noShow + b.cancelled) - (a.noShow + a.cancelled)); };
+  const noShowValue = sumVal(noShowList), cancelledValue = sumVal(cancelList), lostValue = r2(noShowValue + cancelledValue), bookedValue = sumVal(inR);
+  return { totals: { booked: inR.length, noShow: noShowList.length, cancelled: cancelList.length, rate: inR.length ? Math.round((dead.length / inR.length) * 1000) / 10 : null,
+      noShowValue, cancelledValue, lostValue, bookedValue, valueRate: bookedValue > 0 ? Math.round((lostValue / bookedValue) * 1000) / 10 : null, wonBackCount: won.length, wonBackValue: r2(won.reduce((t, r) => t + (r.rebooked.price || 0), 0)) },
+    byRep: group((s) => s.isWalkIn ? "Walk-in" : s.salesRepName || "No rep"), byService: group((s) => s.baseService), rows: all.slice(0, 400) };
 }
 app.get("/api/manager/dead-bookings", requireManager, (req, res) => res.json(deadBookingStats(loadDB(), req.query)));
 // The VA's lists, for the combined rep tracker (it adds the VA's own call notes). Includes phone numbers, so it is secret-gated like every cross-location route.
