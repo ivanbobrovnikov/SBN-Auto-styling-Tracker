@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-30-va";
+const UI_BUILD = "2026-10-30-va2";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3425,14 +3425,17 @@ async function renderDeadBookings(content) {
   const day = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const dayLabel = (ymd) => new Date(ymd + "T12:00:00Z").toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
   const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" });
-  const list = (items, label) => el("div", { class: "card", "data-part": "dead-" + label.toLowerCase().replace(/\W+/g, "-"), style: "padding:12px 14px;margin-bottom:10px" }, [el("div", { style: "font-weight:500;margin-bottom:6px", text: label }), ...items.slice(0, 8).map((g) => el("div", { class: "row", style: "font-size:13px;padding:2px 0" }, [el("span", { text: g.name }), el("span", { class: "muted", text: `${g.noShow} no-show${g.noShow === 1 ? "" : "s"} \u00B7 ${g.cancelled} cancelled` })]))]);
+  const list = (items, label) => el("div", { class: "card", "data-part": "dead-" + label.toLowerCase().replace(/\W+/g, "-"), style: "padding:12px 14px;margin-bottom:10px" }, [el("div", { style: "font-weight:500;margin-bottom:6px", text: label }), ...items.slice(0, 8).map((g) => el("div", { class: "row", style: "font-size:13px;padding:3px 0;gap:10px" }, [el("span", { style: "min-width:0;overflow-wrap:anywhere", text: g.name }), el("span", { class: "muted", style: "text-align:right", text: `${g.noShow} no-show${g.noShow === 1 ? "" : "s"} \u00B7 ${g.cancelled} cancelled \u00B7 ${money(g.lostValue)}` })]))]);
+  const tile = (label, value, color, sub) => el("div", { class: "metric" }, [el("div", { class: "metric-label", text: label }), el("div", { class: "metric-value mono", style: color ? "color:" + color : "", text: value }), sub ? el("div", { class: "muted", style: "font-size:11.5px;margin-top:2px", text: sub }) : null]);
   function draw() {
     clearHeightLocked(body); const t = data.totals;
     body.appendChild(el("div", { class: "metric-grid", "data-part": "tiles" }, [
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "No-shows" }), el("div", { class: "metric-value mono", style: "color:var(--red)", text: String(t.noShow) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cancelled" }), el("div", { class: "metric-value mono", style: "color:var(--warn)", text: String(t.cancelled) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Booked" }), el("div", { class: "metric-value mono", text: String(t.booked) })]),
-      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Lost to no-show or cancel" }), el("div", { class: "metric-value mono", text: t.rate == null ? "\u2014" : t.rate + "%" })]),
+      tile("No-shows", String(t.noShow), "var(--red)", money(t.noShowValue)),
+      tile("Cancelled", String(t.cancelled), "var(--warn)", money(t.cancelledValue)),
+      tile("Total value lost", money(t.lostValue), "var(--red)", `${t.noShow + t.cancelled} booking${t.noShow + t.cancelled === 1 ? "" : "s"}`),
+      tile("Won back", money(t.wonBackValue), "var(--green)", `${t.wonBackCount} rebooked`),
+      tile("Booked", String(t.booked), "", money(t.bookedValue)),
+      tile("Lost to no-show or cancel", t.rate == null ? "\u2014" : t.rate + "%", "", t.valueRate == null ? "" : t.valueRate + "% of the money booked"),
     ]));
     if (data.byRep.length) body.appendChild(list(data.byRep, "By sales rep"));
     if (data.byService.length) body.appendChild(list(data.byService, "By service"));
@@ -3441,7 +3444,7 @@ async function renderDeadBookings(content) {
     Object.keys(days).sort().reverse().forEach((k) => {
       const l = days[k], ns = l.filter((r) => r.status === "no_show").length, cx = l.length - ns, isOpen = open.has(k);
       body.appendChild(el("div", { class: "cgroup", "data-part": "group" }, [
-        el("button", { class: "cgroup-head", "data-part": "group-head", "aria-expanded": String(isOpen), onclick: () => { isOpen ? open.delete(k) : open.add(k); draw(); } }, [el("span", { class: "cg-caret", text: isOpen ? "\u25BE" : "\u25B8" }), el("span", { class: "cg-main" }, [el("span", { class: "cg-title", text: dayLabel(k) }), el("span", { class: "cg-sub", text: `${ns} no-show${ns === 1 ? "" : "s"} \u00B7 ${cx} cancelled` })]), el("span", { class: "mono cg-total", text: String(l.length) })]),
+        el("button", { class: "cgroup-head", "data-part": "group-head", "aria-expanded": String(isOpen), onclick: () => { isOpen ? open.delete(k) : open.add(k); draw(); } }, [el("span", { class: "cg-caret", text: isOpen ? "\u25BE" : "\u25B8" }), el("span", { class: "cg-main" }, [el("span", { class: "cg-title", text: dayLabel(k) }), el("span", { class: "cg-sub", text: `${ns} no-show${ns === 1 ? "" : "s"} \u00B7 ${cx} cancelled` })]), el("span", { class: "mono cg-total", "data-part": "day-value", text: money(l.reduce((t2, r) => t2 + r.price, 0)) })]),
         isOpen ? el("div", { class: "cgroup-body" }, l.map((r) => el("div", { class: "crow", "data-part": "dead-row", "data-status": r.status }, [el("div", { style: "min-width:0;flex:1" }, [
           el("div", { style: "font-size:14px;overflow-wrap:anywhere", text: `${r.customerName || "(no name)"} \u00B7 ${r.car}` }),
           el("div", { class: "muted", style: "font-size:11.5px", text: `${timeOf(r.date)} \u00B7 ${r.service}${r.salesRepName ? " \u00B7 " + r.salesRepName : ""}` }),
