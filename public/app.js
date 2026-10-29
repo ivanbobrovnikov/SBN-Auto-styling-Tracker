@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-29-cash";
+const UI_BUILD = "2026-10-29-ghlauto";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3304,6 +3304,23 @@ async function renderAttendance(content) {
 
 // ---------------- Cleanup — find and fix every job missing a price or a sales rep ----------------
 async function renderCleanup(content) {
+  // The live link to GHL: whether the tracker is mirroring GHL (edits and calendar moves), and a button to check right now.
+  const ghlCard = el("div", { class: "card", "data-part": "ghl-card" });
+  content.appendChild(ghlCard);
+  const drawGhl = (st, result) => {
+    ghlCard.innerHTML = "";
+    ghlCard.appendChild(el("div", { style: "font-weight:600;margin-bottom:4px", text: "Live link to GHL" }));
+    if (!st) { ghlCard.appendChild(el("div", { class: "muted", style: "font-size:13px", text: "Couldn't read the status." })); return; }
+    if (!st.configured) { ghlCard.appendChild(el("div", { class: "muted", style: "font-size:13px", "data-part": "ghl-status", text: "Not set up on this shop yet. Until GHL_API_TOKEN and GHL_LOCATION_ID are added in Railway Variables, an appointment that is moved to another calendar or edited in GHL can't be matched automatically." })); return; }
+    const when = st.lastRunAt ? formatDateTime(st.lastRunAt) : "not yet since the last restart";
+    ghlCard.appendChild(el("div", { style: "font-size:13px", "data-part": "ghl-status", text: `On. ${st.matched} of ${st.upcoming} upcoming jobs are matched to their GHL appointment. Last full check: ${when}. It also checks GHL a moment after every booking and every 10 minutes.` }));
+    if (st.upcoming > 0 && st.matched === 0) ghlCard.appendChild(el("div", { style: "font-size:12.5px;color:var(--warn);margin-top:6px", text: "None of the upcoming jobs could be matched to a GHL appointment yet, so a move can't be recognised. Press Check GHL now and see if that changes." }));
+    const out = el("div", { style: "margin-top:8px;font-size:13px", "data-part": "ghl-result" });
+    if (result) out.textContent = result.configured === false ? "Not set up." : `Checked ${result.checked} customer${result.checked === 1 ? "" : "s"}: ${result.titles} title${result.titles === 1 ? "" : "s"}, ${result.times} time${result.times === 1 ? "" : "s"} and ${result.calendars} calendar${result.calendars === 1 ? "" : "s"} updated, ${result.merged} moved appointment${result.merged === 1 ? "" : "s"} merged${result.mergedNames && result.mergedNames.length ? " (" + result.mergedNames.join(", ") + ")" : ""}${result.unreadable ? `. ${result.unreadable} couldn't be read from GHL and were left alone` : ""}.`;
+    const btn = el("button", { class: "ghost", "data-act": "ghl-check", style: "margin-top:8px", text: "Check GHL now", onclick: async () => { btn.disabled = true; btn.textContent = "Checking GHL..."; try { const r = await api("/api/owner/ghl-heal", { method: "POST", body: "{}" }); drawGhl(await api("/api/owner/ghl-sync-status"), r); } catch (e) { btn.disabled = false; btn.textContent = "Check GHL now"; alert(e.message || "Couldn't check GHL."); } } });
+    ghlCard.appendChild(btn); ghlCard.appendChild(out);
+  };
+  api("/api/owner/ghl-sync-status").then((st) => drawGhl(st), () => drawGhl(null));
   const body = el("div");
   const salesReps = await api("/api/manager/salesreps-list");
   const employees = await api("/api/manager/employees");
