@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-30-closers";
+const BUILD = "2026-10-30-dupes";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -505,10 +505,20 @@ function isDeadBooking(s) {
   return !isNaN(ms) && EASTERN_DAY_FMT.format(new Date(ms)) < EASTERN_DAY_FMT.format(new Date());
 }
 const serviceLine = (v) => { const t = String(v || "").toLowerCase(); if (/tint/.test(t)) return "tint"; if (/ceramic|coat/.test(t)) return "ceramic"; if (/ppf|paint protection/.test(t)) return "ppf"; return ""; };
-function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCalendarId, incomingService) {
+// Is the later booking plainly the SAME appointment, moved? The same service, the same price and the same time of day. (Used with "the earlier one never happened".)
+function sameSlotAndPrice(a, bIso, bTitle, bService) {
+  const sa = serviceLine(a.baseService), sb = serviceLine(bService || bTitle); if (!sa || !sb || sa !== sb) return false;
+  const tod = (iso) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" });
+  if (!a.date || !bIso || tod(a.date) !== tod(bIso)) return false;
+  const pa = a.titlePrice != null ? a.titlePrice : (parseFloat(a.basePrice) || 0), tp = parseTitlePricing(bTitle), pb = tp ? tp.total : null;
+  return pa > 0 && pb != null && Math.abs(pa - pb) < 0.005;
+}
+function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCalendarId, incomingService, incomingApptId) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
   if (isNaN(oldMs) || isNaN(newMs)) return false;
+  // GHL's own appointment id, when the workflow sends it, settles this exactly: the same id is the same appointment edited, a different id is a different appointment.
+  if (incomingApptId && existing.ghlAppointmentId) return String(incomingApptId) !== String(existing.ghlAppointmentId);
   // A booking on a DIFFERENT CALENDAR is a different appointment, not an edit of the first one: an edit stays on its own calendar. This is the customer who has
   // Window Tint Booking on one day and Ceramic Coating Booking on another for the same car (both under one GHL id). Without this, the second booking was taken for
   // an edit of the first: the tint appointment was rewritten into the ceramic one and vanished, and the close kept its old time so it didn't count today.
@@ -524,6 +534,13 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
     // visible and fixable (Cleanup, Edit) where a swallowed appointment is silent.
     return true;
   }
+  // Not yet worked and not cancelled: then these two can be one appointment that was edited rather than a second visit.
+  const untouched = !isServiced(existing) && existing.status !== "cancelled";
+  // The first booking only had a NAME as its title (no car in it), and the real title has come in since: it is the same appointment, filled in (and possibly moved).
+  if (untouched && !vehicleKey(existing.car) && vehicleKey(incomingTitle)) return false;
+  // The earlier appointment never happened (its day has passed and nobody arrived or paid), and a later booking has the same service, the same price and the same time of day:
+  // that is the same appointment moved to a new day, with the car or the title corrected. A still-upcoming earlier booking is never treated this way (two cars), nor one that differs in price, service or time.
+  if (untouched && newMs > oldMs && oldMs < Date.now() && sameSlotAndPrice(existing, incomingIso, incomingTitle, incomingService)) return false;
   // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment. The ONE exception is a clearly
   // DIFFERENT CAR while the first booking is still live: a customer bringing two cars in on one day. Both bookings arrive under the
   // same GHL id, and without this the second silently overwrote the first (the first car's job simply vanished).
@@ -547,7 +564,7 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
   return !upcoming;
 }
 
-function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId }) {
+function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId, appointmentId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
   const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
@@ -573,7 +590,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     if (itsOwn) sale = itsOwn;
   }
   let secondCarSameDay = false;       // this new job is a second car for a day that already has a live booking under this id
-  if (sale && isSeparateAppointment(sale, incomingIso, car, calendarId, baseService)) {
+  if (sale && isSeparateAppointment(sale, incomingIso, car, calendarId, baseService, appointmentId)) {
     secondCarSameDay = !!(sale.date && incomingIso && EASTERN_DAY_FMT.format(new Date(sale.date)) === EASTERN_DAY_FMT.format(new Date(incomingIso)));
     // Same opportunity, different appointment. The old job keeps all of its own history untouched
     // but gives up its claim on the opportunity ID, so this booking - and every later event for
@@ -662,6 +679,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   }
   const prevSnap = isNew ? null : { service: sale.baseService, car: sale.car };
   sale.date = incomingIso || sale.date || new Date().toISOString();
+  if (appointmentId) sale.ghlAppointmentId = String(appointmentId);
   sale.customerName = customerName || sale.customerName || "";
   sale.customerPhone = customerPhone || sale.customerPhone || "";
   sale.customerEmail = customerEmail || sale.customerEmail || "";
@@ -1432,6 +1450,7 @@ app.post("/api/webhook/ghl", (req, res) => {
   const data = ghlPayload(req.body);
   // accept the common spellings of the calendar field (the tracker only ever looked for "calendarId")
   if (!data.calendarId) { const c = data.calendar_id || data.calendarID || (data.calendar && (data.calendar.id || (typeof data.calendar === "string" ? data.calendar : ""))) || ""; if (c) data.calendarId = c; }
+  if (!data.appointmentId) { const a = data.appointment_id || data.appointmentID || data.apptId || (data.appointment && (data.appointment.id || (typeof data.appointment === "string" ? data.appointment : ""))) || ""; if (a) data.appointmentId = String(a); }
   if (!data.ghlOpportunityId) {
     if (!db.debugLog) db.debugLog = [];
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), contentType: req.headers["content-type"] || "(none)", failedReason: "missing ghlOpportunityId", body: req.body });
@@ -1441,10 +1460,11 @@ app.post("/api/webhook/ghl", (req, res) => {
   }
   const sale = upsertSaleFromGHL(db, data);
   const merged = autoMergeDuplicates(db, sale.contactId || data.contactId);   // the same booking under a new id is folded in straight away
+  const edited = autoMergeMoved(db, sale.contactId || data.contactId); Object.assign(merged.remap, edited.remap);
   autoLinkRedos(db);                                                            // a redo appointment is linked back to the car's earlier job when that is clear
   saveDB(db);
   scheduleContactSync(sale.contactId || data.contactId, 2000);               // a moment later, ask GHL what this customer really has now
-  res.json({ ok: true, saleId: merged.remap[sale.id] || sale.id, matchedEmployees: sale.employeeIds.length });
+  res.json({ ok: true, saleId: (() => { let id = sale.id; for (let k = 0; k < 3 && merged.remap[id]; k++) id = merged.remap[id]; return id; })(), matchedEmployees: sale.employeeIds.length });
 });
 
 // Price/Rep sync — a DIFFERENT matching strategy than everything else above. GHL's
@@ -4436,7 +4456,26 @@ function autoMergeDuplicates(db, onlyContactId) {
   });
   return { count, remap };
 }
-function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db); if (r.count || l || c) saveDB(db); return r.count; }
+// Pairs the shop split earlier ("<id>~earlier-...") that are plainly one edited appointment, by the same two tests as above.
+function autoMergeMoved(db, onlyContactId) {
+  const remap = {}, sys = { auth: { label: "Auto (same appointment edited)", role: "system" } }; let count = 0;
+  db.sales.filter((s) => s.ghlOpportunityId && !String(s.ghlOpportunityId).includes("~") && s.date && (!onlyContactId || s.contactId === onlyContactId) && !liveJobWorked(s)).forEach((later) => {
+    const earlier = db.sales.filter((e) => e !== later && String(e.ghlOpportunityId || "").startsWith(`${later.ghlOpportunityId}~earlier-`) && e.date && Date.parse(e.date) < Date.parse(later.date)).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    if (earlier && later.ghlAppointmentId && earlier.ghlAppointmentId && String(later.ghlAppointmentId) !== String(earlier.ghlAppointmentId)) return;   // GHL says these are two different appointments: that is final
+    if (!earlier || isServiced(earlier) || earlier.status === "cancelled" || !["pending", "no_show", "unconfirmed", undefined, null, ""].includes(earlier.status)) return;
+    const stub = !vehicleKey(earlier.car) && vehicleKey(later.car), moved = Date.parse(earlier.date) < Date.now() && sameSlotAndPrice(earlier, later.date, later.car, later.baseService);
+    if (!stub && !moved) return;
+    const r = mergeJobPair(db, sys, later.id, earlier.id, { force: true, label: "Merged back (the same appointment was edited)" }); if (r.ok) { remap[later.id] = earlier.id; count++; }
+  });
+  return { count, remap };
+}
+// "These two are the same appointment": the owner says so, and the newer one is folded into the older (which keeps its original close time and credits).
+app.post("/api/manager/jobs/merge", requireOwner, (req, res) => {
+  const db = loadDB(), b = req.body || {}, r = mergeJobPair(db, req, b.liveId, b.earlierId, { force: true, label: "Merged back (you said these are the same appointment)" });
+  if (!r.ok) return res.status(r.status || 400).json({ error: r.error }); saveDB(db); res.json(r);
+});
+app.post("/api/owner/auto-clean", requireOwner, (req, res) => { const out = runAutoMerge(); res.json(out); });
+function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db); if (r.count || m.count || l || c) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
 
 // ===== REDO TRACKING =====
 // A redo record belongs to the ORIGINAL job and to the people who worked it (the techs, and any manager who helped hands-on), because their work is what came back.
