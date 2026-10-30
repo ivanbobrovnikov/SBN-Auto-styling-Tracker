@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-30-redocal";
+const UI_BUILD = "2026-10-30-privacy";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -621,7 +621,7 @@ function renderBottomNav() {
     allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
-    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
+    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
     primaryKeys = ["manager-jobs", "owner-attendance", "owner-search", "manager-performance"];
   } else if (session.role === "sales") {
     allTabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
@@ -1064,7 +1064,7 @@ async function renderManagerTabContent(content) {
   if (currentTab === "owner-cleanup") return renderCleanup(content);
   if (currentTab === "owner-redos") return renderRedos(content);
   if (currentTab === "owner-deadbookings") return renderDeadBookings(content);
-  if (currentTab === "owner-team") return renderOwnerTeam(content);
+  if (currentTab === "owner-team") return session.role === "owner" ? renderOwnerTeam(content) : content.appendChild(el("div", { class: "card muted", text: "Only the owner can see this." }));
   if (currentTab === "manager-cash") return renderCashLog(content);
   if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
   if (currentTab === "manager-performance") return renderManagerPerformance(content);
@@ -1126,7 +1126,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-cash") return renderOwnerCash(content);
   if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
-  if (currentTab === "owner-team") return renderOwnerTeam(content);
+  if (currentTab === "owner-team") return session.role === "owner" ? renderOwnerTeam(content) : content.appendChild(el("div", { class: "card muted", text: "Only the owner can see this." }));
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
   if (currentTab === "owner-salesreps") return renderOwnerSalesReps(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);

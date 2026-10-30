@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-30-redocal";
+const BUILD = "2026-10-30-privacy";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -997,13 +997,14 @@ app.post("/api/logout", (req, res) => {
 // ---------- employees (owner or manager can manage; employee can read own record) ----------
 app.get("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
+  if (req.auth.role !== "owner") return res.json(db.employees.map((e) => ({ id: e.id, name: e.name })));   // a manager gets names only: pay is the owner's business
   res.json(db.employees.map((e) => ({
     id: e.id, name: e.name, initials: e.initials || "", titleTags: staffTags(e), tagClashes: staffClashes(db, e), commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0,
     payType: e.payType || null, salaryPerPeriod: e.salaryPerPeriod || 0, hourlyRate: e.hourlyRate || 0, carCommissionRate: e.carCommissionRate || 0,
   })));
 });
 
-app.post("/api/employees", requireManager, (req, res) => {
+app.post("/api/employees", requireOwner, (req, res) => {
   const db = loadDB();
   const { name, commissionRate, walkInCommissionRate, pin, payType, salaryPerPeriod, hourlyRate, carCommissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
@@ -1019,7 +1020,7 @@ app.post("/api/employees", requireManager, (req, res) => {
   res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate, payType: emp.payType, salaryPerPeriod: emp.salaryPerPeriod, hourlyRate: emp.hourlyRate, carCommissionRate: emp.carCommissionRate });
 });
 
-app.patch("/api/employees/:id", requireManager, (req, res) => {
+app.patch("/api/employees/:id", requireOwner, (req, res) => {
   const db = loadDB();
   const emp = db.employees.find((e) => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: "Not found." });
@@ -1036,7 +1037,7 @@ app.patch("/api/employees/:id", requireManager, (req, res) => {
   res.json({ ok: true, initials: emp.initials || "", titleTags: staffTags(emp), tagClashes: staffClashes(db, emp) });
 });
 
-app.delete("/api/employees/:id", requireManager, (req, res) => {
+app.delete("/api/employees/:id", requireOwner, (req, res) => {
   const db = loadDB();
   db.employees = db.employees.filter((e) => e.id !== req.params.id);
   saveDB(db);
