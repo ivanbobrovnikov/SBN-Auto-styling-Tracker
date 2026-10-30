@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-30-va2";
+const UI_BUILD = "2026-10-30-closers";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3475,6 +3475,14 @@ async function renderCleanup(content) {
     ghlCard.appendChild(btn); ghlCard.appendChild(out);
   };
   api("/api/owner/ghl-sync-status").then((st) => drawGhl(st), () => drawGhl(null));
+  // Who a walk-in goes to: the first word of the title. This card lists everyone's tag and flags anything that stops it working.
+  const tagCard = el("div", { class: "card", "data-part": "closer-tags" }); content.appendChild(tagCard);
+  api("/api/owner/closer-tags").then((d) => {
+    tagCard.innerHTML = "";
+    tagCard.appendChild(el("div", { style: "font-weight:600;margin-bottom:4px", text: "Walk-ins: who closed it" }));
+    tagCard.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", text: "When a manager or tech puts their initials or first name FIRST in the title (like \"IK 2019 BMW X5\" or \"Ivan 2019 BMW X5\"), the job becomes a walk-in and goes to their check at their walk-in rate once the car has arrived and been paid. A sales rep's initials always win. A closer you pick by hand is never changed." }));
+    d.people.forEach((x) => { const bad = x.clash.length ? `${x.clash.join(", ")} is shared with someone else, so it won't be used for either of you` : !x.walkInRate ? "walk-in rate is 0%, so no commission would be paid" : x.repClash.length ? `${x.repClash.join(", ")} is also a sales rep's initials (the rep wins)` : ""; tagCard.appendChild(el("div", { class: "row", "data-part": "closer-tag-row", style: "font-size:13px;padding:3px 0;gap:10px" }, [el("span", { style: "min-width:0", text: `${x.name} (${x.type === "manager" ? "manager" : "tech"})` }), el("span", { class: bad ? "" : "muted", style: bad ? "color:var(--warn);text-align:right" : "text-align:right", text: bad || x.tags.join("  or  ") })])); });
+  }, () => { tagCard.remove(); });
   const body = el("div");
   const salesReps = await api("/api/manager/salesreps-list");
   const employees = await api("/api/manager/employees");
