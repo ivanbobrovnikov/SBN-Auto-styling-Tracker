@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-30-closers";
+const UI_BUILD = "2026-10-30-dupes";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -5203,6 +5203,7 @@ async function renderTestTool(content) {
         (d.nameOnlyDuplicates || []).forEach((group) => {
           diagResult.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
             el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: `"${group.customerName}" appears ${group.count} times — could be a reschedule moved to a different day, or a genuine repeat visit. Check the dates before deleting:` }),
+            group.jobs.length === 2 ? el("button", { class: "primary", "data-act": "merge-pair", style: "margin:2px 0 8px;font-size:13px;padding:8px 14px", text: "Same appointment: merge into one", onclick: async () => { const [e, l] = group.jobs.slice().sort((x, y) => (x.date < y.date ? -1 : 1)); if (!confirm(`Merge these two into ONE job? It keeps the original close time and credits, and takes the later date and title (${formatDateTime(l.date)}).`)) return; try { await api("/api/manager/jobs/merge", { method: "POST", body: JSON.stringify({ liveId: l.id, earlierId: e.id }) }); runDiag(); } catch (err) { alert(err.message || "Couldn't merge those."); } } }) : null,
             ...group.jobs.map((j) => el("div", { class: "row", style: "margin-bottom:4px" }, [
               el("div", { style: "font-size:12px" }, [
                 el("div", { text: j.car || "(no car)" }),
