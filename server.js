@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-30-va2";
+const BUILD = "2026-10-30-closers";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -403,12 +403,34 @@ function repFromTitleInitials(db, title) {
   return null;
 }
 
+// ---- Walk-ins closed by a manager or a tech: found from the FIRST word of the title (their initials or their first name) ----
+// Sales reps' initials are checked first and win. A match has to be exactly one person (two people sharing a tag are never guessed between), and only the first word is looked at, so a
+// model like "CR-V" in the middle of a title can't be mistaken for someone's initials.
+function staffTags(name) {
+  const words = String(name || "").trim().split(/\s+/).filter(Boolean).map((w) => w.replace(/[^A-Za-z]/g, "")).filter(Boolean), tags = [];
+  if (words.length >= 2) { tags.push((words[0][0] + words[words.length - 1][0]).toUpperCase()); if (words.length >= 3) tags.push(words.map((w) => w[0]).join("").toUpperCase()); }
+  if (words.length && words[0].length >= 3) tags.push(words[0].toUpperCase());
+  return [...new Set(tags)];
+}
+function staffFromTitle(db, title) {
+  const first = (String(title || "").match(/[A-Za-z]+/) || [])[0]; if (!first || first.length < 2) return null;
+  const tag = first.toUpperCase(), hits = [];
+  db.managers.forEach((m) => { if (staffTags(m.name).includes(tag)) hits.push({ type: "manager", id: m.id, name: m.name }); });
+  db.employees.forEach((e) => { if (staffTags(e.name).includes(tag)) hits.push({ type: "employee", id: e.id, name: e.name }); });
+  return hits.length === 1 ? hits[0] : null;
+}
+function autoCloserNote(db, sale, before) {
+  if (sale.walkInClosedAuto === "title" && sale.walkInClosedByName && sale.walkInClosedByName !== before) logAudit(db, { auth: { label: "Auto (title)", role: "system" } }, sale, "Walk-in closer", before || "", sale.walkInClosedByName);
+}
+
 function resolveSalesRepAttribution(db, salesRepName, appointmentTitle) {
   // Title initials are the trusted source now — proven more reliable than GHL's own
   // "Contact Owner" field, which reflects generic account ownership rather than who
   // actually closed this specific deal. Checked first, regardless of what else was sent.
   const titleRep = repFromTitleInitials(db, appointmentTitle);
   if (titleRep) return { salesRepId: titleRep.id, salesRepName: titleRep.name, isWalkIn: false };
+  const titleStaff = staffFromTitle(db, appointmentTitle);
+  if (titleStaff) return { salesRepId: null, salesRepName: "Walk-in (booked by staff)", isWalkIn: true, walkInClosedByType: titleStaff.type, walkInClosedById: titleStaff.id, walkInClosedByName: titleStaff.name, closerSource: "title" };
 
   if (!salesRepName) return null;
   const nameLower = String(salesRepName).trim().toLowerCase();
@@ -649,10 +671,13 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
   if (attribution) {
     sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
-    if (attribution.walkInClosedByType) {
+    if (attribution.walkInClosedByType && !sale.closerLocked) {            // a closer chosen by hand is never overwritten
+      const wasCloser = sale.walkInClosedByName;
       sale.walkInClosedByType = attribution.walkInClosedByType;
       sale.walkInClosedById = attribution.walkInClosedById;
       sale.walkInClosedByName = attribution.walkInClosedByName;
+      sale.walkInClosedAuto = attribution.closerSource || null;
+      autoCloserNote(db, sale, wasCloser);
     }
   }
   else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
@@ -1465,10 +1490,13 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   const attribution = resolveSalesRepAttribution(db, salesRepName, sale.car);
   if (attribution) {
     sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
-    if (attribution.walkInClosedByType) {
+    if (attribution.walkInClosedByType && !sale.closerLocked) {            // a closer chosen by hand is never overwritten
+      const wasCloser = sale.walkInClosedByName;
       sale.walkInClosedByType = attribution.walkInClosedByType;
       sale.walkInClosedById = attribution.walkInClosedById;
       sale.walkInClosedByName = attribution.walkInClosedByName;
+      sale.walkInClosedAuto = attribution.closerSource || null;
+      autoCloserNote(db, sale, wasCloser);
     }
   }
   db.debugLog.unshift({
@@ -3033,6 +3061,7 @@ function patchJobHandler(req, res) {
     sale.walkInClosedByType = req.body.walkInClosedByType;
     sale.walkInClosedById = req.body.walkInClosedById;
     sale.walkInClosedByName = person ? person.name : "Unknown";
+    sale.closerLocked = true; sale.walkInClosedAuto = null;                 // chosen by a person: automation leaves it alone from now on
   }
   saveDB(db);
   res.json({ ok: true });
@@ -4407,7 +4436,7 @@ function autoMergeDuplicates(db, onlyContactId) {
   });
   return { count, remap };
 }
-function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), l = autoLinkRedos(db); if (r.count || l) saveDB(db); return r.count; }
+function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db); if (r.count || l || c) saveDB(db); return r.count; }
 
 // ===== REDO TRACKING =====
 // A redo record belongs to the ORIGINAL job and to the people who worked it (the techs, and any manager who helped hands-on), because their work is what came back.
@@ -4549,6 +4578,26 @@ app.get("/api/cross-location/va-feed", (req, res) => {
   res.json({ locationLabel: SHOP_LOCATION_LABEL, kind, rows });
 });
 
+// Existing walk-ins with no closer: fill them in from the title, but only in pay periods that have NOT been run (a check that has gone out never changes underneath you),
+// and only for recent jobs.
+function autoAssignWalkInClosers(db) {
+  const sys = { auth: { label: "Auto (title)", role: "system" } }, cutoff = Date.now() - 60 * 86400000; let n = 0;
+  const runs = (db.payrollRuns || []), inRun = (s) => { const day = EASTERN_DAY_FMT.format(new Date(s.date)); return runs.some((r) => r.start <= day && day <= r.end); };
+  db.sales.filter((s) => s.isWalkIn && !s.walkInClosedById && !s.closerLocked && s.status !== "cancelled" && !redoFree(s) && Date.parse(s.date) >= cutoff && !inRun(s)).forEach((s) => {
+    const who = staffFromTitle(db, s.car); if (!who) return;
+    s.walkInClosedByType = who.type; s.walkInClosedById = who.id; s.walkInClosedByName = who.name; s.walkInClosedAuto = "title";
+    logAudit(db, sys, s, "Walk-in closer", "", who.name); n++;
+  });
+  return n;
+}
+app.post("/api/owner/closer-backfill", requireOwner, (req, res) => { const db = loadDB(), n = autoAssignWalkInClosers(db); if (n) saveDB(db); res.json({ assigned: n }); });
+// What each person types at the start of a title for it to be theirs, and anything that would stop it working.
+app.get("/api/owner/closer-tags", requireOwner, (req, res) => {
+  const db = loadDB(), people = [...db.managers.map((m) => ({ type: "manager", p: m })), ...db.employees.map((e) => ({ type: "employee", p: e }))].map(({ type, p }) => ({ type, name: p.name, tags: staffTags(p.name), walkInRate: p.walkInCommissionRate || 0 }));
+  const count = {}; people.forEach((x) => x.tags.forEach((t) => { count[t] = (count[t] || 0) + 1; }));
+  const repTags = new Set(db.salesReps.map((r) => String(r.initials || "").toUpperCase()).filter(Boolean));
+  res.json({ people: people.map((x) => ({ ...x, clash: x.tags.filter((t) => count[t] > 1), repClash: x.tags.filter((t) => repTags.has(t)) })).sort((a, b) => a.name.localeCompare(b.name)) });
+});
 // ===== LIVE MIRROR OF GHL =====
 // GHL sends no signal for a plain edit, and moving an appointment to another calendar can give it a NEW appointment id, which used to leave the old job behind as a duplicate.
 // So the tracker asks GHL directly: right after a booking arrives (about 2 seconds later), every 10 minutes for upcoming jobs, and on demand. For one customer it
