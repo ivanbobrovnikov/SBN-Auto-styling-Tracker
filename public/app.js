@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-30-dupes";
+const UI_BUILD = "2026-10-30-redocal";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2822,6 +2822,7 @@ async function renderOwnerTeam(content) {
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
   const rateInput = el("input", { type: "number", placeholder: "Upsell commission %", style: "max-width:150px" });
   const walkInRateInput = el("input", { type: "number", placeholder: "Walk-in close %", style: "max-width:140px" });
+  const initialsNewInput = el("input", { placeholder: "Initials (optional)", maxlength: "4", "data-field": "new-initials", style: "max-width:140px;text-transform:uppercase" });
   const notice = el("div", { class: "notice" });
   const promoteNotice = el("div", { class: "notice" });
   const list = el("div");
@@ -2834,6 +2835,13 @@ async function renderOwnerTeam(content) {
       rate.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
       const walkInRate = el("input", { type: "number", value: e.walkInCommissionRate || 0, style: "max-width:70px" });
       walkInRate.addEventListener("change", () => api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ walkInCommissionRate: walkInRate.value }) }));
+      const initialsInput = el("input", { type: "text", maxlength: "4", placeholder: ((e.titleTags || [])[0] || "").slice(0, 4), value: e.initials || "", "data-field": "staff-initials", "aria-label": "Initials for titles", style: "max-width:64px;text-transform:uppercase" });
+      const tagsNote = el("span", { class: "muted", "data-part": "staff-tags", style: "font-size:11px" });
+      let currentTags = e.titleTags || [], clashes = e.tagClashes || [];
+      const showNote = (err) => { if (err) { tagsNote.textContent = err; tagsNote.style.color = "var(--red)"; return; } const clash = clashes.length ? `${[...new Set(clashes.map((c) => c.tag))].join(", ")} is also ${[...new Set(clashes.map((c) => c.with))].join(" and ")}'s, so it won't count for either of you. Type your own initials.` : "", zero = Number(walkInRate.value) > 0 ? "" : "Walk-in close is 0%, so a walk-in under these initials earns nothing."; tagsNote.style.color = clash || zero ? "var(--warn)" : ""; tagsNote.textContent = [currentTags.length ? "Answers to " + currentTags.join(" or ") : "", clash, zero].filter(Boolean).join(". "); };
+      showNote();
+      walkInRate.addEventListener("input", () => showNote());
+      initialsInput.addEventListener("change", async () => { try { const r = await api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ initials: initialsInput.value }) }); initialsInput.value = r.initials || ""; currentTags = r.titleTags || []; clashes = r.tagClashes || []; showNote(); loadList(); } catch (err) { showNote(err.message || "Couldn't save those initials."); } });
       const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
 
@@ -2860,6 +2868,9 @@ async function renderOwnerTeam(content) {
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", { style: "flex:1;font-weight:500", text: e.name }),
           el("button", { class: "icon-danger", onclick: async () => { await api(`/api/employees/${e.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+        ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px" }, [
+          el("span", { class: "muted", style: "font-size:11.5px;font-weight:600" , text: "Initials for titles:" }), initialsInput, tagsNote,
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
           el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
@@ -2898,10 +2909,10 @@ async function renderOwnerTeam(content) {
 
   content.appendChild(el("div", { class: "card" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD EMPLOYEE — give them the PIN so they can log in. Walk-in close % only pays out once a job is marked both Arrived AND Paid." }),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput, walkInRateInput,
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, initialsNewInput, pinInput, rateInput, walkInRateInput,
       el("button", { class: "primary", onclick: async () => {
         try {
-          await api("/api/employees", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value, walkInCommissionRate: walkInRateInput.value }) });
+          await api("/api/employees", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value, walkInCommissionRate: walkInRateInput.value, initials: initialsNewInput.value }) }); initialsNewInput.value = "";
           nameInput.value = ""; pinInput.value = ""; rateInput.value = ""; walkInRateInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
@@ -3360,6 +3371,31 @@ function renderRedoSection(job, onDone) {
   api(`/api/manager/jobs/${job.id}/redos`).then(draw, () => { box.textContent = ""; });
   return wrap;
 }
+// The owner picks which GHL calendar is the Redo calendar. Anything booked on it is a free redo, linked to the car's earlier job and the techs who worked it.
+function redoCalendarCard(onChange) {
+  const box = el("div", { class: "card", "data-part": "redo-calendar-card" }), msg = el("div", { style: "font-size:13px;min-height:16px;margin-top:8px" });
+  const say = (t, c) => { msg.textContent = t; msg.style.color = c || "var(--sub)"; };
+  async function set(calendarId, isRedo, confirmMany) {
+    try { const r = await api("/api/owner/redo-calendars", { method: "POST", body: JSON.stringify({ calendarId, isRedo, confirmMany }) }); await draw(); say(isRedo ? `Done. Every booking on this calendar from now on is a free redo.${r.flagged ? ` ${r.flagged} existing booking${r.flagged === 1 ? "" : "s"} marked as redos, ${r.linked} linked to the original job.` : ""}` : "Turned off. New bookings on it are treated as normal jobs. Redos already marked stay as they are.", "var(--green)"); if (onChange) onChange(); }
+    catch (e) { if (e && e.data && e.data.count && confirm(`${e.message}\n\nIt has ${e.data.count} bookings. Only continue if this really is your Redo calendar. Mark all of them as free redos?`)) return set(calendarId, isRedo, true); say(e.message || "Couldn't save that.", "var(--red)"); }
+  }
+  async function draw() {
+    const d = await api("/api/owner/redo-calendars"); box.innerHTML = "";
+    box.appendChild(el("div", { style: "font-weight:600;margin-bottom:4px", text: "Redo calendar" }));
+    box.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:10px", text: "Anything booked on your Redo calendar counts as a redo: it's free (no revenue or commission), and it's linked to the car's earlier job so it counts against the techs who worked it. Book a test redo on that calendar in GHL, then pick it below." }));
+    if (!d.calendars.length) box.appendChild(el("div", { class: "muted", style: "font-size:13px", text: "No bookings with a calendar yet. Book a test appointment on your Redo calendar in GHL (copy the original job's title), then come back here." }));
+    d.calendars.forEach((c) => box.appendChild(el("div", { class: "row", "data-part": "redo-calendar-row", style: "padding:8px 0;border-top:1px solid var(--line);gap:10px;align-items:center" }, [
+      el("div", { style: "min-width:0;flex:1" }, [
+        el("div", { style: "font-size:14px;font-weight:600" , text: `Calendar \u2026${String(c.calendarId).slice(-6)}${c.isRedo ? "  \u2713 REDO CALENDAR" : ""}`, ...(c.isRedo ? { class: "redo-on" } : {}) }),
+        el("div", { class: "muted", style: "font-size:12px;overflow-wrap:anywhere", text: c.last ? `${c.bookings} booking${c.bookings === 1 ? "" : "s"} \u00B7 last: ${c.last.car || c.last.customerName || "(no title)"} \u00B7 ${formatDateTime(c.last.date)}` : "No bookings yet" }),
+      ]),
+      el("button", { class: c.isRedo ? "ghost" : "primary", "data-act": c.isRedo ? "redo-cal-off" : "redo-cal-on", style: "font-size:12.5px;padding:6px 12px;white-space:nowrap", text: c.isRedo ? "Turn off" : "This is my Redo calendar", onclick: () => set(c.calendarId, !c.isRedo) }),
+    ])));
+    box.appendChild(msg);
+  }
+  draw().catch(() => box.remove()); return box;
+}
+
 async function renderRedos(content) {
   let data = null, view = "people"; const open = new Set(), body = el("div");
   const picker = renderPeriodPicker((p) => load(p), "month");
@@ -3413,6 +3449,7 @@ async function renderRedos(content) {
     }
   }
   content.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", text: "A redo counts against the techs who worked the original car. Log one from the car's appointment: open the job and press \"Car came back for a redo\"." }));
+  if (session.role === "owner") content.appendChild(redoCalendarCard(() => reload()));
   content.appendChild(picker.el); content.appendChild(body);
   await load();
 }
@@ -3475,14 +3512,6 @@ async function renderCleanup(content) {
     ghlCard.appendChild(btn); ghlCard.appendChild(out);
   };
   api("/api/owner/ghl-sync-status").then((st) => drawGhl(st), () => drawGhl(null));
-  // Who a walk-in goes to: the first word of the title. This card lists everyone's tag and flags anything that stops it working.
-  const tagCard = el("div", { class: "card", "data-part": "closer-tags" }); content.appendChild(tagCard);
-  api("/api/owner/closer-tags").then((d) => {
-    tagCard.innerHTML = "";
-    tagCard.appendChild(el("div", { style: "font-weight:600;margin-bottom:4px", text: "Walk-ins: who closed it" }));
-    tagCard.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", text: "When a manager or tech puts their initials or first name FIRST in the title (like \"IK 2019 BMW X5\" or \"Ivan 2019 BMW X5\"), the job becomes a walk-in and goes to their check at their walk-in rate once the car has arrived and been paid. A sales rep's initials always win. A closer you pick by hand is never changed." }));
-    d.people.forEach((x) => { const bad = x.clash.length ? `${x.clash.join(", ")} is shared with someone else, so it won't be used for either of you` : !x.walkInRate ? "walk-in rate is 0%, so no commission would be paid" : x.repClash.length ? `${x.repClash.join(", ")} is also a sales rep's initials (the rep wins)` : ""; tagCard.appendChild(el("div", { class: "row", "data-part": "closer-tag-row", style: "font-size:13px;padding:3px 0;gap:10px" }, [el("span", { style: "min-width:0", text: `${x.name} (${x.type === "manager" ? "manager" : "tech"})` }), el("span", { class: bad ? "" : "muted", style: bad ? "color:var(--warn);text-align:right" : "text-align:right", text: bad || x.tags.join("  or  ") })])); });
-  }, () => { tagCard.remove(); });
   const body = el("div");
   const salesReps = await api("/api/manager/salesreps-list");
   const employees = await api("/api/manager/employees");
@@ -4786,6 +4815,7 @@ async function renderOwnerManagers(content) {
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
   const rateInput = el("input", { type: "number", placeholder: "Upsell commission %", style: "max-width:150px" });
   const walkInRateInput = el("input", { type: "number", placeholder: "Walk-in close %", style: "max-width:140px" });
+  const initialsNewInput = el("input", { placeholder: "Initials (optional)", maxlength: "4", "data-field": "new-initials", style: "max-width:140px;text-transform:uppercase" });
   const notice = el("div", { class: "notice" });
   const demoteNotice = el("div", { class: "notice", "data-part": "demote-notice" });
   const list = el("div");
@@ -4799,6 +4829,13 @@ async function renderOwnerManagers(content) {
       rate.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ commissionRate: rate.value }) }));
       const walkInRate = el("input", { type: "number", value: m.walkInCommissionRate || 0, style: "max-width:70px" });
       walkInRate.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ walkInCommissionRate: walkInRate.value }) }));
+      const initialsInput = el("input", { type: "text", maxlength: "4", placeholder: ((m.titleTags || [])[0] || "").slice(0, 4), value: m.initials || "", "data-field": "staff-initials", "aria-label": "Initials for titles", style: "max-width:64px;text-transform:uppercase" });
+      const tagsNote = el("span", { class: "muted", "data-part": "staff-tags", style: "font-size:11px" });
+      let currentTags = m.titleTags || [], clashes = m.tagClashes || [];
+      const showNote = (err) => { if (err) { tagsNote.textContent = err; tagsNote.style.color = "var(--red)"; return; } const clash = clashes.length ? `${[...new Set(clashes.map((c) => c.tag))].join(", ")} is also ${[...new Set(clashes.map((c) => c.with))].join(" and ")}'s, so it won't count for either of you. Type your own initials.` : "", zero = Number(walkInRate.value) > 0 ? "" : "Walk-in close is 0%, so a walk-in under these initials earns nothing."; tagsNote.style.color = clash || zero ? "var(--warn)" : ""; tagsNote.textContent = [currentTags.length ? "Answers to " + currentTags.join(" or ") : "", clash, zero].filter(Boolean).join(". "); };
+      showNote();
+      walkInRate.addEventListener("input", () => showNote());
+      initialsInput.addEventListener("change", async () => { try { const r = await api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ initials: initialsInput.value }) }); initialsInput.value = r.initials || ""; currentTags = r.titleTags || []; clashes = r.tagClashes || []; showNote(); loadList(); } catch (err) { showNote(err.message || "Couldn't save those initials."); } });
       const newPinInput = el("input", { type: "text", placeholder: "New PIN", style: "max-width:100px" });
       const resetNotice = el("span", { class: "muted", style: "font-size:11px" });
 
@@ -4839,6 +4876,9 @@ async function renderOwnerManagers(content) {
           }, text: "Demote to tech" }),
           el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
         ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px" }, [
+          el("span", { class: "muted", style: "font-size:11.5px;font-weight:600" , text: "Initials for titles:" }), initialsInput, tagsNote,
+        ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
           el("span", { class: "muted", style: "font-size:11.5px", text: "Upsell:" }), rate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
           el("span", { class: "muted", style: "font-size:11.5px;margin-left:6px", text: "Walk-in close:" }), walkInRate, el("span", { class: "muted", style: "font-size:11.5px", text: "%" }),
@@ -4862,10 +4902,10 @@ async function renderOwnerManagers(content) {
 
   content.appendChild(el("div", { class: "card" }, [
     el("div", { class: "muted", style: "margin-bottom:10px", text: "ADD MANAGER — they get their own PIN, a Job Status dashboard, search, and their own upsell performance (no shop-wide revenue or other people's commissions). Walk-in close % only pays out once a job is marked both Arrived AND Paid." }),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, rateInput, walkInRateInput,
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, initialsNewInput, pinInput, rateInput, walkInRateInput,
       el("button", { class: "primary", onclick: async () => {
         try {
-          await api("/api/managers", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value, walkInCommissionRate: walkInRateInput.value }) });
+          await api("/api/managers", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value, commissionRate: rateInput.value, walkInCommissionRate: walkInRateInput.value, initials: initialsNewInput.value }) }); initialsNewInput.value = "";
           nameInput.value = ""; pinInput.value = ""; rateInput.value = ""; walkInRateInput.value = "";
           notice.className = "notice ok"; notice.textContent = "Added.";
           loadList();
@@ -5190,7 +5230,8 @@ async function renderTestTool(content) {
         ]));
         (d.contactDuplicates || []).forEach((group) => {
           diagResult.appendChild(el("div", { class: "card" }, [
-            el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: `Same customer, ${group.count} separate jobs — keep the real one, delete the rest:` }),
+            el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: `Same customer, ${group.count} jobs that could be one booking (same car, or not enough in the title to tell). Check before deleting:` }),
+            group.jobs.length === 2 ? el("button", { class: "primary", "data-act": "merge-pair", style: "margin:2px 0 8px;font-size:13px;padding:8px 14px", text: "Same appointment: merge into one", onclick: async () => { const [e, l] = group.jobs.slice().sort((x, y) => (x.date < y.date ? -1 : 1)); if (!confirm(`Merge these two into ONE job? It keeps the original close time and credits, and takes the later date and title (${formatDateTime(l.date)}).`)) return; try { await api("/api/manager/jobs/merge", { method: "POST", body: JSON.stringify({ liveId: l.id, earlierId: e.id }) }); runDiag(); } catch (err) { alert(err.message || "Couldn't merge those."); } } }) : null,
             ...group.jobs.map((j) => el("div", { class: "row", style: "margin-bottom:4px" }, [
               el("div", { style: "font-size:12px" }, [
                 el("div", { text: j.car || "(no car)" }),
@@ -5202,7 +5243,7 @@ async function renderTestTool(content) {
         });
         (d.nameOnlyDuplicates || []).forEach((group) => {
           diagResult.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
-            el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: `"${group.customerName}" appears ${group.count} times — could be a reschedule moved to a different day, or a genuine repeat visit. Check the dates before deleting:` }),
+            el("div", { class: "muted", style: "font-size:11px;margin-bottom:6px", text: `"${group.customerName}" appears ${group.count} times — these could be one booking (same car, or not enough in the title to tell). Check before deleting:` }),
             group.jobs.length === 2 ? el("button", { class: "primary", "data-act": "merge-pair", style: "margin:2px 0 8px;font-size:13px;padding:8px 14px", text: "Same appointment: merge into one", onclick: async () => { const [e, l] = group.jobs.slice().sort((x, y) => (x.date < y.date ? -1 : 1)); if (!confirm(`Merge these two into ONE job? It keeps the original close time and credits, and takes the later date and title (${formatDateTime(l.date)}).`)) return; try { await api("/api/manager/jobs/merge", { method: "POST", body: JSON.stringify({ liveId: l.id, earlierId: e.id }) }); runDiag(); } catch (err) { alert(err.message || "Couldn't merge those."); } } }) : null,
             ...group.jobs.map((j) => el("div", { class: "row", style: "margin-bottom:4px" }, [
               el("div", { style: "font-size:12px" }, [

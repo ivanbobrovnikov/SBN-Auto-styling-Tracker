@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-30-dupes";
+const BUILD = "2026-10-30-redocal";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -248,6 +248,7 @@ function applyTitlePricing(db, sale, opts = {}) {
 // Cleanup, it isn't counted as a new close, and it still appears on Job Status.
 // A job that has already been paid is never zeroed: real money is on it.
 function redoFree(s) { return !!s.isRedo && saleTotal(s) <= 0; }
+const redoCalendarSet = (db) => new Set((db.redoCalendarIds || []).map(String));
 function applyRedoRules(db, sale, opts = {}) {
   let changed = false;
   const log = (field, oldValue, newValue, actor) => {
@@ -256,6 +257,12 @@ function applyRedoRules(db, sale, opts = {}) {
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor, saleId: sale.id, car: sale.car, field, oldValue, newValue });
     db.auditLog = db.auditLog.slice(0, 1000);
   };
+  const onRedoCalendar = !!sale.calendarId && redoCalendarSet(db).has(String(sale.calendarId));
+  if (!sale.isRedo && !sale.redoDismissed && onRedoCalendar) {
+    sale.isRedo = true; sale.redoAuto = true; sale.redoByCalendar = true; changed = true;
+    log("Redo (no charge)", false, true, "Auto (booked on the Redo calendar)");
+  }
+  if (sale.isRedo && onRedoCalendar && !sale.redoByCalendar) { sale.redoByCalendar = true; changed = true; }
   if (!sale.isRedo && !sale.redoDismissed && titleSaysRedo(sale.car)) {
     sale.isRedo = true; sale.redoAuto = true; changed = true;
     log("Redo (no charge)", false, true, "Auto (title says redo)");
@@ -264,7 +271,7 @@ function applyRedoRules(db, sale, opts = {}) {
   const priced = !!parseTitlePricing(sale.car);
   const was = parseFloat(sale.basePrice) || 0;
   const mayZero = opts.force ? !sale.paid : (!sale.paid && !sale.completed);   // a quiet background pass never rewrites a finished job
-  if (!priced && !sale.priceLocked && was > 0 && mayZero) {
+  if ((!priced || sale.redoByCalendar) && !sale.priceLocked && was > 0 && mayZero) {   // on the Redo calendar it is free even if the copied title still carries the old price
     sale.basePrice = 0; sale.priceSource = "redo"; changed = true;
     log("Base price", was, 0, "Auto (redo, no charge)");
   }
@@ -406,17 +413,35 @@ function repFromTitleInitials(db, title) {
 // ---- Walk-ins closed by a manager or a tech: found from the FIRST word of the title (their initials or their first name) ----
 // Sales reps' initials are checked first and win. A match has to be exactly one person (two people sharing a tag are never guessed between), and only the first word is looked at, so a
 // model like "CR-V" in the middle of a title can't be mistaken for someone's initials.
-function staffTags(name) {
-  const words = String(name || "").trim().split(/\s+/).filter(Boolean).map((w) => w.replace(/[^A-Za-z]/g, "")).filter(Boolean), tags = [];
-  if (words.length >= 2) { tags.push((words[0][0] + words[words.length - 1][0]).toUpperCase()); if (words.length >= 3) tags.push(words.map((w) => w[0]).join("").toUpperCase()); }
+function staffTags(p) {
+  const name = typeof p === "string" ? p : (p && p.name) || "", custom = typeof p === "object" && p && p.initials ? String(p.initials).toUpperCase().replace(/[^A-Z]/g, "") : "";
+  const words = String(name).trim().split(/\s+/).filter(Boolean).map((w) => w.replace(/[^A-Za-z]/g, "")).filter(Boolean), tags = [];
+  if (custom) tags.push(custom);                 // initials typed in for this person replace the guessed ones
+  else if (words.length >= 2) { tags.push((words[0][0] + words[words.length - 1][0]).toUpperCase()); if (words.length >= 3) tags.push(words.map((w) => w[0]).join("").toUpperCase()); }
   if (words.length && words[0].length >= 3) tags.push(words[0].toUpperCase());
   return [...new Set(tags)];
+}
+// Anyone else (tech, manager or sales rep) who answers to one of this person's tags: shown on their own card so they know to type their own initials.
+function staffClashes(db, p) {
+  const mine = staffTags(p), out = [];
+  [...db.managers, ...db.employees].forEach((o) => { if (o.id !== p.id) staffTags(o).forEach((t) => { if (mine.includes(t)) out.push({ tag: t, with: o.name }); }); });
+  db.salesReps.forEach((r) => { const t = String(r.initials || "").toUpperCase(); if (t && mine.includes(t)) out.push({ tag: t, with: r.name }); });
+  return out;
+}
+// Initials typed in for a tech or manager: 2 to 4 letters, not a sales rep's, not anyone else's (guessed ones included), so a title can never mean two people.
+function cleanStaffInitials(db, raw, selfId) {
+  const v = String(raw == null ? "" : raw).trim().toUpperCase(); if (!v) return { value: "" };
+  if (!/^[A-Z]{2,4}$/.test(v)) return { error: "Initials are 2 to 4 letters, like IK." };
+  if (db.salesReps.some((r) => String(r.initials || "").toUpperCase() === v)) return { error: `${v} is a sales rep's initials, and a sales rep always wins. Pick different ones.` };
+  const other = [...db.managers, ...db.employees].find((x) => x.id !== selfId && staffTags(x).includes(v));
+  if (other) return { error: `${other.name} already answers to ${v}. Give one of you different initials.` };
+  return { value: v };
 }
 function staffFromTitle(db, title) {
   const first = (String(title || "").match(/[A-Za-z]+/) || [])[0]; if (!first || first.length < 2) return null;
   const tag = first.toUpperCase(), hits = [];
-  db.managers.forEach((m) => { if (staffTags(m.name).includes(tag)) hits.push({ type: "manager", id: m.id, name: m.name }); });
-  db.employees.forEach((e) => { if (staffTags(e.name).includes(tag)) hits.push({ type: "employee", id: e.id, name: e.name }); });
+  db.managers.forEach((m) => { if (staffTags(m).includes(tag)) hits.push({ type: "manager", id: m.id, name: m.name }); });
+  db.employees.forEach((e) => { if (staffTags(e).includes(tag)) hits.push({ type: "employee", id: e.id, name: e.name }); });
   return hits.length === 1 ? hits[0] : null;
 }
 function autoCloserNote(db, sale, before) {
@@ -505,14 +530,16 @@ function isDeadBooking(s) {
   return !isNaN(ms) && EASTERN_DAY_FMT.format(new Date(ms)) < EASTERN_DAY_FMT.format(new Date());
 }
 const serviceLine = (v) => { const t = String(v || "").toLowerCase(); if (/tint/.test(t)) return "tint"; if (/ceramic|coat/.test(t)) return "ceramic"; if (/ppf|paint protection/.test(t)) return "ppf"; return ""; };
-// Is the later booking plainly the SAME appointment, moved? The same service, the same price and the same time of day. (Used with "the earlier one never happened".)
-function sameSlotAndPrice(a, bIso, bTitle, bService) {
-  const sa = serviceLine(a.baseService), sb = serviceLine(bService || bTitle); if (!sa || !sb || sa !== sb) return false;
-  const tod = (iso) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" });
-  if (!a.date || !bIso || tod(a.date) !== tod(bIso)) return false;
-  const pa = a.titlePrice != null ? a.titlePrice : (parseFloat(a.basePrice) || 0), tp = parseTitlePricing(bTitle), pb = tp ? tp.total : null;
-  return pa > 0 && pb != null && Math.abs(pa - pb) < 0.005;
+// Two bookings could be the same one only if they are not clearly different services. (A tint and a ceramic coating for one car are two jobs.)
+function serviceCompat(a, b) { const x = serviceLine(a), y = serviceLine(b); return !x || !y || x === y; }
+// Could these two jobs be ONE booking? Not if GHL gave them different appointment ids, not if one was worked or cancelled, not if they are clearly different cars or different services.
+function couldBeSameBooking(a, b) {
+  const live = (x) => !isServiced(x) && x.status !== "cancelled";
+  if (a.ghlAppointmentId && b.ghlAppointmentId && String(a.ghlAppointmentId) !== String(b.ghlAppointmentId)) return false;
+  if (a.isRedo || b.isRedo) return false;   // a redo and the job it redoes are two jobs, never one
+  return live(a) && live(b) && !vehiclesDiffer(a.car, b.car) && serviceCompat(a.baseService, b.baseService);
 }
+const onlyPossibleSame = (group) => group.filter((a) => group.some((b) => b !== a && couldBeSameBooking(a, b)));
 function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCalendarId, incomingService, incomingApptId) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
@@ -538,9 +565,9 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
   const untouched = !isServiced(existing) && existing.status !== "cancelled";
   // The first booking only had a NAME as its title (no car in it), and the real title has come in since: it is the same appointment, filled in (and possibly moved).
   if (untouched && !vehicleKey(existing.car) && vehicleKey(incomingTitle)) return false;
-  // The earlier appointment never happened (its day has passed and nobody arrived or paid), and a later booking has the same service, the same price and the same time of day:
-  // that is the same appointment moved to a new day, with the car or the title corrected. A still-upcoming earlier booking is never treated this way (two cars), nor one that differs in price, service or time.
-  if (untouched && newMs > oldMs && oldMs < Date.now() && sameSlotAndPrice(existing, incomingIso, incomingTitle, incomingService)) return false;
+  // The SAME CAR and the same service, and the earlier appointment has not been worked: that is a reschedule (the same appointment moved), whether its old day has passed or not.
+  // A DIFFERENT car is never folded in here: a customer with two cars has two jobs.
+  if (untouched && newMs > oldMs && vehicleKey(existing.car) && vehicleKey(existing.car) === vehicleKey(incomingTitle) && serviceCompat(existing.baseService, incomingService || incomingTitle)) return false;
   // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment. The ONE exception is a clearly
   // DIFFERENT CAR while the first booking is still live: a customer bringing two cars in on one day. Both bookings arrive under the
   // same GHL id, and without this the second silently overwrote the first (the first car's job simply vanished).
@@ -718,6 +745,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   if (!sale.priceLocked) sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
   else sale.basePrice = sale.basePrice || 0;
   sale.priceSource = sale.priceLocked ? "manual" : "ghl";
+  sale.calendarId = calendarId || sale.calendarId || null;     // saved first, so the redo-calendar rule can see it
   applyTitleRules(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true }); // a real GHL update for this booking: the title's price wins, paid or not
   autoFlagRescheduleFromTitle(db, sale); // the title says rescheduled, and there is an earlier dead booking: not a new close
   sale.calendarId = calendarId || sale.calendarId || null;
@@ -970,7 +998,7 @@ app.post("/api/logout", (req, res) => {
 app.get("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
   res.json(db.employees.map((e) => ({
-    id: e.id, name: e.name, commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0,
+    id: e.id, name: e.name, initials: e.initials || "", titleTags: staffTags(e), tagClashes: staffClashes(db, e), commissionRate: e.commissionRate, walkInCommissionRate: e.walkInCommissionRate || 0,
     payType: e.payType || null, salaryPerPeriod: e.salaryPerPeriod || 0, hourlyRate: e.hourlyRate || 0, carCommissionRate: e.carCommissionRate || 0,
   })));
 });
@@ -979,7 +1007,9 @@ app.post("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
   const { name, commissionRate, walkInCommissionRate, pin, payType, salaryPerPeriod, hourlyRate, carCommissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
+  const ini = cleanStaffInitials(db, req.body.initials, null); if (ini.error) return res.status(400).json({ error: ini.error });
   const emp = {
+    initials: ini.value,
     id: newId(), name: name.trim(), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0, pinHash: hash(pin),
     payType: ["salary", "hourly", "commission"].includes(payType) ? payType : null,
     salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0, carCommissionRate: parseFloat(carCommissionRate) || 0,
@@ -1000,9 +1030,10 @@ app.patch("/api/employees/:id", requireManager, (req, res) => {
   if (req.body.salaryPerPeriod !== undefined) emp.salaryPerPeriod = parseFloat(req.body.salaryPerPeriod) || 0;
   if (req.body.hourlyRate !== undefined) emp.hourlyRate = parseFloat(req.body.hourlyRate) || 0;
   if (req.body.carCommissionRate !== undefined) emp.carCommissionRate = parseFloat(req.body.carCommissionRate) || 0;
+  if (req.body.initials !== undefined) { const ini = cleanStaffInitials(db, req.body.initials, emp.id); if (ini.error) return res.status(400).json({ error: ini.error }); emp.initials = ini.value; }
   if (req.body.pin) emp.pinHash = hash(req.body.pin);
   saveDB(db);
-  res.json({ ok: true });
+  res.json({ ok: true, initials: emp.initials || "", titleTags: staffTags(emp), tagClashes: staffClashes(db, emp) });
 });
 
 app.delete("/api/employees/:id", requireManager, (req, res) => {
@@ -1115,7 +1146,7 @@ app.post("/api/employees/:id/promote-to-manager", requireOwner, (req, res) => {
 app.get("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
   res.json(db.managers.map((m) => ({
-    id: m.id, name: m.name, commissionRate: m.commissionRate || 0, walkInCommissionRate: m.walkInCommissionRate || 0,
+    id: m.id, name: m.name, initials: m.initials || "", titleTags: staffTags(m), tagClashes: staffClashes(db, m), commissionRate: m.commissionRate || 0, walkInCommissionRate: m.walkInCommissionRate || 0,
     payType: m.payType || null, salaryPerPeriod: m.salaryPerPeriod || 0, hourlyRate: m.hourlyRate || 0, carCommissionRate: m.carCommissionRate || 0,
   })));
 });
@@ -1123,9 +1154,10 @@ app.get("/api/managers", requireOwner, (req, res) => {
 app.post("/api/managers", requireOwner, (req, res) => {
   const db = loadDB();
   const { name, pin, commissionRate, walkInCommissionRate, payType, salaryPerPeriod, hourlyRate, carCommissionRate } = req.body;
+  const ini = cleanStaffInitials(db, req.body.initials, null); if (ini.error) return res.status(400).json({ error: ini.error });
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
   const mgr = {
-    id: newId(), name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0,
+    id: newId(), initials: ini.value, name: name.trim(), pinHash: hash(pin), commissionRate: parseFloat(commissionRate) || 0, walkInCommissionRate: parseFloat(walkInCommissionRate) || 0,
     payType: ["salary", "hourly", "commission"].includes(payType) ? payType : null,
     salaryPerPeriod: parseFloat(salaryPerPeriod) || 0, hourlyRate: parseFloat(hourlyRate) || 0, carCommissionRate: parseFloat(carCommissionRate) || 0,
   };
@@ -1144,9 +1176,10 @@ app.patch("/api/managers/:id", requireOwner, (req, res) => {
   if (req.body.salaryPerPeriod !== undefined) mgr.salaryPerPeriod = parseFloat(req.body.salaryPerPeriod) || 0;
   if (req.body.hourlyRate !== undefined) mgr.hourlyRate = parseFloat(req.body.hourlyRate) || 0;
   if (req.body.carCommissionRate !== undefined) mgr.carCommissionRate = parseFloat(req.body.carCommissionRate) || 0;
+  if (req.body.initials !== undefined) { const ini = cleanStaffInitials(db, req.body.initials, mgr.id); if (ini.error) return res.status(400).json({ error: ini.error }); mgr.initials = ini.value; }
   if (req.body.pin) mgr.pinHash = hash(req.body.pin);
   saveDB(db);
-  res.json({ ok: true });
+  res.json({ ok: true, initials: mgr.initials || "", titleTags: staffTags(mgr), tagClashes: staffClashes(db, mgr) });
 });
 
 app.delete("/api/managers/:id", requireOwner, (req, res) => {
@@ -4144,6 +4177,7 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
   const byContact = {};
   withContactId.forEach((s) => { (byContact[s.contactId] = byContact[s.contactId] || []).push(s); });
   const contactDuplicates = Object.entries(byContact)
+    .map(([contactId, group]) => [contactId, onlyPossibleSame(group)])
     .filter(([id, group]) => group.length > 1)
     .map(([contactId, group]) => ({
       contactId, count: group.length,
@@ -4183,9 +4217,12 @@ app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
     const key = s.customerName.trim().toLowerCase();
     (byNameOnly[key] = byNameOnly[key] || []).push(s);
   });
+  // Only jobs that COULD be one booking are listed (see couldBeSameBooking), and a pair already shown in the list above is not shown twice.
+  const inContactList = new Set(contactDuplicates.flatMap((g) => g.jobs.map((x) => x.id)));
   const nameOnlyDuplicates = Object.entries(byNameOnly)
-    .filter(([key, group]) => group.length > 1)
-    .map(([key, group]) => ({
+    .map(([key, group]) => onlyPossibleSame(group).filter((x) => !inContactList.has(x.id)))
+    .filter((group) => group.length > 1)
+    .map((group) => ({
       customerName: group[0].customerName, count: group.length,
       jobs: group.map((s) => ({ id: s.id, car: s.car, date: s.date, basePrice: s.basePrice, ghlOpportunityId: s.ghlOpportunityId || null, contactId: s.contactId || null })),
     }));
@@ -4462,9 +4499,11 @@ function autoMergeMoved(db, onlyContactId) {
   db.sales.filter((s) => s.ghlOpportunityId && !String(s.ghlOpportunityId).includes("~") && s.date && (!onlyContactId || s.contactId === onlyContactId) && !liveJobWorked(s)).forEach((later) => {
     const earlier = db.sales.filter((e) => e !== later && String(e.ghlOpportunityId || "").startsWith(`${later.ghlOpportunityId}~earlier-`) && e.date && Date.parse(e.date) < Date.parse(later.date)).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
     if (earlier && later.ghlAppointmentId && earlier.ghlAppointmentId && String(later.ghlAppointmentId) !== String(earlier.ghlAppointmentId)) return;   // GHL says these are two different appointments: that is final
+    if (earlier && (earlier.isRedo || later.isRedo)) return;
     if (!earlier || isServiced(earlier) || earlier.status === "cancelled" || !["pending", "no_show", "unconfirmed", undefined, null, ""].includes(earlier.status)) return;
-    const stub = !vehicleKey(earlier.car) && vehicleKey(later.car), moved = Date.parse(earlier.date) < Date.now() && sameSlotAndPrice(earlier, later.date, later.car, later.baseService);
+    const stub = !vehicleKey(earlier.car) && vehicleKey(later.car), moved = vehicleKey(earlier.car) && vehicleKey(earlier.car) === vehicleKey(later.car) && serviceCompat(earlier.baseService, later.baseService);
     if (!stub && !moved) return;
+    if (isSeparateAppointment(earlier, later.date, later.car, later.calendarId, later.baseService, later.ghlAppointmentId)) return;   // the booking rules said these are two appointments (another calendar, another GHL appointment id, ...): never override that
     const r = mergeJobPair(db, sys, later.id, earlier.id, { force: true, label: "Merged back (the same appointment was edited)" }); if (r.ok) { remap[later.id] = earlier.id; count++; }
   });
   return { count, remap };
@@ -4525,6 +4564,32 @@ function redoStats(db, query) {
   return { people: list, events: events.slice(0, 300), totals: { redos: counted.length, notTechFault: events.length - counted.length, cars: carsTotal, rate: carsTotal ? Math.round((counted.length / carsTotal) * 1000) / 10 : null },
     reasons: Object.entries(reasonCounts).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count) };
 }
+// ---------- Redo calendars: anything booked on one is a free redo, linked to the car's earlier job ----------
+app.get("/api/owner/redo-calendars", requireOwner, (req, res) => {
+  const db = loadDB(), set = redoCalendarSet(db), seen = {};
+  db.sales.filter((s) => s.calendarId).forEach((s) => {
+    const k = String(s.calendarId), c = seen[k] || (seen[k] = { calendarId: k, bookings: 0, redoJobs: 0, last: null });
+    c.bookings++; if (s.isRedo && s.redoByCalendar) c.redoJobs++;
+    if (!c.last || String(s.date) > String(c.last.date)) c.last = { car: s.car || "", customerName: s.customerName || "", date: s.date };
+  });
+  set.forEach((id) => { if (!seen[id]) seen[id] = { calendarId: id, bookings: 0, redoJobs: 0, last: null }; });
+  res.json({ calendars: Object.values(seen).map((c) => ({ ...c, isRedo: set.has(c.calendarId) })).sort((a, b) => (b.isRedo - a.isRedo) || String((b.last || {}).date || "").localeCompare(String((a.last || {}).date || ""))) });
+});
+app.post("/api/owner/redo-calendars", requireOwner, (req, res) => {
+  const db = loadDB(), id = String((req.body || {}).calendarId || "").trim(), on = !!(req.body || {}).isRedo;
+  if (!id || id.length > 120) return res.status(400).json({ error: "Pick a calendar." });
+  db.redoCalendarIds = (db.redoCalendarIds || []).map(String);
+  if (!on) { db.redoCalendarIds = db.redoCalendarIds.filter((x) => x !== id); saveDB(db); return res.json({ ok: true, isRedo: false, flagged: 0, linked: 0 }); }
+  const existing = db.sales.filter((s) => String(s.calendarId || "") === id && s.status !== "cancelled" && !s.isRedo && !s.redoDismissed);
+  // A real Redo calendar is new and nearly empty. A busy one is almost certainly a normal calendar picked by mistake, and this would make all of it free.
+  if (existing.length > 20 && !(req.body || {}).confirmMany) return res.status(409).json({ error: `That calendar already has ${existing.length} bookings, which looks like a normal calendar and not your Redo calendar. Nothing was changed.`, count: existing.length });
+  if (!db.redoCalendarIds.includes(id)) db.redoCalendarIds.push(id);
+  const before = redoList(db).length; let flagged = 0;
+  existing.forEach((s) => { if (applyRedoRules(db, s, { force: true })) flagged++; });
+  autoLinkRedos(db);
+  saveDB(db); res.json({ ok: true, isRedo: true, flagged, linked: redoList(db).length - before });
+});
+
 app.get("/api/manager/redos", requireManager, (req, res) => {
   const db = loadDB(), out = redoStats(db, req.query);
   out.reasonsList = REDO_REASONS;
@@ -4630,13 +4695,6 @@ function autoAssignWalkInClosers(db) {
   return n;
 }
 app.post("/api/owner/closer-backfill", requireOwner, (req, res) => { const db = loadDB(), n = autoAssignWalkInClosers(db); if (n) saveDB(db); res.json({ assigned: n }); });
-// What each person types at the start of a title for it to be theirs, and anything that would stop it working.
-app.get("/api/owner/closer-tags", requireOwner, (req, res) => {
-  const db = loadDB(), people = [...db.managers.map((m) => ({ type: "manager", p: m })), ...db.employees.map((e) => ({ type: "employee", p: e }))].map(({ type, p }) => ({ type, name: p.name, tags: staffTags(p.name), walkInRate: p.walkInCommissionRate || 0 }));
-  const count = {}; people.forEach((x) => x.tags.forEach((t) => { count[t] = (count[t] || 0) + 1; }));
-  const repTags = new Set(db.salesReps.map((r) => String(r.initials || "").toUpperCase()).filter(Boolean));
-  res.json({ people: people.map((x) => ({ ...x, clash: x.tags.filter((t) => count[t] > 1), repClash: x.tags.filter((t) => repTags.has(t)) })).sort((a, b) => a.name.localeCompare(b.name)) });
-});
 // ===== LIVE MIRROR OF GHL =====
 // GHL sends no signal for a plain edit, and moving an appointment to another calendar can give it a NEW appointment id, which used to leave the old job behind as a duplicate.
 // So the tracker asks GHL directly: right after a booking arrives (about 2 seconds later), every 10 minutes for upcoming jobs, and on demand. For one customer it
