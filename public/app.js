@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-30-privacy";
+const UI_BUILD = "2026-10-30-privacy3";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -621,7 +621,7 @@ function renderBottomNav() {
     allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
-    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
+    allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
     primaryKeys = ["manager-jobs", "owner-attendance", "owner-search", "manager-performance"];
   } else if (session.role === "sales") {
     allTabs = [["sales-schedule", "My Bookings"], ["sales-fullschedule", "Full Schedule"], ["sales-performance", "My Performance"]];
@@ -837,7 +837,7 @@ function renderTipsSection(job, onDone) {
   wrap.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: tips.length ? `TIPS ON THIS CAR (${money(total)})` : "TIPS ON THIS CAR" }));
   const msg = el("div", { style: "font-size:12px;min-height:14px;margin-bottom:4px;color:var(--red)" });
   tips.forEach((t) => {
-    const who = (t.split || []).map((p) => `${p.name} ${money(p.amount)}`).join(", ");
+    const who = (t.split || []).map((p) => (p.amount == null ? p.name : `${p.name} ${money(p.amount)}`)).join(", ");
     wrap.appendChild(el("div", { class: "row", "data-part": "tip-row", style: "align-items:flex-start;gap:8px;margin-bottom:8px" }, [
       el("div", { style: "flex:1;min-width:0" }, [
         el("div", { style: "font-size:13px", text: `${money(t.amount)}${who ? " · " + who : ""}` }),
@@ -1064,7 +1064,7 @@ async function renderManagerTabContent(content) {
   if (currentTab === "owner-cleanup") return renderCleanup(content);
   if (currentTab === "owner-redos") return renderRedos(content);
   if (currentTab === "owner-deadbookings") return renderDeadBookings(content);
-  if (currentTab === "owner-team") return session.role === "owner" ? renderOwnerTeam(content) : content.appendChild(el("div", { class: "card muted", text: "Only the owner can see this." }));
+  if (currentTab === "owner-team") return session.role === "owner" ? renderOwnerTeam(content) : renderManagerRoster(content);
   if (currentTab === "manager-cash") return renderCashLog(content);
   if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
   if (currentTab === "manager-performance") return renderManagerPerformance(content);
@@ -1126,7 +1126,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-cash") return renderOwnerCash(content);
   if (currentTab === "owner-unpaid") return renderUnpaidArrived(content);
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
-  if (currentTab === "owner-team") return session.role === "owner" ? renderOwnerTeam(content) : content.appendChild(el("div", { class: "card muted", text: "Only the owner can see this." }));
+  if (currentTab === "owner-team") return session.role === "owner" ? renderOwnerTeam(content) : renderManagerRoster(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
   if (currentTab === "owner-salesreps") return renderOwnerSalesReps(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);
@@ -2817,6 +2817,23 @@ async function renderOwnerSales(content) {
   await load();
 }
 
+// What a manager sees on the Employees tab: names, a way to reset a PIN, and a way to add a new tech. No pay anywhere (that is the owner's).
+async function renderManagerRoster(content) {
+  const msg = el("div", { style: "font-size:13px;min-height:16px;margin:6px 0" }), say = (t, c) => { msg.textContent = t; msg.style.color = c || "var(--sub)"; };
+  const nameInput = el("input", { type: "text", placeholder: "Name", "data-field": "roster-name", style: "max-width:200px" });
+  const pinInput = el("input", { type: "text", inputmode: "numeric", placeholder: "PIN (4+ digits)", "data-field": "roster-pin", style: "max-width:150px" });
+  const list = el("div");
+  async function load() {
+    list.innerHTML = ""; const people = await api("/api/employees");
+    if (!people.length) list.appendChild(el("div", { class: "muted", text: "No employees yet." }));
+    people.forEach((e) => {
+      const np = el("input", { type: "text", inputmode: "numeric", placeholder: "New PIN", "data-field": "roster-newpin", style: "max-width:120px" }), note = el("span", { class: "muted", style: "font-size:12px" });
+      list.appendChild(el("div", { class: "card", "data-part": "roster-row" }, [el("div", { style: "font-weight:600;margin-bottom:8px", text: e.name }), el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [np, el("button", { class: "ghost", "data-act": "roster-reset", text: "Reset PIN", onclick: async () => { try { await api(`/api/employees/${e.id}`, { method: "PATCH", body: JSON.stringify({ pin: np.value }) }); np.value = ""; note.textContent = "PIN reset \u2713"; note.style.color = "var(--green)"; } catch (err) { note.textContent = err.message || "Couldn't reset that."; note.style.color = "var(--red)"; } } }), note])]));
+    });
+  }
+  content.appendChild(el("div", { class: "card", "data-part": "roster-add" }, [el("div", { style: "font-weight:600;margin-bottom:4px", text: "Add a tech" }), el("div", { class: "muted", style: "font-size:13px;margin-bottom:10px", text: "Give them the PIN so they can log in. Their pay is set by the owner." }), el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [nameInput, pinInput, el("button", { class: "primary", "data-act": "roster-add", text: "Add", onclick: async () => { say(""); try { await api("/api/employees", { method: "POST", body: JSON.stringify({ name: nameInput.value, pin: pinInput.value }) }); nameInput.value = ""; pinInput.value = ""; say("Added. They can log in with that PIN.", "var(--green)"); await load(); } catch (err) { say(err.message || "Couldn't add that.", "var(--red)"); } } })]), msg]));
+  content.appendChild(list); await load();
+}
 async function renderOwnerTeam(content) {
   const nameInput = el("input", { placeholder: "Name" });
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });

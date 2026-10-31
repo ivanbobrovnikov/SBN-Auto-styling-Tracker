@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-30-privacy";
+const BUILD = "2026-10-30-privacy3";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1004,8 +1004,16 @@ app.get("/api/employees", requireManager, (req, res) => {
   })));
 });
 
-app.post("/api/employees", requireOwner, (req, res) => {
+app.post("/api/employees", requireManager, (req, res) => {
   const db = loadDB();
+  if (req.auth.role !== "owner") {                        // a manager can add a person with a name and a PIN. Pay, rates and initials are the owner's alone.
+    const b = req.body || {}, extra = Object.keys(b).filter((k) => !["name", "pin"].includes(k) && b[k] !== "" && b[k] != null);
+    if (extra.length) return res.status(403).json({ error: "Only the owner can set pay or initials." });
+    const nm = String(b.name || "").trim(); if (!nm || nm.length > 60) return res.status(400).json({ error: "Enter the person's name." });
+    if (!/^\d{4,12}$/.test(String(b.pin || ""))) return res.status(400).json({ error: "The PIN has to be 4 to 12 digits." });
+    const emp = { id: newId(), initials: "", name: nm, commissionRate: 0, walkInCommissionRate: 0, pinHash: hash(String(b.pin)), payType: null, salaryPerPeriod: 0, hourlyRate: 0, carCommissionRate: 0 };
+    db.employees.push(emp); saveDB(db); return res.json({ id: emp.id, name: emp.name });
+  }
   const { name, commissionRate, walkInCommissionRate, pin, payType, salaryPerPeriod, hourlyRate, carCommissionRate } = req.body;
   if (!name || !pin) return res.status(400).json({ error: "Name and PIN are required." });
   const ini = cleanStaffInitials(db, req.body.initials, null); if (ini.error) return res.status(400).json({ error: ini.error });
@@ -1020,10 +1028,16 @@ app.post("/api/employees", requireOwner, (req, res) => {
   res.json({ id: emp.id, name: emp.name, commissionRate: emp.commissionRate, walkInCommissionRate: emp.walkInCommissionRate, payType: emp.payType, salaryPerPeriod: emp.salaryPerPeriod, hourlyRate: emp.hourlyRate, carCommissionRate: emp.carCommissionRate });
 });
 
-app.patch("/api/employees/:id", requireOwner, (req, res) => {
+app.patch("/api/employees/:id", requireManager, (req, res) => {
   const db = loadDB();
   const emp = db.employees.find((e) => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: "Not found." });
+  if (req.auth.role !== "owner") {                        // a manager can reset a PIN, and that is all
+    const b = req.body || {}, keys = Object.keys(b).filter((k) => b[k] !== undefined);
+    if (keys.length !== 1 || keys[0] !== "pin") return res.status(403).json({ error: "Managers can only reset a PIN. Everything else is the owner's." });
+    if (!/^\d{4,12}$/.test(String(b.pin))) return res.status(400).json({ error: "The PIN has to be 4 to 12 digits." });
+    emp.pinHash = hash(String(b.pin)); saveDB(db); return res.json({ ok: true });
+  }
   if (req.body.name) emp.name = req.body.name.trim();
   if (req.body.commissionRate !== undefined) emp.commissionRate = parseFloat(req.body.commissionRate) || 0;
   if (req.body.walkInCommissionRate !== undefined) emp.walkInCommissionRate = parseFloat(req.body.walkInCommissionRate) || 0;
@@ -2574,9 +2588,14 @@ function tipRunBlock(db, tip) {
   const run = period ? payRuns(db).find((r) => r.periodId === period.id) : null;
   return run ? { period, run } : null;
 }
-const tipView = (db, t, canSeeSplit) => {
+// Only the owner sees what each person was paid from a tip. Everyone else sees the tip, who was on the car, and their own share.
+function tipForViewer(t, auth) {
+  if (auth && auth.role === "owner") return t;
+  return { ...t, split: (t.split || []).map((p) => ({ personType: p.personType, name: p.name, amount: auth && p.personId === auth.id && p.personType === auth.role ? p.amount : null })).map((p) => (p.amount === null ? { personType: p.personType, name: p.name } : p)) };
+}
+const tipView = (db, t, auth) => {
   const block = tipRunBlock(db, t);
-  return { id: t.id, amount: t.amount, timestamp: t.timestamp, loggedByName: t.loggedByName || "", split: canSeeSplit ? t.split.map((p) => ({ name: p.name, amount: p.amount, personType: p.personType })) : [],
+  return { id: t.id, amount: t.amount, timestamp: t.timestamp, loggedByName: t.loggedByName || "", split: tipForViewer(t, auth).split.map((p) => ({ name: p.name, personType: p.personType, ...(p.amount !== undefined ? { amount: p.amount } : {}) })),
     removable: !block, blockedReason: block ? `Payroll for ${payShortDate(block.period.start)} to ${payShortDate(block.period.end)} has already been run. To correct this tip, add an adjustment on the Payroll screen.` : "" };
 };
 app.post("/api/manager/tips", requireAnyStaff, (req, res) => {
@@ -2603,7 +2622,7 @@ app.post("/api/manager/tips", requireAnyStaff, (req, res) => {
   db.tips.push(tip);
   logAudit(db, req, sale, "Tip", "", `added ${money$(amt)}: ${split.map((p) => `${p.name} ${money$(p.amount)}`).join(", ")}`);
   saveDB(db);
-  res.json({ ok: true, tip });
+  res.json({ ok: true, tip: tipForViewer(tip, req.auth) });
 });
 // Take a tip back (put on the wrong car, wrong amount). Owner and managers: any tip, until its pay period's payroll has been run. A tech: only a tip they logged themselves,
 // within 10 minutes. The tip is archived (not lost) and the removal is written to the history.
@@ -2627,7 +2646,7 @@ app.delete("/api/manager/tips/:id", requireAnyStaff, (req, res) => {
 app.get("/api/manager/tips", requireManager, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  res.json(db.tips.filter((t) => t.timestamp >= start && t.timestamp <= end).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)));
+  res.json(db.tips.filter((t) => t.timestamp >= start && t.timestamp <= end).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)).map((t) => tipForViewer(t, req.auth)));
 });
 
 // Cash received against a job is kept in lockstep with the Cash & Expenses log. Marking a
@@ -2907,7 +2926,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
     isRedo: !!s.isRedo, redoAuto: !!s.redoAuto, noPaymentNeeded: redoFree(s), titlePrice: s.titlePrice == null ? null : s.titlePrice, depositAmount: depositOf(s), balanceDue: depositOf(s) > 0 ? balanceDueOf(s) : null, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceSource: s.priceSource || null, priceLocked: !!s.priceLocked,
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
-    photos: s.photos || { before: {}, after: {} }, notes: s.notes || [], tips: (tipsBySale[s.id] || []).map((t) => tipView(db, t, true)),
+    photos: s.photos || { before: {}, after: {} }, notes: s.notes || [], tips: (tipsBySale[s.id] || []).map((t) => tipView(db, t, req.auth)),
   })));
 });
 
