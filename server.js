@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-30-privacy3";
+const BUILD = "2026-10-31-revenue";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2283,6 +2283,14 @@ app.post("/api/cross-location/cleanup-fix", (req, res) => {
 // other cross-location routes. Uses the same function as the Payroll screen (teamPayrollLines), so the numbers are the ones you'd see there. For a period whose payroll
 // has already been run, it reports what the run recorded (that's what was paid, with its adjustments); otherwise the live figures plus any adjustments still waiting.
 const crossSecretOk = (req) => { const given = req.get("x-cross-secret") || req.query.secret; return !!given && given === CROSS_LOCATION_SECRET; };
+// The money collected, for the owner's combined revenue screen in the rep tracker. It is exactly the Dashboard's "Total revenue": jobs marked PAID, base price plus upsells, in the period.
+app.get("/api/cross-location/revenue", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), { start, end } = dateRangeFor(req.query), r2 = (n) => Math.round(n * 100) / 100;
+  const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db), paid = sales.filter((s) => s.paid);
+  res.json({ revenue: r2(paid.reduce((a, s) => a + saleTotal(s), 0)), upsellRevenue: r2(paid.reduce((a, s) => a + saleUpsellTotal(s), 0)), walkInRevenue: r2(paid.filter((s) => s.isWalkIn).reduce((a, s) => a + saleTotal(s), 0)),
+    paidJobs: paid.length, carsServiced: sales.filter((s) => s.completed).length, range: { start: EASTERN_DAY_FMT.format(new Date(start)), end: EASTERN_DAY_FMT.format(new Date(end)) } });
+});
 app.get("/api/cross-location/people-pay", (req, res) => {
   if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB(), today = trackerToday(), all = paySchedule.periods();

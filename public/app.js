@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-30-privacy3";
+const UI_BUILD = "2026-10-31-revenue";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
