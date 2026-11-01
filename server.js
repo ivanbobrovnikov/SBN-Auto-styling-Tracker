@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-31-revenue";
+const BUILD = "2026-10-31-extracars";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1163,6 +1163,7 @@ app.get("/api/managers", requireOwner, (req, res) => {
   res.json(db.managers.map((m) => ({
     id: m.id, name: m.name, initials: m.initials || "", titleTags: staffTags(m), tagClashes: staffClashes(db, m), commissionRate: m.commissionRate || 0, walkInCommissionRate: m.walkInCommissionRate || 0,
     payType: m.payType || null, salaryPerPeriod: m.salaryPerPeriod || 0, hourlyRate: m.hourlyRate || 0, carCommissionRate: m.carCommissionRate || 0,
+    extraCarRate: m.extraCarRate || 0, extraCarDays: Array.isArray(m.extraCarDays) ? m.extraCarDays : [],
   })));
 });
 
@@ -1191,6 +1192,15 @@ app.patch("/api/managers/:id", requireOwner, (req, res) => {
   if (req.body.salaryPerPeriod !== undefined) mgr.salaryPerPeriod = parseFloat(req.body.salaryPerPeriod) || 0;
   if (req.body.hourlyRate !== undefined) mgr.hourlyRate = parseFloat(req.body.hourlyRate) || 0;
   if (req.body.carCommissionRate !== undefined) mgr.carCommissionRate = parseFloat(req.body.carCommissionRate) || 0;
+  if (req.body.extraCarRate !== undefined) {
+    const r = Number(req.body.extraCarRate); if (!isFinite(r) || r < 0 || r > 100) return res.status(400).json({ error: "The extra car commission is a percent from 0 to 100." });
+    mgr.extraCarRate = Math.round(r * 100) / 100;
+    if (mgr.extraCarRate > 0 && req.body.extraCarDays === undefined && !(Array.isArray(mgr.extraCarDays) && mgr.extraCarDays.length)) mgr.extraCarDays = [0];     // Sunday unless told otherwise
+  }
+  if (req.body.extraCarDays !== undefined) {
+    const d = req.body.extraCarDays; if (!Array.isArray(d) || d.some((x) => !Number.isInteger(x) || x < 0 || x > 6)) return res.status(400).json({ error: "Pick days of the week." });
+    mgr.extraCarDays = [...new Set(d)].sort();
+  }
   if (req.body.initials !== undefined) { const ini = cleanStaffInitials(db, req.body.initials, mgr.id); if (ini.error) return res.status(400).json({ error: ini.error }); mgr.initials = ini.value; }
   if (req.body.pin) mgr.pinHash = hash(req.body.pin);
   saveDB(db);
@@ -3731,7 +3741,21 @@ function timeStringToHours(t) {
 function endDateStringFor(endIso) {
   return new Date(new Date(endIso).getTime() - 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
+// A manager on salary (or hourly) can also earn an EXTRA percent of a car's base price on the cars he works on certain days (Sundays, when the regular crew is off). It sits on top of his
+// base pay. Only cars he is marked on that have arrived AND been paid count, and he gets the whole commission: it is not split with anyone else on the car.
+function extraCarCommission(person, sales) {
+  const rate = parseFloat(person.extraCarRate) || 0, days = Array.isArray(person.extraCarDays) ? person.extraCarDays : [];
+  if (!(rate > 0) || !days.length || person.payType === "commission") return null;          // a commission person is already paid per car on every day
+  const weekday = (iso) => new Date(EASTERN_DAY_FMT.format(new Date(iso)) + "T12:00:00Z").getUTCDay();
+  const mine = (sales || []).filter((s) => ((s.managerHelperIds || []).includes(person.id) || (saleEmployeeIds(s) || []).includes(person.id)) && s.status === "arrived" && s.paid && !redoFree(s) && s.date && days.includes(weekday(s.date)));
+  const cars = mine.map((s) => { const basePrice = parseFloat(s.basePrice) || 0; return { id: s.id, car: s.car, date: s.date, basePrice, commission: Math.round(basePrice * rate) / 100 }; });
+  return { rate, days: days.slice(), amount: Math.round(cars.reduce((a, c) => a + c.commission, 0) * 100) / 100, cars };
+}
 function calculateBasePay(person, attendanceRecords, sales) {
+  const base = calculateBasePayCore(person, attendanceRecords, sales), extra = extraCarCommission(person, sales);
+  return extra ? { ...base, amount: base.amount + extra.amount, extraCar: extra } : base;
+}
+function calculateBasePayCore(person, attendanceRecords, sales) {
   if (!person.payType) return { amount: 0, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hoursCounted: 0, dailyRate: 0, configured: false, carDetails: [] };
   if (person.payType === "salary") {
     const dailyRate = (person.salaryPerPeriod || 0) / FULL_PERIOD_WORKDAYS;

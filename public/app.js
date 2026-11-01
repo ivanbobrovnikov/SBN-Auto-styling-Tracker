@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-31-revenue";
+const UI_BUILD = "2026-10-31-extracars";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1035,7 +1035,7 @@ async function renderPerformance(content) {
         el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : stats.payType === "hourly" ? `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` : `CAR COMMISSION (${stats.carCommissionRate}% PER CAR)` }),
         el("div", { class: "row" }, [
           el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : stats.payType === "hourly" ? `${stats.basePay.hoursCounted.toFixed(1)} hours worked` : `${(stats.basePay.carDetails || []).length} car(s) arrived + paid` }),
-          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.basePay.amount) }),
+          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(baseOnly(stats.basePay)) }),
         ]),
         stats.payType === "commission" && (stats.basePay.carDetails || []).length > 0
           ? el("div", { style: "margin-top:6px" }, stats.basePay.carDetails.map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
@@ -1043,6 +1043,7 @@ async function renderPerformance(content) {
               el("span", { class: "mono", text: money(c.yourShare) }),
             ])))
           : null,
+        extraCarBlock(stats.basePay),
       ]));
     }
     body.appendChild(el("div", { class: "card" }, [
@@ -1302,7 +1303,7 @@ async function renderOwnerPayroll(content) {
         ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
             el("div", { class: "row" }, [
               el("span", { class: "muted", style: "font-size:12.5px", text: p.payType === "salary" ? `Base pay (salary, $${p.salaryPerPeriod}/period)` : p.payType === "hourly" ? `Base pay (hourly, $${p.hourlyRate}/hr)` : `Car commission (${p.carCommissionRate}% per car)` }),
-              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(p.basePay.amount) }),
+              el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(baseOnly(p.basePay)) }),
             ]),
             p.payType === "commission"
               ? (() => {
@@ -1324,6 +1325,7 @@ async function renderOwnerPayroll(content) {
                 }),
           ])
         : el("div", { class: "muted", style: "font-size:11px;border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px", text: "No base pay type set (Employees/Managers tab)." }),
+      extraCarBlock(p.basePay),
       p.tipDetails !== undefined
         ? el("div", { style: "border-top:0.5px solid var(--border);padding-top:8px;margin-top:6px" }, [
             el("div", { class: "row" }, [
@@ -3929,7 +3931,7 @@ async function renderManagerPerformance(content) {
         el("div", { class: "muted", style: "margin-bottom:8px", text: stats.payType === "salary" ? `BASE PAY — SALARY ($${stats.salaryPerPeriod}/period)` : stats.payType === "hourly" ? `BASE PAY — HOURLY ($${stats.hourlyRate}/hr)` : `CAR COMMISSION (${stats.carCommissionRate}% PER CAR)` }),
         el("div", { class: "row" }, [
           el("span", { class: "muted", text: stats.payType === "salary" ? `${stats.basePay.daysPresent} full day(s), ${stats.basePay.daysHalf} half day(s), ${stats.basePay.daysAbsent} absent` : stats.payType === "hourly" ? `${stats.basePay.hoursCounted.toFixed(1)} hours worked` : `${(stats.basePay.carDetails || []).length} car(s) arrived + paid` }),
-          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(stats.basePay.amount) }),
+          el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(baseOnly(stats.basePay)) }),
         ]),
         stats.payType === "commission" && (stats.basePay.carDetails || []).length > 0
           ? el("div", { style: "margin-top:6px" }, stats.basePay.carDetails.map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
@@ -3937,6 +3939,7 @@ async function renderManagerPerformance(content) {
               el("span", { class: "mono", text: money(c.yourShare) }),
             ])))
           : null,
+        extraCarBlock(stats.basePay),
       ]));
     }
     body.appendChild(el("div", { class: "card" }, [
@@ -4827,6 +4830,20 @@ async function renderManagerJobs(content) {
 }
 
 // ---------------- Owner: manage managers ----------------
+// A manager's extra commission on the cars he works on certain days (Sundays), shown under his base pay with the cars it came from.
+// base pay WITHOUT the extra car commission (which is shown on its own line right below it, so it is never counted twice on screen)
+const baseOnly = (bp) => (bp && bp.extraCar ? Math.round((bp.amount - bp.extraCar.amount) * 100) / 100 : bp.amount);
+const DAY_NAMES = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
+function extraCarBlock(basePay) {
+  const x = basePay && basePay.extraCar; if (!x) return null;
+  const days = x.days.map((d) => DAY_NAMES[d]).join(", "), when = (iso) => new Date(iso).toLocaleDateString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric" });
+  const wrap = el("div", { "data-part": "extra-car", style: "margin-top:8px;padding-top:6px;border-top:1px dashed var(--border)" });
+  wrap.appendChild(el("div", { class: "row" }, [el("span", { class: "muted", style: "font-size:11.5px", text: `EXTRA CAR COMMISSION: ${x.rate}% on ${days}` }), el("span", { class: "mono", style: "color:var(--green);font-weight:600", text: money(x.amount) })]));
+  if (!x.cars.length) wrap.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-top:3px", text: `No arrived and paid cars on ${days} in this period.` }));
+  x.cars.forEach((c) => wrap.appendChild(el("div", { class: "row", style: "font-size:11px;margin-top:3px" }, [el("span", { class: "muted", text: `${(c.car || "").slice(0, 40)} \u00B7 ${money(c.basePrice)} \u00B7 ${when(c.date)}` }), el("span", { class: "mono", text: money(c.commission) })])));
+  return wrap;
+}
+
 async function renderOwnerManagers(content) {
   const nameInput = el("input", { placeholder: "Name" });
   const pinInput = el("input", { type: "text", placeholder: "PIN (4+ digits)", style: "max-width:140px" });
@@ -4875,6 +4892,21 @@ async function renderOwnerManagers(content) {
       hourlyInput.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ hourlyRate: hourlyInput.value }) }));
       carCommissionInput.addEventListener("change", () => api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ carCommissionRate: carCommissionInput.value }) }));
 
+      // the extra commission on the cars he works: a percent, and which days of the week
+      const extraRate = el("input", { type: "number", min: "0", max: "100", step: "0.1", placeholder: "%", value: m.extraCarRate || "", "data-field": "mgr-extra-rate", "aria-label": "Extra commission percent on the cars he works", style: "max-width:70px" });
+      const extraDays = new Set(Array.isArray(m.extraCarDays) ? m.extraCarDays : []);
+      const extraNote = el("div", { class: "muted", "data-part": "mgr-extra-note", style: "font-size:11px;margin-bottom:6px" });
+      const dayBtns = ["S", "M", "T", "W", "T", "F", "S"].map((lab, d) => el("button", { class: "ghost", "data-day": String(d), title: DAY_NAMES[d], style: "min-width:30px;padding:4px 7px;font-size:12px", text: lab, onclick: () => { if (extraDays.has(d)) extraDays.delete(d); else extraDays.add(d); saveExtra(); } }));
+      const paintExtra = () => {
+        dayBtns.forEach((b) => { const on = extraDays.has(Number(b.getAttribute("data-day"))); b.className = on ? "primary" : "ghost"; b.setAttribute("aria-pressed", on ? "true" : "false"); });
+        const r = Number(extraRate.value) || 0, names = Array.from(extraDays).sort().map((d) => DAY_NAMES[d]).join(", ");
+        extraNote.style.color = ""; extraNote.textContent = payTypeSelect.value === "commission" ? "Not used while he is paid per car: he already earns on every day." : r > 0 && extraDays.size ? `On top of his base pay, he earns ${r}% of the car's price, all of it, on cars he works on ${names}. Only cars he is marked on that arrived and were paid.` : "Off. Enter a percent to turn it on.";
+      };
+      const saveExtra = async () => {
+        if ((Number(extraRate.value) || 0) > 0 && extraDays.size === 0) extraDays.add(0);          // Sunday unless told otherwise
+        try { const r = await api(`/api/managers/${m.id}`, { method: "PATCH", body: JSON.stringify({ extraCarRate: extraRate.value === "" ? 0 : extraRate.value, extraCarDays: Array.from(extraDays).sort() }) }); paintExtra(); } catch (err) { extraNote.textContent = err.message || "Couldn't save that."; extraNote.style.color = "var(--red)"; }
+      };
+      extraRate.addEventListener("change", saveExtra); paintExtra(); payTypeSelect.addEventListener("change", paintExtra);
       list.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", { style: "flex:1;font-weight:500", text: m.name }),
@@ -4903,6 +4935,10 @@ async function renderOwnerManagers(content) {
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
           el("span", { class: "muted", style: "font-size:11.5px", text: "Base pay:" }), payTypeSelect, salaryInput, hourlyInput, carCommissionInput,
         ]),
+        el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px", "data-part": "mgr-extra" }, [
+          el("span", { class: "muted", style: "font-size:11.5px" , text: "Extra commission on cars he works:" }), extraRate, el("span", { class: "muted", style: "font-size:11.5px", text: "% of the car's price, on" }), ...dayBtns,
+        ]),
+        extraNote,
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [
           newPinInput,
           el("button", { class: "ghost", onclick: async () => {
