@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-01-statsexport";
+const BUILD = "2026-11-02-hooklog";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -591,6 +591,20 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
   return !upcoming;
 }
 
+// A short, plain record of every message GHL sent the shop and what the shop did with it (newest first, the last 200), so a booking that "never showed up" can be traced in seconds.
+let lastUpsertNote = { isNew: false, revived: false };
+function hookNote(db, e) {
+  if (!db.hookLog) db.hookLog = [];
+  const now = Date.now();
+  if (e.outcome === "refused" && !e.customer) {                // the same refusal over and over (a wrong secret, say) is ONE line with a count, however much else came in between
+    const k = db.hookLog.slice(0, 40).findIndex((x) => x.outcome === "refused" && x.route === e.route && x.reason === e.reason && !x.customer && now - Date.parse(x.at) < 10 * 60000);
+    if (k >= 0) { const [top] = db.hookLog.splice(k, 1); top.count = (top.count || 1) + 1; top.at = new Date(now).toISOString(); db.hookLog.unshift(top); return; }
+  }
+  db.hookLog.unshift({ id: newId(), at: new Date(now).toISOString(), ...e });
+  // Keep the latest 200. When it is full the oldest ORDINARY entries go first, so a busy day can never push out something that was turned away.
+  while (db.hookLog.length > 200) { let k = -1; for (let n = db.hookLog.length - 1; n >= 0; n--) if (db.hookLog[n].outcome !== "refused") { k = n; break; } db.hookLog.splice(k >= 0 ? k : db.hookLog.length - 1, 1); }
+}
+function badHookSecret(res, route) { const db = loadDB(); hookNote(db, { route, outcome: "refused", reason: "wrong secret in the webhook URL" }); saveDB(db); return res.status(401).json({ error: "Bad secret." }); }
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId, appointmentId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
@@ -676,6 +690,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     sale = { id: newId(), ghlOpportunityId, upsells: [], status: "pending", completed: false, paid: false };
     db.sales.push(sale);
   }
+  lastUpsertNote = { isNew, revived: false };
   // closedAt is stamped ONCE, at the exact moment the deal was actually closed (this webhook
   // firing for the first time = the opportunity hitting Booked w/ Deposit). Later syncs
   // (like a price update) never touch it — that would let someone accidentally shift a
@@ -703,6 +718,15 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (reschedule)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "no_show", newValue: "pending" });
     db.auditLog = db.auditLog.slice(0, 1000);
     sale.status = "pending";
+  }
+  // GHL says this appointment is confirmed again. If the tracker only has it cancelled BECAUSE GHL said so (not because a person tapped Cancel on purpose), it is a live booking again.
+  // Cancelling and re-confirming in GHL is the usual way to re-send a booking, and used to leave the job cancelled and out of every total.
+  if (!isNew && sale.status === "cancelled" && !sale.cancelledManually) {
+    const back = sale.preCancelStatus === "arrived" ? "arrived" : "pending";
+    if (!db.auditLog) db.auditLog = [];
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (confirmed again in GHL after it was cancelled)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "cancelled", newValue: back });
+    db.auditLog = db.auditLog.slice(0, 1000);
+    sale.status = back; delete sale.preCancelStatus; lastUpsertNote.revived = true;
   }
   const prevSnap = isNew ? null : { service: sale.baseService, car: sale.car };
   sale.date = incomingIso || sale.date || new Date().toISOString();
@@ -1503,7 +1527,7 @@ app.get("/api/manager/salesreps", requireManager, (req, res) => {
 //   POST https://your-domain.com/api/webhook/ghl?secret=YOUR_WEBHOOK_SECRET
 // Body (JSON): { date, customerName, car, employeeName, baseService, basePrice, ghlOpportunityId }
 app.post("/api/webhook/ghl", (req, res) => {
-  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  if (req.query.secret !== WEBHOOK_SECRET) return badHookSecret(res, "booking");
   const db = loadDB();
   const data = ghlPayload(req.body);
   // accept the common spellings of the calendar field (the tracker only ever looked for "calendarId")
@@ -1513,6 +1537,7 @@ app.post("/api/webhook/ghl", (req, res) => {
     if (!db.debugLog) db.debugLog = [];
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), contentType: req.headers["content-type"] || "(none)", failedReason: "missing ghlOpportunityId", body: req.body });
     db.debugLog = db.debugLog.slice(0, 30);
+    hookNote(db, { route: "booking", outcome: "refused", reason: "no opportunity ID in what GHL sent", customer: data.customerName || "", car: data.car || "" });
     saveDB(db);
     return res.status(400).json({ error: "ghlOpportunityId is required so we can avoid duplicates." });
   }
@@ -1520,6 +1545,7 @@ app.post("/api/webhook/ghl", (req, res) => {
   const merged = autoMergeDuplicates(db, sale.contactId || data.contactId);   // the same booking under a new id is folded in straight away
   const edited = autoMergeMoved(db, sale.contactId || data.contactId); Object.assign(merged.remap, edited.remap);
   autoLinkRedos(db);                                                            // a redo appointment is linked back to the car's earlier job when that is clear
+  hookNote(db, { route: "booking", outcome: lastUpsertNote.isNew ? "created" : lastUpsertNote.revived ? "brought back (confirmed again)" : "updated", appt: String(data.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id, merged: Object.keys(merged.remap || {}).length > 0 });
   saveDB(db);
   scheduleContactSync(sale.contactId || data.contactId, 2000);               // a moment later, ask GHL what this customer really has now
   res.json({ ok: true, saleId: (() => { let id = sale.id; for (let k = 0; k < 3 && merged.remap[id]; k++) id = merged.remap[id]; return id; })(), matchedEmployees: sale.employeeIds.length });
@@ -1630,17 +1656,20 @@ function resolveGhlTarget(db, body, endpoint, req) {
 // If the appointment was cancelled before it ever hit "Confirmed," there's nothing in the
 // tracker to cancel, and this quietly does nothing rather than creating a phantom job.
 app.post("/api/webhook/ghl/cancel", (req, res) => {
-  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  if (req.query.secret !== WEBHOOK_SECRET) return badHookSecret(res, "cancelled");
   const db = loadDB();
   const payload = ghlPayload(req.body);
-  if (!payload.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  if (!payload.ghlOpportunityId) { hookNote(db, { route: "cancelled", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
   const target = resolveGhlTarget(db, payload, "cancel", req);
-  if (target.ambiguous) { saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  if (target.ambiguous) { hookNote(db, { route: "cancelled", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const sale = target.sale;
-  if (!sale) return res.json({ ok: true, found: false });
+  if (!sale) { hookNote(db, { route: "cancelled", outcome: "not found", reason: "the tracker has no job for this appointment", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: false }); }
   const wasCancelled = sale.status === "cancelled";
+  if (!wasCancelled) sale.preCancelStatus = sale.status || "pending";       // remembered, so confirming it again in GHL puts it back as it was
+  delete sale.cancelledManually;                                            // this cancel came from GHL, not from a person tapping Cancel
   sale.status = "cancelled";
   if (!wasCancelled) maybeQueueMissedText(db, sale, "cancelled");
+  hookNote(db, { route: "cancelled", outcome: "cancelled", appt: String(payload.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
   saveDB(db);
   res.json({ ok: true, found: true, saleId: sale.id });
 });
@@ -1649,15 +1678,16 @@ app.post("/api/webhook/ghl/cancel", (req, res) => {
 // means the customer hasn't confirmed they're still coming, not that they've definitely
 // cancelled — worth flagging for follow-up, but not treated as dead the way a cancellation is.
 app.post("/api/webhook/ghl/unconfirm", (req, res) => {
-  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  if (req.query.secret !== WEBHOOK_SECRET) return badHookSecret(res, "unconfirmed");
   const db = loadDB();
   const payload = ghlPayload(req.body);
-  if (!payload.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  if (!payload.ghlOpportunityId) { hookNote(db, { route: "unconfirmed", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
   const target = resolveGhlTarget(db, payload, "unconfirm", req);
-  if (target.ambiguous) { saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  if (target.ambiguous) { hookNote(db, { route: "unconfirmed", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const sale = target.sale;
-  if (!sale) return res.json({ ok: true, found: false });
+  if (!sale) { hookNote(db, { route: "unconfirmed", outcome: "not found", reason: "the tracker has no job for this appointment", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: false }); }
   sale.status = "unconfirmed";
+  hookNote(db, { route: "unconfirmed", outcome: "marked unconfirmed", appt: String(payload.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
   saveDB(db);
   res.json({ ok: true, found: true, saleId: sale.id });
 });
@@ -1667,15 +1697,16 @@ app.post("/api/webhook/ghl/unconfirm", (req, res) => {
 // entirely rather than sticking around labeled "Cancelled." Matched by ghlOpportunityId,
 // same as cancel — if nothing matches, this quietly does nothing.
 app.post("/api/webhook/ghl/delete", (req, res) => {
-  if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "Bad secret." });
+  if (req.query.secret !== WEBHOOK_SECRET) return badHookSecret(res, "deleted");
   const db = loadDB();
   const payload = ghlPayload(req.body);
-  if (!payload.ghlOpportunityId) return res.status(400).json({ error: "ghlOpportunityId is required." });
+  if (!payload.ghlOpportunityId) { hookNote(db, { route: "deleted", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
   const target = resolveGhlTarget(db, payload, "delete", req);
-  if (target.ambiguous) { saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
-  const before = db.sales.length;
+  if (target.ambiguous) { hookNote(db, { route: "deleted", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  const before = db.sales.length, gone = target.sale;
   if (target.sale) db.sales = db.sales.filter((s) => s !== target.sale);
   const found = db.sales.length < before;
+  hookNote(db, found ? { route: "deleted", outcome: "deleted the job", appt: String(payload.ghlOpportunityId), customer: gone.customerName || "", car: gone.car || "" } : { route: "deleted", outcome: "not found", reason: "the tracker has no job for this appointment", appt: String(payload.ghlOpportunityId) });
   saveDB(db);
   res.json({ ok: true, found });
 });
@@ -1696,6 +1727,13 @@ app.post("/api/webhook/ghl/debug", (req, res) => {
 app.get("/api/owner/debug-log", requireOwner, (req, res) => {
   const db = loadDB();
   res.json(db.debugLog || []);
+});
+app.get("/api/owner/hook-log", requireOwner, (req, res) => { res.set("Cache-Control", "no-store"); res.json({ entries: loadDB().hookLog || [] }); });
+app.post("/api/owner/hook-log/clear", requireOwner, (req, res) => { const db = loadDB(); db.hookLog = []; saveDB(db); res.json({ ok: true }); });
+// What the Dashboard warns about: messages the shop turned away in the last 24 hours (so those jobs are NOT in the tracker).
+app.get("/api/owner/hook-alert", requireOwner, (req, res) => {
+  res.set("Cache-Control", "no-store"); const cutoff = Date.now() - 86400000, bad = (loadDB().hookLog || []).filter((e) => e.outcome === "refused" && Date.parse(e.at) >= cutoff);
+  res.json({ refused: bad.reduce((a, e) => a + (e.count || 1), 0), last: bad[0] ? { at: bad[0].at, route: bad[0].route, reason: bad[0].reason, customer: bad[0].customer || "" } : null });
 });
 
 app.post("/api/owner/debug-log/clear", requireOwner, (req, res) => {
@@ -3065,7 +3103,7 @@ function patchJobHandler(req, res) {
     }
   }
   const statusBefore = sale.status || "pending";
-  if (req.body.status !== undefined) { sale.status = req.body.status; sale.arrivedByComplete = false; }      // someone chose the status themselves
+  if (req.body.status !== undefined) { sale.status = req.body.status; sale.arrivedByComplete = false; if (sale.status === "cancelled") sale.cancelledManually = true; else { delete sale.cancelledManually; delete sale.preCancelStatus; } }      // someone chose the status themselves (a cancel by a person is remembered, so GHL confirming the appointment again never undoes it)
   if (req.body.status !== undefined && (sale.status === "no_show" || sale.status === "cancelled") && statusBefore !== sale.status) maybeQueueMissedText(db, sale, sale.status);
   if (req.body.completed !== undefined) {
     // A car can't be serviced without having shown up, so marking Service complete also marks a still-waiting car as Arrived. A sales rep's commission

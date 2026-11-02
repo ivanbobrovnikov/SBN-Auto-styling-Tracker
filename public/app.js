@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-01-statsexport";
+const UI_BUILD = "2026-11-02-hooklog";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1695,6 +1695,7 @@ function openPrintableReport(title, s, periodLabel) {
 
 
   async function renderOwnerSummary(content) {
+  content.appendChild(hookAlertBanner());
   const body = el("div");
   const picker = renderPeriodPicker((params) => load(params), "month");
   let lastSummary = null, lastQs = "";
@@ -4980,7 +4981,42 @@ async function renderOwnerManagers(content) {
 }
 
 // ---------------- Owner: built-in webhook test tool ----------------
+// What GHL sent the shop and what the shop did with it, newest first. If a booking "never showed up", it is either in here (and says what happened to it) or it never reached the shop.
+function renderHookLog(content) {
+  const box = el("div", { class: "card", "data-part": "hook-log-card" }), list = el("div", { "data-part": "hook-log" });
+  const routeName = { booking: "Booking", cancelled: "Cancelled", unconfirmed: "Unconfirmed", deleted: "Deleted" };
+  const color = (o) => (/^refused|not applied/.test(o) ? "var(--red)" : /not found|cancelled|deleted|unconfirmed/.test(o) ? "var(--amber)" : "var(--green)");
+  const when = (iso) => new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  async function load() {
+    list.innerHTML = ""; let r; try { r = await api("/api/owner/hook-log"); } catch (e) { list.appendChild(el("div", { class: "muted", text: e.message })); return; }
+    if (!r.entries.length) { list.appendChild(el("div", { class: "muted", style: "font-size:12px", text: "Nothing yet. Every message GHL sends from now on shows up here with what happened to it." })); return; }
+    r.entries.forEach((e) => list.appendChild(el("div", { "data-part": "hook-row", style: "padding:8px 0;border-top:1px solid var(--border)" }, [
+      el("div", { class: "row", style: "gap:8px;align-items:baseline" }, [el("span", { class: "muted", style: "font-size:11.5px", text: `${when(e.at)} \u00B7 ${routeName[e.route] || e.route}` }), el("b", { style: `font-size:12.5px;color:${color(e.outcome)}`, text: e.outcome + (e.count > 1 ? ` \u00D7${e.count}` : "") })]),
+      (e.customer || e.car) ? el("div", { style: "font-size:12.5px;margin-top:2px", text: [e.customer, e.car].filter(Boolean).join(" \u00B7 ") }) : null,
+      (e.reason || e.merged) ? el("div", { class: "muted", style: "font-size:11.5px;margin-top:2px", text: [e.reason, e.merged ? "folded into an earlier job for the same car" : ""].filter(Boolean).join(" \u00B7 ") }) : null,
+    ])));
+  }
+  box.appendChild(el("div", { class: "muted", style: "margin-bottom:8px", text: "WHAT THE SHOP RECEIVED FROM GHL (LAST 200)" }));
+  box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px", text: "Every booking, cancel, unconfirm and delete GHL sends, and what the shop did with it. Red means it was turned away and is NOT in the tracker. If a booking isn't here at all, it never reached the shop: check the workflow's execution log in GHL." }));
+  box.appendChild(el("div", { style: "display:flex;gap:8px;margin-bottom:6px" }, [el("button", { class: "ghost", "data-act": "hook-refresh", text: "Refresh", onclick: load }), el("button", { class: "ghost", "data-act": "hook-clear", text: "Clear", onclick: async () => { await api("/api/owner/hook-log/clear", { method: "POST" }); load(); } })]));
+  box.appendChild(list); content.appendChild(box); load();
+}
+// A red warning at the top of the Dashboard when the shop turned GHL messages away in the last 24 hours: those jobs are not in the tracker.
+function hookAlertBanner() {
+  const box = el("div", { "data-part": "hook-alert" });
+  api("/api/owner/hook-alert").then((r) => {
+    if (!r || !r.refused) return;
+    box.appendChild(el("div", { class: "card", style: "border:1px solid var(--red);margin-bottom:12px" }, [
+      el("div", { style: "font-weight:600;color:var(--red)", text: `\u26A0 ${r.refused} message${r.refused === 1 ? "" : "s"} from GHL ${r.refused === 1 ? "was" : "were"} turned away in the last 24 hours` }),
+      el("div", { class: "muted", style: "font-size:12.5px;margin:4px 0 8px", text: `Those jobs are NOT in the tracker. Latest: ${r.last.reason}${r.last.customer ? " (" + r.last.customer + ")" : ""}.` }),
+      el("button", { class: "ghost", "data-act": "hook-open", text: "See what was turned away", onclick: () => { currentTab = "owner-test"; localStorage.setItem("lastTab", currentTab); render(); } }),
+    ]));
+  }).catch(() => {});
+  return box;
+}
+
 async function renderTestTool(content) {
+  renderHookLog(content);
   const car = el("input", { placeholder: "Car (e.g. 2023 BMW M3)", value: "2023 BMW M3" });
   const customer = el("input", { placeholder: "Customer name", value: "Test Customer" });
   const phone = el("input", { placeholder: "Customer phone", value: "555-123-4567" });
