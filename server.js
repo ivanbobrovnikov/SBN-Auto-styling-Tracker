@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-10-31-extracars";
+const BUILD = "2026-11-01-statsexport";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -5381,11 +5381,11 @@ function statsTrend(db, firstDay, lastDay, today) {
   return { unit, points };
 }
 
-app.get("/api/owner/statistics", requireOwner, (req, res) => {
+function buildStatistics(query) {
   const db = loadDB();
   const today = ymdOf(new Date().toISOString());
-  const period = req.query.period || "month";
-  const q = { ...req.query, period };
+  const period = query.period || "month";
+  const q = { ...query, period };
   if (["day", "week", "payperiod", "year"].includes(period)) q.date = q.date || today;
   if (period === "month") q.month = q.month || today.slice(0, 7);
   if (period === "custom") { q.startDate = q.startDate || today; q.endDate = q.endDate || q.startDate; }
@@ -5429,11 +5429,21 @@ app.get("/api/owner/statistics", requireOwner, (req, res) => {
   }).filter((r) => r.dealsClosed || r.showed || r.noShows).sort((a, b) => b.dealValue - a.dealValue || b.dealsClosed - a.dealsClosed);
 
   const upsellsOn = (key, id) => paid.flatMap((s) => (s.upsells || []).filter((u) => u[key] === id));
+  // Walk-ins are counted the way Payroll counts them: the ones a person closed (not cancelled), and their walk-in revenue is the BASE price of those that arrived and were paid.
+  // Redos are the ones counted against the person (not marked "not the tech's fault"), out of the cars they worked.
+  const walkInsOf = (type, id) => db.sales.filter((s) => s.walkInClosedByType === type && s.walkInClosedById === id && inP(s.date) && s.status !== "cancelled" && afterRevenueStart(s, db));
+  const redoAll = redoStats(db, { period: "custom", startDate: firstDay, endDate: lastDay });
+  const redoOf = (type, id) => redoAll.people.find((r) => r.type === type && r.id === id) || { redos: 0, rate: null };
   const people = [
-    ...db.employees.map((e) => ({ name: e.name, role: "Tech", cars: completed.filter((s) => saleEmployeeIds(s).includes(e.id)).length, list: upsellsOn("employeeId", e.id) })),
-    ...db.managers.map((m) => ({ name: m.name, role: "Manager", cars: completed.filter((s) => (s.managerHelperIds || []).includes(m.id)).length, list: upsellsOn("managerId", m.id) })),
-  ].map((p) => ({ name: p.name, role: p.role, carsCompleted: p.cars, upsells: p.list.length, upsellRevenue: statRound(statSum(p.list, (u) => parseFloat(u.price) || 0)) }))
-    .filter((p) => p.carsCompleted || p.upsells).sort((a, b) => b.upsellRevenue - a.upsellRevenue || b.carsCompleted - a.carsCompleted);
+    ...db.employees.map((e) => ({ id: e.id, type: "employee", name: e.name, role: "Tech", cars: completed.filter((s) => saleEmployeeIds(s).includes(e.id)).length, list: upsellsOn("employeeId", e.id) })),
+    ...db.managers.map((m) => ({ id: m.id, type: "manager", name: m.name, role: "Manager", cars: completed.filter((s) => (s.managerHelperIds || []).includes(m.id)).length, list: upsellsOn("managerId", m.id) })),
+  ].map((p) => {
+    const w = walkInsOf(p.type, p.id), wp = w.filter((s) => s.status === "arrived" && s.paid), rd = redoOf(p.type, p.id);
+    return { name: p.name, role: p.role, carsCompleted: p.cars, upsells: p.list.length, upsellRevenue: statRound(statSum(p.list, (u) => parseFloat(u.price) || 0)),
+      walkIns: w.length, walkInPaid: wp.length, walkInRevenue: statRound(statSum(wp, (s) => parseFloat(s.basePrice) || 0)), redos: rd.redos, redoRate: rd.rate };
+  }).filter((p) => p.carsCompleted || p.upsells || p.walkIns || p.redos).sort((a, b) => b.upsellRevenue - a.upsellRevenue || b.carsCompleted - a.carsCompleted);
+  const peopleTotals = { carsCompleted: people.reduce((a, p) => a + p.carsCompleted, 0), upsells: people.reduce((a, p) => a + p.upsells, 0), upsellRevenue: statRound(statSum(people, (p) => p.upsellRevenue)),
+    walkIns: people.reduce((a, p) => a + p.walkIns, 0), walkInPaid: people.reduce((a, p) => a + p.walkInPaid, 0), walkInRevenue: statRound(statSum(people, (p) => p.walkInRevenue)), redos: people.reduce((a, p) => a + p.redos, 0), redoRate: redoAll.totals.rate };
 
   // Day of week: totals, plus the AVERAGE per that weekday so a period with five Saturdays and four
   // Sundays doesn't make Saturday look busier than it is.
@@ -5486,11 +5496,53 @@ app.get("/api/owner/statistics", requireOwner, (req, res) => {
     expensesTotal, expensesByCategory, collectedMinusExpenses: statRound(head.revenue - expensesTotal),
   };
 
-  res.json({
+  return {
     period: { key: period, start: firstDay, end: lastDay }, cutoff: db.revenueStartDate || null,
     headline, previous, trend: statsTrend(db, firstDay, lastDay, today), records: statsRecords(db, today),
-    byService, bySalesRep, people, byDayOfWeek, byHour, paymentMix, topUpsells, customers, leadTime, cash,
-  });
+    byService, bySalesRep, people, peopleTotals, byDayOfWeek, byHour, paymentMix, topUpsells, customers, leadTime, cash,
+  };
+}
+app.get("/api/owner/statistics", requireOwner, (req, res) => res.json(buildStatistics(req.query)));
+
+
+// "Download" on the Statistics page: every table on the page for the period shown, as one CSV that opens in Excel or Sheets and reads cleanly when uploaded to a chat.
+// It is built from the same numbers as the page. It never includes anyone's pay (salary, hourly, commission or tips shares) or any customer's phone, email or name.
+app.get("/api/owner/statistics/export", requireOwner, (req, res) => {
+  const d = buildStatistics(req.query), h = d.headline, r2 = (n) => (Math.round((Number(n) || 0) * 100) / 100).toFixed(2), pc = (n) => (n === null || n === undefined ? "" : (Math.round(Number(n) * 10) / 10).toFixed(1));
+  // A cell that starts with = + - or @ is run as a formula by Excel and Sheets, and names here are typed by staff, so such a cell gets a leading apostrophe (plain numbers are left alone).
+  const safe = (c) => (typeof c === "string" && /^[=+\-@\t\r]/.test(c) && !/^-?\d+(\.\d+)?$/.test(c) ? "'" + c : c);
+  const out = [], line = (cells) => out.push(cells.map((c) => csvEscape(safe(c))).join(",")), section = (title, headers, rows) => { out.push(""); line([title]); line(headers); rows.forEach(line); };
+  const range = d.period.start === d.period.end ? d.period.start : `${d.period.start} to ${d.period.end}`;
+  line(["SBN Auto Styling: statistics"]); line(["Location", SHOP_LOCATION_LABEL]); line(["Period", d.period.key === "all" ? `All time (${range})` : range]);
+  line(["Created", new Date().toLocaleString("en-US", { timeZone: "America/New_York" }) + " Eastern"]);
+  if (d.cutoff) line(["Note", `Only jobs from ${d.cutoff} onward are counted (the revenue start date).`]);
+  const pp = d.people;
+  section("TECHS AND MANAGERS: ONE ROW PER PERSON", ["Name", "Role", "Cars worked", "Upsells sold", "Upsell revenue", "Upsell revenue per car worked", "Walk-ins closed", "Walk-ins closed that arrived and were paid", "Walk-in revenue (base price)", "Redos counted against them", "Redo rate % (redos / cars worked)"],
+    [...pp.map((p) => [p.name, p.role, p.carsCompleted, p.upsells, r2(p.upsellRevenue), p.carsCompleted ? r2(p.upsellRevenue / p.carsCompleted) : "", p.walkIns, p.walkInPaid, r2(p.walkInRevenue), p.redos, pc(p.redoRate)]),
+      ["TOTAL", "", d.peopleTotals.carsCompleted, d.peopleTotals.upsells, r2(d.peopleTotals.upsellRevenue), "", d.peopleTotals.walkIns, d.peopleTotals.walkInPaid, r2(d.peopleTotals.walkInRevenue), d.peopleTotals.redos, pc(d.peopleTotals.redoRate)]]);
+  section("WHAT THOSE COLUMNS MEAN", ["Column", "Meaning"], [
+    ["Cars worked", "Cars they were on that were completed in the period."],
+    ["Upsells sold / Upsell revenue", "Upsells credited to them on jobs that were paid."],
+    ["Walk-ins closed", "Walk-in jobs they closed in the period (cancelled ones are not counted)."],
+    ["Walk-in revenue (base price)", "The base price of those walk-ins that arrived and were paid. The same number Payroll uses."],
+    ["Redos counted against them", "Redos linked to a car they worked, not counting any marked as not the tech's fault."],
+    ["TOTAL", "Cars can have more than one worker, so the cars total can be higher than the number of cars serviced."]]);
+  section("SUMMARY", ["Measure", "Value"], [
+    ["Money collected", r2(h.revenue)], ["Paid jobs", h.paidJobs], ["Cars serviced", h.carsServiced], ["Average ticket", r2(h.avgTicket)], ["Deals closed", h.dealsClosed], ["Average deal", r2(h.avgDeal)], ["Closed value (base price)", r2(h.dealValue)],
+    ["Upsell revenue", r2(h.upsellRevenue)], ["Upsell % of money collected", pc(h.upsellPercent)], ["Upsell attach rate % (serviced cars with an upsell)", pc(h.attachRate)], ["No-shows", h.noShow], ["Arrived", h.arrived], ["No-show rate %", pc(h.noShowRate)],
+    ["Cancelled", h.cancelled], ["Cancel rate %", pc(h.cancelRate)], ["Still to show (value)", r2(h.pendingValue)], ["Still to show (jobs)", h.pendingJobs], ["Walk-in money", r2(h.walkInRevenue)], ["Online-booking money", r2(h.onlineRevenue)], ["Tips", r2(h.tips)],
+    ["Expenses logged", r2(d.cash.expensesTotal)], ["Money collected minus expenses", r2(d.cash.collectedMinusExpenses)], ["Booked this far ahead (days)", (Math.round(d.leadTime.avgDays * 10) / 10).toFixed(1)], ["Booked the same day %", pc(d.leadTime.sameDayPercent)]]);
+  section("SALES REPS", ["Rep", "Deals closed", "Value closed (base price)", "Showed", "No-shows", "Show rate %"], d.bySalesRep.map((x) => [x.name, x.dealsClosed, r2(x.dealValue), x.showed, x.noShows, pc(x.showRate)]));
+  section("BY SERVICE", ["Service", "Jobs", "Paid jobs", "Money collected", "Average ticket", "Share of money %"], d.byService.map((x) => [x.service, x.jobs, x.paidJobs, r2(x.revenue), r2(x.avgTicket), pc(x.share)]));
+  section("TOP UPSELLS", ["Upsell", "Times sold", "Money"], d.topUpsells.map((x) => [x.name, x.count, r2(x.revenue)]));
+  section("DAY OF THE WEEK", ["Day", "Jobs", "Money collected", "Cars serviced", "Days of this weekday in the period", "Average money per such day"], d.byDayOfWeek.map((x) => [x.day, x.jobs, r2(x.revenue), x.cars, x.occurrences, r2(x.avgRevenue)]));
+  section("WHAT TIME CARS COME IN", ["Hour", "Jobs"], d.byHour.map((x) => [`${x.hour}:00`, x.jobs]));
+  section("HOW PEOPLE PAY", ["Method", "Jobs", "Money"], d.paymentMix.map((x) => [x.method, x.jobs, r2(x.revenue)]));
+  section("EXPENSES BY CATEGORY", ["Category", "Entries", "Total"], d.cash.expensesByCategory.map((x) => [x.category, x.entries, r2(x.total)]));
+  const slug = String(SHOP_LOCATION_LABEL || "shop").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "shop";
+  res.setHeader("Content-Disposition", `attachment; filename="sbn-statistics-${slug}-${d.period.key === "all" ? "all-time" : d.period.start + (d.period.end !== d.period.start ? "-to-" + d.period.end : "")}.csv"`);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8"); res.setHeader("Cache-Control", "no-store");
+  res.send(out.join("\n") + "\n");
 });
 
 const server = app.listen(PORT, () => {

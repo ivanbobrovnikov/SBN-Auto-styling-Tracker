@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-10-31-extracars";
+const UI_BUILD = "2026-11-01-statsexport";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -452,12 +452,14 @@ function statTile(label, value, opts = {}) {
     opts.delta || null,
   ]);
 }
-function statTable(headers, rows) {
+// A table can say how wide it needs to be (minw). On a screen narrower than that it scrolls sideways inside its own box instead of cutting its numbers off.
+function statTable(headers, rows, cols, fs, minw) {
   if (rows.length === 0) return el("div", { class: "muted", style: "font-size:12px", text: "Nothing in this period." });
-  const tpl = `grid-template-columns:minmax(0,1.6fr) repeat(${headers.length - 1},minmax(0,1fr))`;
-  const line = (cells, head) => el("div", { style: `display:grid;${tpl};gap:8px;align-items:center;padding:6px 0;${head ? "color:var(--sub);font-size:10.5px;" : "border-top:0.5px solid var(--border);font-size:12.5px;"}` },
+  const tpl = `grid-template-columns:${cols || `minmax(0,1.6fr) repeat(${headers.length - 1},minmax(0,1fr))`}`;      // a table can set its own widths when its numbers need more room
+  const line = (cells, head) => el("div", { style: `display:grid;${tpl};gap:8px;align-items:center;padding:6px 0;${head ? "color:var(--sub);font-size:10.5px;" : `border-top:0.5px solid var(--border);font-size:${fs || 12.5}px;`}` },
     cells.map((c, i) => el("div", { style: `${i ? "text-align:right;" : ""}${!head && i ? "font-family:'JetBrains Mono',monospace;" : ""}overflow:hidden;text-overflow:ellipsis`, text: c })));
-  return el("div", {}, [line(headers, true), ...rows.map((r) => line(r))]);
+  const tbl = el("div", {}, [line(headers, true), ...rows.map((r) => line(r))]);
+  return minw ? el("div", { style: "overflow-x:auto", "data-part": "stat-scroll" }, [el("div", { style: `min-width:${minw}px` }, [tbl])]) : tbl;
 }
 function statSection(title, ...children) {
   return el("div", { class: "card", style: "margin-bottom:14px" }, [el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em;margin-bottom:8px", text: title }), ...children]);
@@ -534,12 +536,15 @@ async function renderStatistics(content) {
       }))),
       el("div", { class: "muted", style: "font-size:11px;margin-top:6px", text: pts.length ? `${pts.length} ${unitName}${pts.length === 1 ? "" : "s"} · ${label(pts[0])} to ${label(pts[pts.length - 1])} · tallest bar ${money(top === 1 && !pts.some((x) => x.revenue) ? 0 : top)}` : "No data yet." })));
 
-    body.appendChild(statSection("BY SERVICE", statTable(["Service", "Jobs", "Money", "Avg ticket", "Share"], d.byService.map((x) => [x.service, String(x.jobs), money(x.revenue), money(x.avgTicket), statPct(x.share)]))));
-    body.appendChild(statSection("SALES REPS · RANKED BY VALUE CLOSED", statTable(["Rep", "Deals", "Closed", "Showed", "Show rate", "Commission"], d.bySalesRep.map((x) => [x.name, String(x.dealsClosed), money(x.dealValue), String(x.showed), x.showRate === null ? "—" : statPct(x.showRate), money(x.commission)]))));
-    body.appendChild(statSection("TECHS AND MANAGERS", statTable(["Name", "Role", "Cars", "Upsells", "Upsell $"], d.people.map((x) => [x.name, x.role, String(x.carsCompleted), String(x.upsells), money(x.upsellRevenue)]))));
+    body.appendChild(statSection("BY SERVICE", statTable(["Service", "Jobs", "Money", "Avg ticket", "Share"], d.byService.map((x) => [x.service, String(x.jobs), money(x.revenue), money(x.avgTicket), statPct(x.share)]), "minmax(0,0.85fr) minmax(0,0.5fr) minmax(0,1.35fr) minmax(0,1.35fr) minmax(0,0.75fr)", null, 312)));
+    body.appendChild(statSection("SALES REPS · RANKED BY VALUE CLOSED", statTable(["Rep", "Deals", "Closed", "Showed", "Show rate", "Commission"], d.bySalesRep.map((x) => [x.name, String(x.dealsClosed), money(x.dealValue), String(x.showed), x.showRate === null ? "—" : statPct(x.showRate), money(x.commission)]), "minmax(0,0.8fr) minmax(0,0.5fr) minmax(0,1.35fr) minmax(0,0.65fr) minmax(0,0.8fr) minmax(0,1.25fr)", 11.5, 372)));
+    const pt = d.peopleTotals, redoTxt = (n, rate) => (rate === null || rate === undefined ? String(n) : `${n} (${Math.round(rate)}%)`);
+    body.appendChild(statSection("TECHS AND MANAGERS: CARS AND UPSELLS", statTable(["Name", "Role", "Cars", "Upsells", "Upsell $"], d.people.length ? [...d.people.map((x) => [x.name, x.role === "Manager" ? "Mgr" : x.role, String(x.carsCompleted), String(x.upsells), money(x.upsellRevenue)]), ["Total", "", String(pt.carsCompleted), String(pt.upsells), money(pt.upsellRevenue)]] : [], "minmax(0,1.25fr) minmax(0,0.55fr) minmax(0,0.55fr) minmax(0,0.8fr) minmax(0,1.35fr)")));
+    body.appendChild(statSection("TECHS AND MANAGERS: WALK-INS AND REDOS", statTable(["Name", "Walk-ins", "Walk-in $", "Redos"], d.people.length ? [...d.people.map((x) => [x.name, x.walkIns === x.walkInPaid ? String(x.walkIns) : `${x.walkInPaid} of ${x.walkIns}`, money(x.walkInRevenue), redoTxt(x.redos, x.redoRate)]), ["Total", pt.walkIns === pt.walkInPaid ? String(pt.walkIns) : `${pt.walkInPaid} of ${pt.walkIns}`, money(pt.walkInRevenue), redoTxt(pt.redos, pt.redoRate)]] : [], "minmax(0,1fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,1.25fr)"),
+      el("div", { class: "muted", style: "font-size:11px;margin-top:6px", text: "Walk-ins: the ones they closed that arrived and were paid, out of all they closed (cancelled ones are left out). Walk-in $ is the base price of those, the same as Payroll. Redos are the ones counted against the person, with the rate out of the cars they worked." })));
 
     const busiest = d.byDayOfWeek.reduce((a, x) => (x.avgRevenue > (a ? a.avgRevenue : -1) ? x : a), null);
-    body.appendChild(statSection("DAY OF THE WEEK", statTable(["Day", "Jobs", "Money", "Avg per day", "Cars"], d.byDayOfWeek.map((x) => [x.day + (busiest && busiest.avgRevenue > 0 && x.day === busiest.day ? "  ★ busiest" : ""), String(x.jobs), money(x.revenue), money(x.avgRevenue), String(x.cars)])),
+    body.appendChild(statSection("DAY OF THE WEEK", statTable(["Day", "Jobs", "Money", "Avg per day", "Cars"], d.byDayOfWeek.map((x) => [x.day + (busiest && busiest.avgRevenue > 0 && x.day === busiest.day ? "  ★ busiest" : ""), String(x.jobs), money(x.revenue), money(x.avgRevenue), String(x.cars)]), "minmax(0,1.15fr) minmax(0,0.5fr) minmax(0,1.35fr) minmax(0,1.2fr) minmax(0,0.5fr)", null, 316),
       el("div", { class: "muted", style: "font-size:11px;margin-top:6px", text: "The average divides by how many of that weekday fell in the period, so five Saturdays don't make Saturday look busier." })));
     const hmax = Math.max(1, ...d.byHour.map((x) => x.jobs));
     body.appendChild(statSection("WHAT TIME CARS COME IN", d.byHour.length === 0 ? el("div", { class: "muted", style: "font-size:12px", text: "Nothing in this period." }) : el("div", {}, d.byHour.map((x) => el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:3px" }, [
@@ -580,7 +585,9 @@ async function renderStatistics(content) {
   content.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px", text: "This location only. Pick a period for the numbers below; the best-day records at the top are always all-time." }));
   content.appendChild(recordsWrap);
   content.appendChild(picker.el);
-  content.appendChild(el("div", { style: "margin-bottom:4px" }, [allBtn]));
+  const dlBtn = el("button", { class: "ghost", "data-act": "stats-download", text: "Download CSV", onclick: () => { const p = lastParams || picker.getParams(); window.location.href = "/api/owner/statistics/export?" + new URLSearchParams(p).toString(); } });
+  content.appendChild(el("div", { style: "margin-bottom:4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [allBtn, dlBtn]));
+  content.appendChild(el("div", { class: "muted", "data-part": "stats-download-note", style: "font-size:11px;margin-bottom:4px", text: "Download: every table on this page for the period shown, with no pay figures and no customer details. Opens in Excel or Sheets, or upload it to a chat." }));
   content.appendChild(periodLine);
   content.appendChild(body);
   content.appendChild(el("div", { style: "margin-top:6px" }, [advBtn, advBody]));
