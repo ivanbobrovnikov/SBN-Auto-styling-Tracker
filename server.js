@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-02-hooklog";
+const BUILD = "2026-11-02-addrep";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2444,7 +2444,35 @@ app.get("/api/cross-location/rep-upsells", (req, res) => {
 app.get("/api/cross-location/salesreps", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
-  res.json({ locationLabel: SHOP_LOCATION_LABEL, salesReps: db.salesReps.map((r) => ({ id: r.id, name: r.name })) });
+  const detail = req.query.detail === "1";      // rates only when asked for (the rep tracker asks from behind its passcode)
+  res.json({ locationLabel: SHOP_LOCATION_LABEL, salesReps: db.salesReps.map((r) => ({ id: r.id, name: r.name, initials: r.initials || "", ...(detail ? { commissionRate: r.commissionRate || 0, afterHoursCommissionRate: r.afterHoursCommissionRate || 0 } : {}) })) });
+});
+
+
+// The rep tracker adds a sales rep to this shop, so ONE action adds the same rep to every shop. It follows the same rules as everywhere else here, plus the ones adding a rep in three places
+// needs: no second rep with the same name or initials, and a PIN nobody else at this shop already uses (a shop's login tries the owner, managers, techs and then reps, so a rep whose
+// PIN matched anyone else would silently log in as that person). A rep who is already here is left exactly as they are.
+app.post("/api/cross-location/salesreps", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), b = req.body || {}, name = String(b.name || "").trim().replace(/\s+/g, " "), initials = String(b.initials || "").trim().toUpperCase(), pin = String(b.pin || "");
+  if (name.length < 2 || name.length > 60) return res.status(400).json({ error: "Enter the rep's name." });
+  if (!/^[A-Z0-9]{1,5}$/.test(initials)) return res.status(400).json({ error: "Initials are 1 to 5 letters or numbers." });
+  if (!/^\d{4,12}$/.test(pin)) return res.status(400).json({ error: "The PIN has to be 4 to 12 digits." });
+  const rate = (v) => { const n = v === undefined || v === null || v === "" ? 0 : Number(v); return Number.isFinite(n) && n >= 0 && n <= 100 ? n : NaN; };
+  const c1 = rate(b.commissionRate), c2 = rate(b.afterHoursCommissionRate);
+  if (Number.isNaN(c1) || Number.isNaN(c2)) return res.status(400).json({ error: "Commission rates are percents from 0 to 100." });
+  let phone; if (b.phone) { phone = normalizePhone(b.phone); if (!phone) return res.status(400).json({ error: "That doesn't look like a US phone number. Use 10 digits." }); }
+  const norm = (n) => String(n || "").trim().replace(/\s+/g, " ").toLowerCase();
+  const sameName = db.salesReps.find((r) => norm(r.name) === norm(name)), sameInit = db.salesReps.find((r) => String(r.initials || "").toUpperCase() === initials);
+  if (sameName && sameInit && sameName.id === sameInit.id) return res.json({ ok: true, created: false, already: true, rep: { name: sameName.name, initials: sameName.initials } });
+  if (sameName) return res.status(409).json({ error: `${sameName.name} is already here with ${sameName.initials ? "the initials " + sameName.initials : "no initials"}. Fix them in this shop's Sales Reps tab, or use those initials.` });
+  if (sameInit) return res.status(409).json({ error: `The initials ${initials} already belong to ${sameInit.name} at this shop.` });
+  const h = hash(pin);
+  if ((db.ownerPinHash && h === db.ownerPinHash) || db.managers.some((m) => m.pinHash === h) || db.employees.some((e) => e.pinHash === h) || db.salesReps.some((r) => r.pinHash === h)) return res.status(409).json({ error: "That PIN is already used by someone at this shop. Choose a different one." });
+  const rep = { id: newId(), name, initials, pinHash: h, commissionRate: c1, afterHoursCommissionRate: c2 }; if (phone) rep.phone = phone;
+  db.salesReps.push(rep); saveDB(db);
+  const clash = [...db.employees, ...db.managers].find((p) => String(p.initials || "").toUpperCase() === initials);
+  res.json({ ok: true, created: true, id: rep.id, rep: { name: rep.name, initials: rep.initials }, ...(clash ? { warning: `${clash.name} here also uses the initials ${initials}. A title that starts with them goes to the sales rep.` } : {}) });
 });
 
 // Only these fields can be changed from there - nothing about payments, techs, upsells or deleting.
