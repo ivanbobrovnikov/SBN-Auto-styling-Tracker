@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-02-addrep";
+const UI_BUILD = "2026-11-03-ghlalign";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3537,7 +3537,38 @@ async function renderCleanup(content) {
     if (result) out.textContent = result.configured === false ? "Not set up." : `Checked ${result.checked} customer${result.checked === 1 ? "" : "s"}: ${result.titles} title${result.titles === 1 ? "" : "s"}, ${result.times} time${result.times === 1 ? "" : "s"} and ${result.calendars} calendar${result.calendars === 1 ? "" : "s"} updated, ${result.merged} moved appointment${result.merged === 1 ? "" : "s"} merged${result.mergedNames && result.mergedNames.length ? " (" + result.mergedNames.join(", ") + ")" : ""}${result.unreadable ? `. ${result.unreadable} couldn't be read from GHL and were left alone` : ""}.`;
     const btn = el("button", { class: "ghost", "data-act": "ghl-check", style: "margin-top:8px", text: "Check GHL now", onclick: async () => { btn.disabled = true; btn.textContent = "Checking GHL..."; try { const r = await api("/api/owner/ghl-heal", { method: "POST", body: "{}" }); drawGhl(await api("/api/owner/ghl-sync-status"), r); } catch (e) { btn.disabled = false; btn.textContent = "Check GHL now"; alert(e.message || "Couldn't check GHL."); } } });
     ghlCard.appendChild(btn); ghlCard.appendChild(out);
+    if (st.everyMinutes > 0) ghlCard.appendChild(el("div", { class: "muted", "data-part": "ghl-auto", style: "font-size:12px;margin-top:8px", text: `The full check (no-shows and cancelled jobs too) runs by itself every ${st.everyMinutes} minute${st.everyMinutes === 1 ? "" : "s"}, so a no-show that GHL moves to a new day comes back on its own.` }));
+    else ghlCard.appendChild(el("div", { class: "muted", "data-part": "ghl-auto", style: "font-size:12px;margin-top:8px;color:var(--warn)", text: "The automatic check is switched off on this shop (GHL_CHECK_MINUTES is 0)." }));
+    ghlCard.appendChild(cmpBox); drawCompare();
   };
+  // "Compare with GHL": every place this shop disagrees with GHL. Reading it changes nothing; the buttons fix one thing at a time (or everything the automatic check can fix).
+  const cmpBox = el("div", { "data-part": "ghl-compare", style: "margin-top:12px;padding-top:10px;border-top:1px solid var(--border)" });
+  const KIND = { rescheduled: "Rescheduled in GHL, not moved here", "cancelled-here-live-there": "Cancelled here by a person, but still live in GHL", "cancelled-in-ghl": "Cancelled in GHL, still live here", time: "Different time in GHL", "noshow-in-ghl": "No-show in GHL, still pending here" };
+  const ACTION = { heal: "Fix", cancel: "Cancel it here", "bring-back": "Bring it back" };
+  const shortWhen = (iso) => (iso ? new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "none");
+  const niceStatus = (x) => String(x || "pending").replace("_", "-");
+  async function runCompare() {
+    cmpBox.innerHTML = ""; cmpBox.appendChild(el("div", { class: "muted", style: "font-size:13px", text: "Comparing every customer with GHL. This can take up to a minute..." }));
+    let r; try { r = await api("/api/owner/ghl-alignment"); } catch (e) { cmpBox.innerHTML = ""; cmpBox.appendChild(el("div", { style: "color:var(--red);font-size:13px", text: e.message })); return; }
+    cmpBox.innerHTML = "";
+    if (!r.configured) { cmpBox.appendChild(el("div", { class: "muted", style: "font-size:13px", text: "This shop isn't connected to GHL's API, so it can't be compared." })); return; }
+    cmpBox.appendChild(el("div", { "data-part": "ghl-compare-summary", style: "font-size:13px;margin-bottom:8px", text: `Compared ${r.checked} customer${r.checked === 1 ? "" : "s"} with GHL${r.unreadable ? ` (${r.unreadable} couldn't be read just now)` : ""}. ${r.differences.length ? `${r.differences.length} difference${r.differences.length === 1 ? "" : "s"} found.` : "Everything matches GHL."}` }));
+    if (r.differences.some((d) => d.action === "heal")) cmpBox.appendChild(el("button", { class: "primary", "data-act": "ghl-fix-all", style: "margin-bottom:10px", text: "Fix everything that can be fixed automatically", onclick: async (e) => { e.target.disabled = true; e.target.textContent = "Fixing..."; try { await api("/api/owner/ghl-heal", { method: "POST" }); } catch (err) { /* shown by the next comparison */ } runCompare(); } }));
+    Object.keys(KIND).forEach((k) => { const rows = r.differences.filter((d) => d.kind === k); if (!rows.length) return;
+      cmpBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;letter-spacing:0.04em;margin:10px 0 4px", text: `${KIND[k].toUpperCase()} (${rows.length})` }));
+      rows.forEach((d) => cmpBox.appendChild(el("div", { "data-part": "ghl-diff", "data-kind": d.kind, style: "padding:8px 0;border-top:1px solid var(--border)" }, [
+        el("div", { style: "font-size:13px;font-weight:500", text: [d.customer, (d.car || "").slice(0, 46)].filter(Boolean).join(" \u00B7 ") }),
+        el("div", { class: "muted", style: "font-size:12px;margin-top:2px", text: `Here: ${niceStatus(d.trackerStatus)}, ${shortWhen(d.trackerDate)}  \u2192  GHL: ${String(d.ghlStatus || "").toLowerCase() || "?"}, ${shortWhen(d.ghlDate)}` }),
+        d.action ? el("button", { class: "ghost", "data-act": "ghl-fix", "data-action": d.action, style: "margin-top:6px;font-size:12px", text: ACTION[d.action], onclick: async (e) => { e.target.disabled = true; try { await api("/api/owner/ghl-alignment/fix", { method: "POST", body: JSON.stringify({ saleId: d.saleId, action: d.action }) }); } catch (err) { e.target.textContent = err.message; return; } runCompare(); } }) : null,
+      ])));
+    });
+    cmpBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:10px", text: "This compares customers with a job from two months ago to three months ahead. It does not look for appointments GHL has that the tracker never received: More \u2192 Test tool shows what GHL sent." }));
+  }
+  function drawCompare() {
+    cmpBox.innerHTML = "";
+    cmpBox.appendChild(el("button", { class: "ghost", "data-act": "ghl-compare", text: "Compare with GHL", onclick: runCompare }));
+    cmpBox.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:6px", text: "Lists every place this shop disagrees with GHL (a no-show GHL moved, a cancel that didn't arrive, a different time). Looking changes nothing." }));
+  }
   api("/api/owner/ghl-sync-status").then((st) => drawGhl(st), () => drawGhl(null));
   const body = el("div");
   const salesReps = await api("/api/manager/salesreps-list");

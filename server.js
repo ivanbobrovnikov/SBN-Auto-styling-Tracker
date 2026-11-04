@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-02-addrep";
+const BUILD = "2026-11-03-ghlalign";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -605,6 +605,27 @@ function hookNote(db, e) {
   while (db.hookLog.length > 200) { let k = -1; for (let n = db.hookLog.length - 1; n >= 0; n--) if (db.hookLog[n].outcome !== "refused") { k = n; break; } db.hookLog.splice(k >= 0 ? k : db.hookLog.length - 1, 1); }
 }
 function badHookSecret(res, route) { const db = loadDB(); hookNote(db, { route, outcome: "refused", reason: "wrong secret in the webhook URL" }); saveDB(db); return res.status(401).json({ error: "Bad secret." }); }
+// ---- Staying aligned with GHL when GHL says nothing ----
+// GHL announces a new booking and a cancel, but NOT when a no-show or a cancelled appointment is simply moved to a new day: it just changes. These helpers let the shop notice.
+const evActive = (e) => /^(new|confirmed)$/i.test(String(e.appointmentStatus || e.status || "").trim());
+const GHL_MOVE_MS = 30 * 60000;                                     // moved later by at least this much to count as rescheduled (not a time tweak)
+const GHL_RESCHED = { auth: { label: "Auto-sync (GHL): it was rescheduled in GHL", role: "system" } };
+// A DIFFERENT rep re-closed a deal that had gone dead: it is theirs now, and its close time is when they re-closed it (the original rep's dead close is folded away).
+function reCloseCredit(db, req, sale, att, whenIso) {
+  const was = sale.salesRepName; sale.salesRepId = att.salesRepId; sale.salesRepName = att.salesRepName; sale.isWalkIn = false;
+  logAudit(db, req, sale, "Sales rep (re-closed by another rep)", was || "", att.salesRepName);
+  if (whenIso) { const wasClosed = sale.closedAt; sale.closedAt = whenIso; sale.closedAtSource = "reclose"; logAudit(db, req, sale, "Closed At (re-closed)", wasClosed || "", whenIso); }
+}
+function bringBackMoved(db, sale, evMs) {
+  const was = sale.status, from = sale.date; sale.status = "pending"; delete sale.preCancelStatus; delete sale.cancelledManually; sale.date = new Date(evMs).toISOString();
+  logAudit(db, GHL_RESCHED, sale, "Status", was, "pending"); logAudit(db, GHL_RESCHED, sale, "Date/time", String(from || "").slice(0, 16), sale.date.slice(0, 16));
+}
+// A dead job -> the ONE new live GHL appointment that is the same car and later (GHL made a new appointment for the reschedule). Only where it is unambiguous both ways.
+function uniqueOrphanMatches(db, events, deadJobs) {
+  const now = Date.now(), taken = (id) => db.sales.some((s) => s.ghlOpportunityId === id || String(s.ghlOpportunityId || "").startsWith(`${id}~`)), byEv = new Map(), byJob = new Map();
+  deadJobs.forEach((j) => { const jm = Date.parse(j.date); events.forEach((e) => { const ms = evStartMs(e); if (e.id && evActive(e) && !isNaN(ms) && ms >= jm + GHL_MOVE_MS && ms >= now - 86400000 && !taken(e.id) && titlesMatch(j.car, e.title)) { if (!byEv.has(e.id)) byEv.set(e.id, []); byEv.get(e.id).push(j); if (!byJob.has(j.id)) byJob.set(j.id, []); byJob.get(j.id).push(e); } }); });
+  const out = new Map(); byJob.forEach((evs, jid) => { if (evs.length === 1 && byEv.get(evs[0].id).length === 1) out.set(jid, evs[0]); }); return out;
+}
 function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId, appointmentId }) {
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
@@ -713,7 +734,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // The customer didn't show, and the appointment was moved to another day: that's the same deal being
   // rescheduled, so it's a live booking again (the no-show stays visible in Edit History).
   if (!isNew && incomingIso && sale.date && sale.status === "no_show"
-      && EASTERN_DAY_FMT.format(new Date(sale.date)) !== EASTERN_DAY_FMT.format(new Date(incomingIso))) {
+      && (EASTERN_DAY_FMT.format(new Date(sale.date)) !== EASTERN_DAY_FMT.format(new Date(incomingIso)) || Date.parse(incomingIso) >= Date.parse(sale.date) + GHL_MOVE_MS)) {
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (reschedule)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "no_show", newValue: "pending" });
     db.auditLog = db.auditLog.slice(0, 1000);
@@ -738,6 +759,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.car = sale.titleLocked ? (sale.car || car || "") : (car || sale.car || "");
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
+  const priorRepId = sale.salesRepId, priorHere = isServiced(sale) || sale.status === "arrived" || !!sale.completed || !!sale.paid;
   if (attribution) {
     sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
     if (attribution.walkInClosedByType && !sale.closerLocked) {            // a closer chosen by hand is never overwritten
@@ -751,6 +773,12 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   }
   else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
   else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
+  // A DIFFERENT rep's initials are on this booking now and the deal had not been worked: that rep re-closed it. The credit moved with the title; the close time moves with it too.
+  if (!isNew && attribution && attribution.salesRepId && priorRepId && priorRepId !== attribution.salesRepId && !priorHere) {
+    const wasClosed = sale.closedAt; sale.closedAt = (closedAt ? normalizeDate(closedAt) : null) || new Date().toISOString(); sale.closedAtSource = "reclose";
+    const sys = { auth: { label: "GHL booking (re-closed by another rep)", role: "system" } };
+    logAudit(db, sys, sale, "Sales rep (re-closed by another rep)", "", attribution.salesRepName); logAudit(db, sys, sale, "Closed At (re-closed)", wasClosed || "", sale.closedAt);
+  }
   sale.baseService = baseService || sale.baseService || "";
   if (prevSnap && serviceLine(prevSnap.service) && serviceLine(sale.baseService) && serviceLine(prevSnap.service) !== serviceLine(sale.baseService)) {
     // An existing job just had its SERVICE swapped by an incoming booking (tint to ceramic, say). A second appointment normally stays its own job (see
@@ -2846,6 +2874,10 @@ function mergeJobPair(db, req, liveId, earlierId, opts) {
   applyTitleRules(db, earlier, { silent: true });
   if (earlier.status === "no_show" || earlier.status === "cancelled") earlier.status = "pending"; // it's a live booking again
   if (!earlier.salesRepId && live.salesRepId) { earlier.salesRepId = live.salesRepId; earlier.salesRepName = live.salesRepName; }
+  else if (live.salesRepId && earlier.salesRepId && live.salesRepId !== earlier.salesRepId && !earlier.completed && !earlier.paid && earlier.status !== "arrived") {
+    // Two reps: the earlier one's deal went dead and the other re-closed it. The merged job keeps the earlier record but belongs to the rep who re-closed it, from that moment.
+    reCloseCredit(db, req, earlier, { salesRepId: live.salesRepId, salesRepName: live.salesRepName }, live.closedAt || null);
+  }
   if (!(earlier.employeeIds || []).length && (live.employeeIds || []).length) { earlier.employeeIds = live.employeeIds; earlier.employeeNames = live.employeeNames; }
   earlier.upsells = [...(earlier.upsells || []), ...(live.upsells || [])];
   earlier.notes = [...(earlier.notes || []), ...(live.notes || [])];
@@ -4833,12 +4865,27 @@ async function ghlEventsFor(contactId) {
 const evCancelled = (e) => /cancel|invalid|deleted/i.test(String(e.appointmentStatus || e.status || ""));
 const evStartMs = (e) => { const iso = normalizeDate(e.startTime); return iso ? Date.parse(iso) : NaN; };
 function reconcileContact(db, contactId, events) {
-  const out = { titles: 0, times: 0, calendars: 0, merged: 0, seen: 0, mergedNames: [] };
+  const out = { titles: 0, times: 0, calendars: 0, merged: 0, seen: 0, revived: 0, mergedNames: [], revivedNames: [] };
   if (!events || !events.length) return out;
   const byId = new Map(events.filter((e) => e.id).map((e) => [e.id, e]));
   const mine = () => db.sales.filter((s) => s.contactId === contactId && !s.isRedo);
   const open = (s) => !["arrived", "no_show", "cancelled"].includes(s.status || "pending") && !liveJobWorked(s);
   const note = (sale, field, from, to) => logAudit(db, GHL_SYS, sale, field, from, to);
+  // A job that is DEAD here (a no-show, or cancelled by GHL's own message) whose appointment GHL now shows live and moved LATER was rescheduled, and GHL never said so.
+  // A person's own Cancel is left alone (it is listed in "Compare with GHL" for the owner to decide).
+  const deadHere = mine().filter((j) => (j.status === "no_show" || (j.status === "cancelled" && !j.cancelledManually)) && !j.completed && !j.paid && !isNaN(Date.parse(j.date)));
+  const needOrphan = [];
+  deadHere.forEach((j) => {
+    const jm = Date.parse(j.date), own = j.ghlOpportunityId ? byId.get(j.ghlOpportunityId) : null;
+    if (own && evActive(own)) { const ms = evStartMs(own); if (!isNaN(ms) && ms >= jm + GHL_MOVE_MS && ms >= Date.now() - 86400000) { bringBackMoved(db, j, ms); out.revived++; out.revivedNames.push(j.customerName || j.car); } return; }
+    needOrphan.push(j);
+  });
+  uniqueOrphanMatches(db, events, needOrphan).forEach((e, jid) => {          // GHL made a NEW appointment for the reschedule: the job follows it
+    const j = db.sales.find((x) => x.id === jid), ms = evStartMs(e), att = resolveSalesRepAttribution(db, "", e.title);
+    j.ghlOpportunityId = e.id; j.ghlApptSeen = true; if (e.calendarId) j.calendarId = e.calendarId;
+    bringBackMoved(db, j, ms); out.revived++; out.revivedNames.push(j.customerName || j.car);
+    if (att && att.salesRepId && j.salesRepId && att.salesRepId !== j.salesRepId) reCloseCredit(db, GHL_RESCHED, j, att, normalizeDate(e.dateAdded) || new Date().toISOString());
+  });
   mine().forEach((j) => {
     const ev = j.ghlOpportunityId ? byId.get(j.ghlOpportunityId) : null;
     if (!ev || evCancelled(ev)) return;
@@ -4873,7 +4920,7 @@ const syncTimers = new Map();
 async function syncContactNow(contactId) {
   const events = await ghlEventsFor(contactId); if (!events) return null;
   const db = loadDB(), r = reconcileContact(db, contactId, events);                         // load and save with nothing awaited in between
-  if (r.titles + r.times + r.calendars + r.merged + r.seen > 0 || db.ghlIdsAreAppointments) saveDB(db);
+  if (r.titles + r.times + r.calendars + r.merged + r.seen + r.revived > 0 || db.ghlIdsAreAppointments) saveDB(db);
   return r;
 }
 function scheduleContactSync(contactId, delayMs) {
@@ -4882,24 +4929,84 @@ function scheduleContactSync(contactId, delayMs) {
   syncTimers.set(contactId, setTimeout(() => { syncTimers.delete(contactId); syncContactNow(contactId).catch(() => {}); }, delayMs == null ? 2000 : delayMs));
 }
 // "Check GHL now": every customer with an open job from two weeks back to three months ahead.
+let ghlHealRunning = false;
+const ghlEveryMinutes = () => { const v = process.env.GHL_CHECK_MINUTES; const n = v === undefined || v === "" ? 15 : Number(v); return Number.isFinite(n) && n >= 0 ? n : 15; };      // how often it checks by itself (15 minutes unless set; 0 turns it off)
 async function runGhlHeal() {
   if (!ghlConfigured()) return { configured: false };
-  const db0 = loadDB(), lo = Date.now() - 14 * 86400000, hi = Date.now() + 90 * 86400000;
-  const contacts = [...new Set(db0.sales.filter((s) => s.contactId && !s.isRedo && s.status !== "cancelled" && Date.parse(s.date) >= lo && Date.parse(s.date) <= hi).map((s) => s.contactId))].slice(0, 200);
-  const total = { configured: true, checked: 0, titles: 0, times: 0, calendars: 0, merged: 0, mergedNames: [], unreadable: 0 };
-  for (const c of contacts) {
-    const r = await syncContactNow(c);
-    if (!r) { total.unreadable++; continue; }
-    total.checked++; ["titles", "times", "calendars", "merged"].forEach((k) => { total[k] += r[k]; }); total.mergedNames.push(...r.mergedNames);
-    await new Promise((res) => setTimeout(res, 150));
-  }
-  ghlLast = { at: new Date().toISOString(), result: { checked: total.checked, titles: total.titles, times: total.times, calendars: total.calendars, merged: total.merged } };
-  return total;
+  if (ghlHealRunning) return { configured: true, busy: true, checked: 0, titles: 0, times: 0, calendars: 0, merged: 0, revived: 0, mergedNames: [], revivedNames: [], unreadable: 0 };
+  ghlHealRunning = true;
+  try {
+    const db0 = loadDB(), now = Date.now(), lo = now - 14 * 86400000, loDead = now - 60 * 86400000, hi = now + 90 * 86400000, dead = (s) => s.status === "no_show" || s.status === "cancelled";
+    const contacts = [...new Set(db0.sales.filter((s) => s.contactId && !s.isRedo && Date.parse(s.date) <= hi && Date.parse(s.date) >= (dead(s) ? loDead : lo)).map((s) => s.contactId))].slice(0, 300);
+    const total = { configured: true, checked: 0, titles: 0, times: 0, calendars: 0, merged: 0, revived: 0, mergedNames: [], revivedNames: [], unreadable: 0 };
+    for (const c of contacts) {
+      const r = await syncContactNow(c);
+      if (!r) { total.unreadable++; continue; }
+      total.checked++; ["titles", "times", "calendars", "merged", "revived"].forEach((k) => { total[k] += r[k]; }); total.mergedNames.push(...r.mergedNames); total.revivedNames.push(...r.revivedNames);
+      await new Promise((res) => setTimeout(res, 150));
+    }
+    ghlLast = { at: new Date().toISOString(), result: { checked: total.checked, titles: total.titles, times: total.times, calendars: total.calendars, merged: total.merged, revived: total.revived, unreadable: total.unreadable } };
+    return total;
+  } finally { ghlHealRunning = false; }
 }
 app.post("/api/owner/ghl-heal", requireOwner, async (req, res) => res.json(await runGhlHeal()));
+// ---- "Compare with GHL": every place this shop disagrees with GHL, WITHOUT changing anything ----
+// kind: rescheduled (dead here, live and later in GHL) | cancelled-here-live-there (a PERSON cancelled it here, GHL still has it live) | cancelled-in-ghl (GHL cancelled it, still live here)
+//       | time (a different time in GHL) | noshow-in-ghl (GHL says no-show, still pending here). action: what a tap can do about it ("heal" = the automatic check fixes it).
+function alignmentRows(db, contactId, events) {
+  const rows = [], now = Date.now(), byId = new Map(events.filter((e) => e.id).map((e) => [e.id, e]));
+  const mine = db.sales.filter((s) => s.contactId === contactId && !s.isRedo);
+  const row = (j, kind, ev, action) => rows.push({ saleId: j.id, kind, action: action || null, customer: j.customerName || "", car: j.car || "", trackerStatus: j.status || "pending", trackerDate: j.date, ghlStatus: ev ? String(ev.appointmentStatus || ev.status || "") : "", ghlDate: ev ? (normalizeDate(ev.startTime) || null) : null });
+  const orphanOf = uniqueOrphanMatches(db, events, mine.filter((j) => (j.status === "no_show" || (j.status === "cancelled" && !j.cancelledManually)) && !j.completed && !j.paid && !isNaN(Date.parse(j.date)) && !(j.ghlOpportunityId && byId.get(j.ghlOpportunityId) && evActive(byId.get(j.ghlOpportunityId)))));
+  mine.forEach((j) => {
+    const jm = Date.parse(j.date); if (isNaN(jm)) return;
+    const own = j.ghlOpportunityId ? byId.get(j.ghlOpportunityId) : null, ms = own ? evStartMs(own) : NaN, worked = isServiced(j) || !!j.completed || !!j.paid || j.status === "arrived", dead = j.status === "no_show" || j.status === "cancelled";
+    if (dead) {
+      if (j.completed || j.paid) return;
+      const manual = j.status === "cancelled" && j.cancelledManually;
+      if (own && evActive(own) && !isNaN(ms) && ms >= jm + GHL_MOVE_MS && ms >= now - 86400000) return row(j, manual ? "cancelled-here-live-there" : "rescheduled", own, manual ? "bring-back" : "heal");
+      if (!manual && orphanOf.has(j.id)) row(j, "rescheduled", orphanOf.get(j.id), "heal");
+      return;
+    }
+    if (worked || !own) return;
+    if (evCancelled(own)) return row(j, "cancelled-in-ghl", own, "cancel");
+    if (/no.?show/i.test(String(own.appointmentStatus || own.status || "")) && jm < now) return row(j, "noshow-in-ghl", own, null);
+    if (evActive(own) && !isNaN(ms) && Math.abs(ms - jm) > 60000) row(j, "time", own, "heal");
+  });
+  return rows;
+}
+async function ghlAlignmentReport() {
+  if (!ghlConfigured()) return { configured: false };
+  const db = loadDB(), now = Date.now(), lo = now - 14 * 86400000, loDead = now - 60 * 86400000, hi = now + 90 * 86400000, dead = (s) => s.status === "no_show" || s.status === "cancelled";
+  const contacts = [...new Set(db.sales.filter((s) => s.contactId && !s.isRedo && Date.parse(s.date) <= hi && Date.parse(s.date) >= (dead(s) ? loDead : lo)).map((s) => s.contactId))].slice(0, 300);
+  const rows = []; let checked = 0, unreadable = 0;
+  for (const c of contacts) {
+    const events = await ghlEventsFor(c); if (!events) { unreadable++; continue; } checked++;
+    rows.push(...alignmentRows(db, c, events)); await new Promise((r) => setTimeout(r, 120));
+  }
+  return { configured: true, location: SHOP_LOCATION_LABEL, checked, unreadable, customers: contacts.length, checkedAt: new Date().toISOString(), differences: rows, lastAutomatic: ghlLast.at, everyMinutes: ghlEveryMinutes() };
+}
+app.get("/api/owner/ghl-alignment", requireOwner, async (req, res) => { res.set("Cache-Control", "no-store"); res.json(await ghlAlignmentReport()); });
+// The one-tap actions for differences that need a decision. Each one re-reads GHL first and refuses if GHL no longer shows the difference.
+app.post("/api/owner/ghl-alignment/fix", requireOwner, async (req, res) => {
+  if (!ghlConfigured()) return res.json({ configured: false });
+  const first = loadDB().sales.find((s) => s.id === (req.body || {}).saleId);
+  if (!first || !first.contactId) return res.status(404).json({ error: "Job not found." });
+  const events = await ghlEventsFor(first.contactId); if (!events) return res.status(502).json({ error: "Couldn't read GHL just now. Nothing was changed." });
+  const db = loadDB(), sale = db.sales.find((s) => s.id === first.id), r = alignmentRows(db, sale.contactId, events).find((x) => x.saleId === sale.id), action = (req.body || {}).action;
+  if (!r || r.action !== action) return res.status(409).json({ error: "GHL no longer shows that difference, so nothing was changed." });
+  const sys = { auth: { label: "GHL comparison (owner)", role: "system" } };
+  if (action === "cancel") { sale.preCancelStatus = sale.status || "pending"; delete sale.cancelledManually; logAudit(db, sys, sale, "Status", sale.status || "pending", "cancelled"); sale.status = "cancelled"; saveDB(db); return res.json({ ok: true }); }
+  if (action === "bring-back") { const ev = events.find((e) => e.id === sale.ghlOpportunityId); bringBackMoved(db, sale, evStartMs(ev)); saveDB(db); return res.json({ ok: true }); }
+  if (action === "heal") { const out = await syncContactNow(sale.contactId); return res.json({ ok: true, ...(out || {}) }); }
+  res.status(400).json({ error: "Unknown action." });
+});
+// The same report for the rep tracker, so one screen can show all the shops. Read-only.
+app.post("/api/cross-location/ghl-heal", async (req, res) => { if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." }); res.json(await runGhlHeal()); });
+app.get("/api/cross-location/ghl-alignment", async (req, res) => { if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." }); res.set("Cache-Control", "no-store"); res.json(await ghlAlignmentReport()); });
 app.get("/api/owner/ghl-sync-status", requireOwner, (req, res) => {
   const db = loadDB(), openJobs = db.sales.filter((s) => s.contactId && !["arrived", "no_show", "cancelled"].includes(s.status || "pending") && Date.parse(s.date) >= Date.now() - 86400000);
-  res.json({ configured: ghlConfigured(), upcoming: openJobs.length, matched: openJobs.filter((s) => s.ghlApptSeen).length, lastRunAt: ghlLast.at, lastResult: ghlLast.result });
+  res.json({ configured: ghlConfigured(), upcoming: openJobs.length, matched: openJobs.filter((s) => s.ghlApptSeen).length, lastRunAt: ghlLast.at, lastResult: ghlLast.result, everyMinutes: ghlEveryMinutes() });
 });
 
 // Lets a manager see EXACTLY what GHL has for this job's customer, so the right title (and time) can be applied with one
@@ -5623,6 +5730,8 @@ const server = app.listen(PORT, () => {
   setInterval(runTitleSync, 10 * 60 * 1000);
   setTimeout(runAutoMerge, 20 * 1000);                 // duplicates already in the system are cleaned up by themselves, now and every 10 minutes
   setInterval(runAutoMerge, 10 * 60 * 1000);
+  // The full check against GHL used to run only when someone pressed "Check GHL now". It now runs by itself, so a no-show that GHL moved to a new day (which GHL never announces) comes back on its own.
+  if (ghlConfigured() && ghlEveryMinutes() > 0) { setTimeout(() => runGhlHeal().catch(() => {}), Math.min(90 * 1000, ghlEveryMinutes() * 60 * 1000)); setInterval(() => runGhlHeal().catch(() => {}), ghlEveryMinutes() * 60 * 1000); }
   // Jobs already in the tracker pick up the price their title carries right away (open, unlocked jobs only; paid and completed
   // jobs keep their price, and are listed in Cleanup if the title disagrees).
   try { const db = loadDB(); const a = backfillTitlePricing(db), b = autoFlagRescheduleFromTitle(db); if (a + b > 0) saveDB(db); } catch (e) { console.error("title price / reschedule backfill failed:", e.message); }
