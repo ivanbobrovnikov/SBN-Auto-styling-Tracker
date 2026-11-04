@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-03-ghlalign";
+const BUILD = "2026-11-04-sameday";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -605,6 +605,41 @@ function hookNote(db, e) {
   while (db.hookLog.length > 200) { let k = -1; for (let n = db.hookLog.length - 1; n >= 0; n--) if (db.hookLog[n].outcome !== "refused") { k = n; break; } db.hookLog.splice(k >= 0 ? k : db.hookLog.length - 1, 1); }
 }
 function badHookSecret(res, route) { const db = loadDB(); hookNote(db, { route, outcome: "refused", reason: "wrong secret in the webhook URL" }); saveDB(db); return res.status(401).json({ error: "Bad secret." }); }
+// ---- Same-day deals ----
+// A booking made for the SAME DAY it was closed (or with S DAY / SAME DAY in the title) only counts as a close if the customer shows. It counts like any close until 2 hours after its appointment
+// time. If it is marked a no-show, or those 2 hours pass without the customer arriving, it stops counting in the rep's closed count and dollars. The JOB is untouched: it stays a no-show (or pending)
+// so the VA can still call, and the rep's commission rules are exactly as before. When the customer finally shows, even on another day after a reschedule, it counts again, dated the day they showed.
+const SAME_DAY_GRACE_MS = 2 * 3600000;
+// The rule only applies to deals closed on or after the day this version first started, so past numbers (last month's closes, anything already reported or paid on) never change under you.
+// SAME_DAY_RULE_FROM (a date) can set a different start; a date far in the future switches the rule off.
+let sameDayFromMs = 0;
+function initSameDayFrom() {
+  if (process.env.SAME_DAY_RULE_FROM) { sameDayFromMs = Date.parse(process.env.SAME_DAY_RULE_FROM) || 0; return; }
+  const db = loadDB(); if (!db.sameDayRuleFrom) { db.sameDayRuleFrom = startOfDayEastern(EASTERN_DAY_FMT.format(new Date())); saveDB(db); }
+  sameDayFromMs = Date.parse(db.sameDayRuleFrom) || 0;
+}
+const sameDayWords = (t) => /\b(s[\s-]?day|same[\s-]?day)\b/i.test(String(t || ""));
+const apptAtClose = (s) => Date.parse(s.closeApptDate || s.date);            // the appointment time the rep booked when they closed it (it does not move when the booking is rescheduled)
+function isSameDayDeal(s) {
+  if (!s.salesRepId || s.isRedo) return false;
+  const appt = apptAtClose(s), closed = Date.parse(s.closedAt);
+  if (isNaN(appt) || isNaN(closed) || closed < sameDayFromMs) return false;
+  return sameDayWords(s.car) || EASTERN_DAY_FMT.format(new Date(closed)) === EASTERN_DAY_FMT.format(new Date(appt));
+}
+const showedUp = (s) => s.status === "arrived" || !!s.paid || !!s.completed;
+// A booking flagged as a reschedule is normally NOT a new close. The exception: it re-books a same-day deal that had lapsed (so that deal's own close is out), and the customer has now come in: then it carries the credit.
+const resched = (s) => !!s.isReschedule && !(s.reschedulesSameDay && showedUp(s));
+function sameDayOut(s, nowMs) {                                               // true = this deal does NOT count as a close right now
+  if (s.sameDayExempt || s.status === "cancelled" || !isSameDayDeal(s) || showedUp(s)) return false;
+  return s.status === "no_show" || (nowMs || Date.now()) > apptAtClose(s) + SAME_DAY_GRACE_MS;
+}
+// The moment a deal counts as closed: when it was closed, unless it is a same-day deal that did not show on time and came in later (after a reschedule): then the day it showed.
+function closeTime(s) {
+  if (s.isReschedule && s.reschedulesSameDay && showedUp(s)) return s.date;
+  if (isSameDayDeal(s) && showedUp(s) && Date.parse(s.date) > apptAtClose(s) + SAME_DAY_GRACE_MS) return s.date;
+  return s.closedAt || s.date;
+}
+function backfillCloseAppt(db) { let n = 0; db.sales.forEach((s) => { if (!s.closeApptDate && s.date) { s.closeApptDate = s.date; n++; } }); return n; }
 // ---- Staying aligned with GHL when GHL says nothing ----
 // GHL announces a new booking and a cancel, but NOT when a no-show or a cancelled appointment is simply moved to a new day: it just changes. These helpers let the shop notice.
 const evActive = (e) => /^(new|confirmed)$/i.test(String(e.appointmentStatus || e.status || "").trim());
@@ -724,6 +759,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     const fromGhl = closedAt ? (normalizeDate(closedAt) || closedAt) : null;
     sale.closedAt = fromGhl || new Date().toISOString();
     sale.closedAtSource = fromGhl ? "ghl" : "tracker";
+    sale.closeApptDate = incomingIso || null;        // remembered, so a later reschedule can never turn a same-day deal into an ordinary one
     if (!fromGhl && secondCarSameDay) {
       sale.closedAtCheck = true;
       if (!db.auditLog) db.auditLog = [];
@@ -2281,14 +2317,14 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
   // appointment happens - this is what a live "who's closing deals today" leaderboard
   // needs, matching Closing Activity instead.
   const closedBasis = req.query.dateBasis === "closed";
-  const dateBasis = closedBasis ? (s) => (s.closedAt || s.date) : (s) => s.date;
+  const dateBasis = closedBasis ? closeTime : (s) => s.date;
   const inRangeJobs = revenueEligible(db.sales.filter((s) => s.salesRepId && inRange(dateBasis(s), start, end)), db);
   // On the closing view a booking marked as a reschedule isn't a new close. On the appointment view (the one that
   // matches Payroll) it stays, so the rep is still paid when the client shows up.
-  const relevant = (closedBasis ? inRangeJobs.filter((s) => !s.isReschedule) : inRangeJobs).filter((s) => !redoFree(s)); // on BOTH bases a free redo is not a sale, so this agrees with Payroll
-  const leftOut = closedBasis ? inRangeJobs.filter((s) => s.isReschedule).map((s) => {
+  const relevant = (closedBasis ? inRangeJobs.filter((s) => !resched(s) && !sameDayOut(s)) : inRangeJobs).filter((s) => !redoFree(s)); // on BOTH bases a free redo is not a sale, so this agrees with Payroll
+  const leftOut = closedBasis ? inRangeJobs.filter((s) => resched(s) || sameDayOut(s)).map((s) => {
     const r = db.salesReps.find((x) => x.id === s.salesRepId);
-    return { id: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending", repName: r ? r.name : "Removed rep" };
+    return { id: s.id, kind: resched(s) ? "reschedule" : "same-day", auto: !!s.rescheduleAutoFlagged, autoReason: s.rescheduleAutoReason || "title", car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, status: s.status || "pending", repName: r ? r.name : "Removed rep" };
   }) : [];
   const byRep = {};
   // On the closing view, an upsell credited to a sales rep is a close of its own (the rep sold something extra), dated when it was added. It counts toward closed value and deals
@@ -2305,7 +2341,7 @@ app.get("/api/cross-location/salesrep-closes", (req, res) => {
     if (!byRep[rep.name]) byRep[rep.name] = { name: rep.name, commissionRate: rep.commissionRate || 0, afterHoursCommissionRate: rep.afterHoursCommissionRate || 0, closes: [] };
     const duringHours = isDuringBusinessHours(s.closedAt || s.date);
     byRep[rep.name].closes.push({
-      id: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date,
+      id: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: closeTime(s),
       basePrice: parseFloat(s.basePrice) || 0, baseService: s.baseService || "", status: s.status || "pending", duringHours, isReschedule: !!s.isReschedule,
     });
   });
@@ -2504,7 +2540,7 @@ app.post("/api/cross-location/salesreps", (req, res) => {
 });
 
 // Only these fields can be changed from there - nothing about payments, techs, upsells or deleting.
-const CROSS_EDITABLE = ["closedAt", "date", "car", "basePrice", "baseService", "salesRepId", "isWalkIn", "isOnlineBooking", "status", "isReschedule", "rescheduleDismissed"];
+const CROSS_EDITABLE = ["closedAt", "date", "car", "basePrice", "baseService", "salesRepId", "isWalkIn", "isOnlineBooking", "status", "isReschedule", "rescheduleDismissed", "sameDayExempt"];
 app.post("/api/cross-location/job-edit", (req, res) => {
   if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB();
@@ -2519,7 +2555,7 @@ app.post("/api/cross-location/job-edit", (req, res) => {
   if (body.car !== undefined && !String(body.car).trim()) return res.status(400).json({ error: "The title can't be empty." });
   if (body.status !== undefined && !["pending", "arrived", "no_show", "cancelled"].includes(body.status)) return res.status(400).json({ error: "Unknown status." });
   if (body.salesRepId !== undefined && !db.salesReps.some((r) => r.id === body.salesRepId)) return res.status(400).json({ error: "That sales rep doesn't exist at this location." });
-  if ((body.isReschedule !== undefined && typeof body.isReschedule !== "boolean") || (body.rescheduleDismissed !== undefined && typeof body.rescheduleDismissed !== "boolean")) return res.status(400).json({ error: "That must be true or false." });
+  if ((body.isReschedule !== undefined && typeof body.isReschedule !== "boolean") || (body.rescheduleDismissed !== undefined && typeof body.rescheduleDismissed !== "boolean") || (body.sameDayExempt !== undefined && typeof body.sameDayExempt !== "boolean")) return res.status(400).json({ error: "That must be true or false." });
   req.params = { id: sale.id };
   req.body = body;
   req.auth = { role: "owner", id: "rep-tracker", label: "Rep tracker (owner)" };
@@ -2924,7 +2960,7 @@ function reschedulePartnerOf(db, j, byKey) {
   if (!k) return null;
   const closedMs = Date.parse(j.closedAt || j.date);
   return (byKey[k] || [])
-    .filter((e) => e.id !== j.id && !isServiced(e) && isDeadBooking(e) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
+    .filter((e) => e.id !== j.id && !isServiced(e) && (isDeadBooking(e) || sameDayOut(e)) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
     .sort((a, b) => (a.date < b.date ? 1 : -1))[0] || null;
 }
 function findPossibleReschedules(db, days = 7) {
@@ -2958,14 +2994,19 @@ function autoFlagRescheduleFromTitle(db, onlyJob) {
   let flagged = 0;
   (onlyJob ? [onlyJob] : db.sales).forEach((j) => {
     if (j.isReschedule || j.rescheduleDismissed || j.status === "cancelled" || !j.salesRepId || !afterRevenueStart(j, db)) return;
-    if (!titleSaysReschedule(j.car)) return;
+    const says = titleSaysReschedule(j.car);
+    // Without the word, ONLY a same-day booking that has just arrived (not an old job in a sweep) is caught: the rep re-booked a customer who no-showed (or whose same-day time lapsed) for the same car and service.
+    // A cancelled earlier booking is an explicit ending, so that is still a fresh sale; everything else without the word stays a suggestion in Cleanup.
+    if (!says && !(onlyJob && isSameDayDeal(j))) return;
     if (!(Date.parse(j.closedAt || j.date) >= cutoff)) return;
     const partner = reschedulePartnerOf(db, j, byKey);
     if (!partner) return;
+    if (!says && !(partner.status === "no_show" || sameDayOut(partner) || (isDeadBooking(partner) && partner.status !== "cancelled" && partner.status !== "unconfirmed"))) return;
     j.isReschedule = true;
-    j.rescheduleAutoFlagged = true;
+    j.rescheduleAutoFlagged = true; j.rescheduleAutoReason = says ? "title" : "same-day-rebook";
+    if (sameDayOut(partner)) j.reschedulesSameDay = true;        // that same-day deal is out; this booking carries its credit when the customer shows
     if (!db.auditLog) db.auditLog = [];
-    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (title says rescheduled)", saleId: j.id, car: j.car, field: "Reschedule (not a new close)", oldValue: false, newValue: true });
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: says ? "Auto (title says rescheduled)" : "Auto (a same-day re-booking of a no-show)", saleId: j.id, car: j.car, field: "Reschedule (not a new close)", oldValue: false, newValue: true });
     db.auditLog = db.auditLog.slice(0, 1000);
     flagged += 1;
   });
@@ -3034,7 +3075,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
   db.cashEntries.forEach((e) => { if (e.autoFromJob && e.saleId) cashBySale[e.saleId] = (cashBySale[e.saleId] || 0) + e.amount; });
   res.json(jobs.map((s) => ({
     id: s.id, date: s.date, customerName: s.customerName, customerPhone: s.customerPhone, car: s.car,
-    cashPaidAmount: cashBySale[s.id] || 0, isReschedule: !!s.isReschedule, closedAtCheck: !!s.closedAtCheck,
+    cashPaidAmount: cashBySale[s.id] || 0, isReschedule: !!s.isReschedule, sameDayOut: sameDayOut(s), closedAtCheck: !!s.closedAtCheck,
     employeeIds: saleEmployeeIds(s), employeeNames: s.employeeNames || "Unassigned", baseService: s.baseService,
     managerHelperIds: s.managerHelperIds || [], managerHelperNames: s.managerHelperNames || "",
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
@@ -3053,6 +3094,13 @@ function patchJobHandler(req, res) {
   if (!sale) return res.status(404).json({ error: "Job not found." });
   // "This is a reschedule, not a new close": keeps the job out of closing activity (the audit, the rep tracker's
   // closes, Statistics) while leaving it fully in payroll. Owner only, and always logged.
+  // "Count it anyway": the owner overrides the same-day rule for ONE deal (for example the customer did come in and nobody marked it). Nothing is ever hidden without a way back.
+  if (req.body.sameDayExempt !== undefined) {
+    if (req.auth.role !== "owner") return res.status(403).json({ error: "Only the owner can change this." });
+    const flagSD = !!req.body.sameDayExempt;
+    logAudit(db, req, sale, "Same-day rule (count it anyway)", !!sale.sameDayExempt, flagSD);
+    sale.sameDayExempt = flagSD;
+  }
   if (req.body.isReschedule !== undefined) {
     if (req.auth.role !== "owner") return res.status(403).json({ error: "Only the owner can change this." });
     const flag = !!req.body.isReschedule;
@@ -3061,6 +3109,7 @@ function patchJobHandler(req, res) {
     if (!flag && sale.rescheduleAutoFlagged) sale.rescheduleDismissed = true;
     sale.rescheduleAutoFlagged = false;
     sale.isReschedule = flag;
+    if (flag) { const pp = reschedulePartnerOf(db, sale, customerIndex(db)); if (pp && sameDayOut(pp)) sale.reschedulesSameDay = true; else delete sale.reschedulesSameDay; } else delete sale.reschedulesSameDay;
   }
   // "Not a reschedule": the owner looked at a Cleanup suggestion and says it's a genuinely separate deal.
   if (req.body.rescheduleDismissed !== undefined) {
@@ -3668,11 +3717,11 @@ app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
   // A booking the owner marked as a RESCHEDULE is the same deal moved to a new day, not a new sale, so it stays out
   // of closing activity (it's listed separately as "left out", with a way to undo). It is NOT left out of payroll or
   // the appointment lists: when the client shows up, the rep is paid exactly as normal.
-  const inClosingRange = db.sales.filter((s) => s.salesRepId && inRange(s.closedAt || s.date, start, end));
-  const relevant = revenueEligible(inClosingRange.filter((s) => !s.isReschedule && !redoFree(s)), db);
-  const leftOut = revenueEligible(inClosingRange.filter((s) => s.isReschedule), db).map((s) => {
+  const inClosingRange = db.sales.filter((s) => s.salesRepId && inRange(closeTime(s), start, end));
+  const relevant = revenueEligible(inClosingRange.filter((s) => !resched(s) && !sameDayOut(s) && !redoFree(s)), db);
+  const leftOut = revenueEligible(inClosingRange.filter((s) => resched(s) || sameDayOut(s)), db).map((s) => {
     const r = db.salesReps.find((x) => x.id === s.salesRepId);
-    return { saleId: s.id, auto: !!s.rescheduleAutoFlagged, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, repName: r ? r.name : "Removed rep", status: s.status || "pending" };
+    return { saleId: s.id, kind: resched(s) ? "reschedule" : "same-day", auto: !!s.rescheduleAutoFlagged, autoReason: s.rescheduleAutoReason || "title", car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date, basePrice: parseFloat(s.basePrice) || 0, repName: r ? r.name : "Removed rep", status: s.status || "pending" };
   });
   const byRep = {};
   relevant.forEach((s) => {
@@ -3692,7 +3741,7 @@ app.get("/api/owner/closing-activity", requireOwner, (req, res) => {
     // Individual close detail - so a $0 value is immediately visible and traceable back
     // to a specific job that just needs its price filled in via Cleanup.
     byRep[repName].closes.push({
-      saleId: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: s.closedAt || s.date,
+      saleId: s.id, car: s.car, customerName: s.customerName, date: s.date, closedAt: closeTime(s),
       basePrice, projectedCommission: projectedAmount, status: s.status || "pending", missingPrice: !s.basePrice,
     });
   });
@@ -4664,7 +4713,7 @@ app.post("/api/manager/jobs/merge", requireOwner, (req, res) => {
   if (!r.ok) return res.status(r.status || 400).json({ error: r.error }); saveDB(db); res.json(r);
 });
 app.post("/api/owner/auto-clean", requireOwner, (req, res) => { const out = runAutoMerge(); res.json(out); });
-function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db); if (r.count || m.count || l || c) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
+function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db), b = backfillCloseAppt(db); if (r.count || m.count || l || c || b) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
 
 // ===== REDO TRACKING =====
 // A redo record belongs to the ORIGINAL job and to the people who worked it (the techs, and any manager who helped hands-on), because their work is what came back.
@@ -5459,7 +5508,7 @@ function statsHeadline(db, start, end) {
   const arrived = sales.filter((s) => s.status === "arrived").length;
   const noShow = sales.filter((s) => s.status === "no_show").length;
   const cancelled = db.sales.filter((s) => inP(s.date) && s.status === "cancelled" && afterRevenueStart(s, db)).length;
-  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && !redoFree(s) && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && !resched(s) && !sameDayOut(s) && !redoFree(s) && afterRevenueStart(s, db) && inP(closeTime(s)));
   const dealValue = statSum(closed, (s) => parseFloat(s.basePrice) || 0);
   return {
     revenue: statRound(revenue), paidJobs: paid.length, avgTicket: statRound(paid.length ? revenue / paid.length : 0),
@@ -5496,8 +5545,8 @@ function statsRecords(db, today) {
     if (s.paid) revenue[d] = (revenue[d] || 0) + saleTotal(s);
     if (s.completed) cars[d] = (cars[d] || 0) + 1;
   });
-  db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && !redoFree(s) && afterRevenueStart(s, db)).forEach((s) => {
-    const d = ymdOf(s.closedAt || s.date);
+  db.sales.filter((s) => s.status !== "cancelled" && !resched(s) && !sameDayOut(s) && !redoFree(s) && afterRevenueStart(s, db)).forEach((s) => {
+    const d = ymdOf(closeTime(s));
     const c = (closed[d] = closed[d] || { count: 0, value: 0 });
     c.count += 1; c.value += parseFloat(s.basePrice) || 0;
   });
@@ -5580,7 +5629,7 @@ function buildStatistics(query) {
   const previous = pq ? (({ start: ps, end: pe }) => statsHeadline(db, ps, pe))(dateRangeFor(pq)) : null;
 
   const completed = sales.filter((s) => s.completed);
-  const closed = db.sales.filter((s) => s.status !== "cancelled" && !s.isReschedule && !redoFree(s) && afterRevenueStart(s, db) && inP(s.closedAt || s.date));
+  const closed = db.sales.filter((s) => s.status !== "cancelled" && !resched(s) && !sameDayOut(s) && !redoFree(s) && afterRevenueStart(s, db) && inP(closeTime(s)));
   const headline = head;
 
   const groupBy = (list, keyFn) => { const m = {}; list.forEach((x) => { const k = keyFn(x); (m[k] = m[k] || []).push(x); }); return m; };
@@ -5734,6 +5783,7 @@ const server = app.listen(PORT, () => {
   if (ghlConfigured() && ghlEveryMinutes() > 0) { setTimeout(() => runGhlHeal().catch(() => {}), Math.min(90 * 1000, ghlEveryMinutes() * 60 * 1000)); setInterval(() => runGhlHeal().catch(() => {}), ghlEveryMinutes() * 60 * 1000); }
   // Jobs already in the tracker pick up the price their title carries right away (open, unlocked jobs only; paid and completed
   // jobs keep their price, and are listed in Cleanup if the title disagrees).
+  try { initSameDayFrom(); } catch (e) { console.error("same-day rule start failed:", e.message); }
   try { const db = loadDB(); const a = backfillTitlePricing(db), b = autoFlagRescheduleFromTitle(db); if (a + b > 0) saveDB(db); } catch (e) { console.error("title price / reschedule backfill failed:", e.message); }
 });
 // A walk-around video can take a while to upload on a slow shop wifi or mobile connection —
