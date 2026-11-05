@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-04-sameday";
+const BUILD = "2026-11-05-attendance";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2219,7 +2219,8 @@ app.post("/api/manager/attendance", requireManager, (req, res) => {
 app.get("/api/owner/attendance-summary", requireOwner, (req, res) => {
   const db = loadDB();
   const { start, end } = dateRangeFor(req.query);
-  const startDay = start.slice(0, 10), endDay = end.slice(0, 10);
+  // The end of an Eastern day is already the NEXT day in UTC, so cutting the date straight off the timestamp counted one extra day (today, after a period ended). Payroll uses this same helper.
+  const startDay = start.slice(0, 10), endDay = endDateStringFor(end);
   const records = db.attendance.filter((a) => a.date >= startDay && a.date <= endDay);
   const people = [
     ...db.employees.map((e) => ({ id: e.id, name: e.name, type: "employee" })),
