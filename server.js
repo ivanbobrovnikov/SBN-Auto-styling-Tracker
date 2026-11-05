@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-05-attendance";
+const BUILD = "2026-11-05-titleprice";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -218,7 +218,21 @@ function applyTitlePricing(db, sale, opts = {}) {
   if ((tp ? tp.total : null) !== (sale.titlePrice == null ? null : sale.titlePrice)) sale.priceMismatchDismissed = false; // a new price in the title is worth another look
   sale.titlePrice = tp ? tp.total : null;
   sale.titleDeposit = tp ? tp.deposit : null;
-  if (!tp) return false;
+  if (!tp) {
+    // No price in the title. For a booking that came from GHL that means $0: GHL's opportunity value is kept on record (ghlValue) but is not used as the price.
+    // Only when a live GHL event asks for it (zeroWhenUnpriced), only for a job that is still open, and never over a price someone typed in or a finished job.
+    if (!opts.zeroWhenUnpriced || !sale.ghlOpportunityId || sale.priceLocked || sale.isRedo || isFinishedJob(sale)) return false;
+    const wasPrice = parseFloat(sale.basePrice) || 0;
+    sale.priceSource = "none";
+    if (wasPrice <= 0) return false;
+    sale.basePrice = 0;
+    if (!opts.silent) {
+      if (!db.auditLog) db.auditLog = [];
+      db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (no price in the title)", saleId: sale.id, car: sale.car, field: "Base price", oldValue: wasPrice, newValue: 0 });
+      db.auditLog = db.auditLog.slice(0, 1000);
+    }
+    return true;
+  }
   const missing = !((parseFloat(sale.basePrice) || 0) > 0);
   if (!opts.force) {
     if (sale.priceLocked) return false;
@@ -247,7 +261,12 @@ function applyTitlePricing(db, sale, opts = {}) {
 // added: then it's an ordinary paid job and everything works as usual. A free redo never needs a payment, so it is left out of Unpaid Arrivals and
 // Cleanup, it isn't counted as a new close, and it still appears on Job Status.
 // A job that has already been paid is never zeroed: real money is on it.
-function redoFree(s) { return !!s.isRedo && saleTotal(s) <= 0; }
+function redoFree(s) { return (!!s.isRedo || unpricedByTitle(s)) && saleTotal(s) <= 0; }
+// A booking from GHL whose title has no price is $0 by design (for example the tint that is added to a ceramic coating job is booked as its own
+// appointment, and the price lives on the coating job). It is not a separate sale, so it is treated like a free redo: it needs no payment, isn't counted
+// as a new close and doesn't clutter Cleanup. A job someone added by hand, or whose price was typed in, is never "unpriced".
+function unpricedByTitle(s) { return !!s.ghlOpportunityId && !s.priceLocked && !s.isRedo && s.titlePrice == null; }
+const isFinishedJob = (s) => !!s.paid || !!s.completed || s.status === "arrived" || s.status === "no_show" || s.status === "cancelled";
 const redoCalendarSet = (db) => new Set((db.redoCalendarIds || []).map(String));
 function applyRedoRules(db, sale, opts = {}) {
   let changed = false;
@@ -830,11 +849,11 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // title (see applyTitlePricing) takes priority over it.
   const priceBeforeUpdate = parseFloat(sale.basePrice) || 0;
   if (basePrice !== undefined) sale.ghlValue = parseFloat(basePrice) || 0;
-  if (!sale.priceLocked) sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;
+  if (!sale.priceLocked && !isFinishedJob(sale)) sale.basePrice = basePrice !== undefined ? parseFloat(basePrice) || 0 : sale.basePrice || 0;   // a paid, completed or arrived job keeps its price: GHL's value never overwrites history
   else sale.basePrice = sale.basePrice || 0;
   sale.priceSource = sale.priceLocked ? "manual" : "ghl";
   sale.calendarId = calendarId || sale.calendarId || null;     // saved first, so the redo-calendar rule can see it
-  applyTitleRules(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true }); // a real GHL update for this booking: the title's price wins, paid or not
+  applyTitleRules(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true, zeroWhenUnpriced: true }); // a real GHL update for this booking: the title's price wins, paid or not; no price in the title is $0
   autoFlagRescheduleFromTitle(db, sale); // the title says rescheduled, and there is an earlier dead booking: not a new close
   sale.calendarId = calendarId || sale.calendarId || null;
   sale.syncedFromGHL = true;
@@ -1651,9 +1670,8 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
   if (basePrice !== undefined) {
-    sale.ghlValue = parseFloat(basePrice) || 0;
-    if (!sale.priceLocked) sale.basePrice = sale.ghlValue; // a price typed by hand is not replaced by GHL's value
-    applyTitleRules(db, sale, { priorPrice: before.basePrice });
+    sale.ghlValue = parseFloat(basePrice) || 0;       // kept on record only. It used to be written over the job's price, even a job that was already paid; the TITLE sets the price
+    applyTitleRules(db, sale, { priorPrice: before.basePrice, allowClosed: true, zeroWhenUnpriced: true });
   }
   const attribution = resolveSalesRepAttribution(db, salesRepName, sale.car);
   if (attribution) {
@@ -2274,14 +2292,34 @@ app.get("/api/manager/unmarked-appointments", requireManager, (req, res) => {
 
 // Jobs whose title carries a price that is different from the one the tracker is using. Open jobs fix themselves (unless the
 // price was typed by hand); these are the ones that didn't: a price set by hand, or a job that is already paid or completed.
-app.get("/api/manager/price-mismatches", requireManager, (req, res) => {
-  const db = loadDB();
+function priceMismatchSales(db) {
   const since = Date.now() - 45 * 24 * 3600 * 1000;
-  const rows = db.sales.filter((s) => {
+  return db.sales.filter((s) => {
     if (s.status === "cancelled" || s.status === "no_show" || s.priceMismatchDismissed || redoFree(s)) return false; // a free redo is meant to be $0
     const tp = parseTitlePricing(s.car);
     return tp && Math.abs((parseFloat(s.basePrice) || 0) - tp.total) >= 0.5 && Date.parse(s.date) >= since;
-  }).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60).map((s) => {
+  }).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60);
+}
+// One tap: use the title's price on every job listed (a price typed by hand is replaced too, since that is what the owner is choosing). Each change is written to Edit History.
+app.post("/api/manager/price-mismatches/use-title", requireManager, (req, res) => {
+  const db = loadDB(); let changed = 0;
+  priceMismatchSales(db).forEach((sale) => {
+    const before = parseFloat(sale.basePrice) || 0;
+    sale.priceLocked = false;
+    applyTitlePricing(db, sale, { force: true, silent: true });
+    if (Math.abs(before - sale.basePrice) >= 0.005) { logAudit(db, req, sale, "Base price (from the title)", before, sale.basePrice); changed++; }
+  });
+  saveDB(db); res.json({ ok: true, changed });
+});
+// Jobs whose title has no price, so they are kept at $0 (the add-on appointment next to a priced job). Listed so a price somebody FORGOT to type can't hide.
+app.get("/api/manager/unpriced", requireManager, (req, res) => {
+  const db = loadDB(), since = Date.now() - 36 * 3600 * 1000;
+  res.json(db.sales.filter((s) => unpricedByTitle(s) && saleTotal(s) <= 0 && !isFinishedJob(s) && Date.parse(s.date) >= since)
+    .sort((a, b) => (a.date < b.date ? -1 : 1)).slice(0, 80).map((s) => ({ id: s.id, car: s.car, customerName: s.customerName || "", date: s.date, ghlValue: s.ghlValue == null ? null : s.ghlValue })));
+});
+app.get("/api/manager/price-mismatches", requireManager, (req, res) => {
+  const db = loadDB();
+  const rows = priceMismatchSales(db).map((s) => {
     const tp = parseTitlePricing(s.car);
     return { id: s.id, car: s.car, customerName: s.customerName || "", date: s.date, basePrice: parseFloat(s.basePrice) || 0, titlePrice: tp.total, titleDeposit: tp.deposit, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceLocked: !!s.priceLocked, closed: !!(s.paid || s.completed) };
   });
@@ -3082,7 +3120,7 @@ app.get("/api/manager/jobs", requireManager, (req, res) => {
     salesRepId: s.salesRepId || null, salesRepName: s.salesRepName || "Unassigned", isWalkIn: !!s.isWalkIn,
     walkInClosedByType: s.walkInClosedByType || null, walkInClosedById: s.walkInClosedById || null, walkInClosedByName: s.walkInClosedByName || null,
     basePrice: s.basePrice || 0, total: saleTotal(s), upsellTotal: saleUpsellTotal(s), upsells: resolveUpsellNames(s.upsells, db),
-    isRedo: !!s.isRedo, redoAuto: !!s.redoAuto, noPaymentNeeded: redoFree(s), titlePrice: s.titlePrice == null ? null : s.titlePrice, depositAmount: depositOf(s), balanceDue: depositOf(s) > 0 ? balanceDueOf(s) : null, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceSource: s.priceSource || null, priceLocked: !!s.priceLocked,
+    isRedo: !!s.isRedo, redoAuto: !!s.redoAuto, noPaymentNeeded: redoFree(s), unpriced: unpricedByTitle(s) && saleTotal(s) <= 0, titlePrice: s.titlePrice == null ? null : s.titlePrice, depositAmount: depositOf(s), balanceDue: depositOf(s) > 0 ? balanceDueOf(s) : null, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceSource: s.priceSource || null, priceLocked: !!s.priceLocked,
     status: s.status || (s.arrived ? "arrived" : "pending"), completed: !!s.completed, paid: !!s.paid, paymentMethod: s.paymentMethod || null, paidCash: !!s.paidCash, paidCard: !!s.paidCard,
     photos: s.photos || { before: {}, after: {} }, notes: s.notes || [], tips: (tipsBySale[s.id] || []).map((t) => tipView(db, t, req.auth)),
   })));
@@ -3179,7 +3217,7 @@ function patchJobHandler(req, res) {
       // A title someone corrected by hand is theirs: neither the background sync nor a later GHL event may change it back.
       // (A title picked straight from GHL's own appointment list isn't hand-typed, so it stays free to follow GHL.)
       sale.titleLocked = !req.body.titleFromGhl;
-      applyTitleRules(db, sale);
+      applyTitleRules(db, sale, { allowClosed: true });
       autoFlagRescheduleFromTitle(db, sale);
     } else if (req.body.titleFromGhl) {
       sale.titleLocked = false;
@@ -4654,7 +4692,7 @@ async function runTitleSync() {
         if (title && title !== sale.car) {
           const before = sale.car;
           sale.car = title;
-          applyTitleRules(db, sale);
+          applyTitleRules(db, sale, { allowClosed: true, zeroWhenUnpriced: true });
           if (!db.auditLog) db.auditLog = [];
           db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
           db.auditLog = db.auditLog.slice(0, 1000);
@@ -4942,7 +4980,7 @@ function reconcileContact(db, contactId, events) {
     if (!j.ghlApptSeen) { j.ghlApptSeen = true; out.seen++; }                     // proof that this job's id really is a GHL appointment id
     if (!open(j)) return;
     const title = String(ev.title || "").trim();
-    if (title && title !== j.car && !j.titleLocked) { const was = j.car; j.car = title; applyTitleRules(db, j); note(j, "Car/Title", was, j.car); out.titles++; }
+    if (title && title !== j.car && !j.titleLocked) { const was = j.car; j.car = title; applyTitleRules(db, j, { allowClosed: true, zeroWhenUnpriced: true }); note(j, "Car/Title", was, j.car); out.titles++; }
     const ms = evStartMs(ev), jm = Date.parse(j.date);
     if (!isNaN(ms) && (isNaN(jm) || Math.abs(ms - jm) > 60000)) { const was = j.date; j.date = new Date(ms).toISOString(); note(j, "Date/time", was ? String(was).slice(0, 16) : "", j.date.slice(0, 16)); out.times++; }
     if (ev.calendarId && ev.calendarId !== j.calendarId) {

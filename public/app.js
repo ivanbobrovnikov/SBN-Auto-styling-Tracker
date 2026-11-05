@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-05-attendance";
+const UI_BUILD = "2026-11-05-titleprice";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3737,9 +3737,15 @@ async function renderCleanup(content) {
       try { await api(`/api/manager/jobs/${id}`, { method: "PATCH", body: JSON.stringify(body) }); await loadPriceMismatches(); }
       catch (err) { alert(err.message || "Couldn't change that."); }
     };
+    const useAll = async () => {
+      if (!confirm(`Use the title's price on all ${rows.length} of these?\n\nThis includes jobs that are already paid or completed${rows.some((r) => r.priceLocked) ? " and prices someone typed in by hand" : ""}. Every change is written to Edit History.`)) return;
+      try { const r = await api("/api/manager/price-mismatches/use-title", { method: "POST", body: "{}" }); await loadPriceMismatches(); alert(`${r.changed} price${r.changed === 1 ? "" : "s"} changed to match the title.`); }
+      catch (err) { alert(err.message || "Couldn't change that."); }
+    };
     priceBox.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
       el("div", { class: "muted", style: "margin-bottom:4px", text: `PRICE DOESN'T MATCH THE TITLE (${rows.length})` }),
-      el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: "The price at the end of the title (like $644-$50) is what the team keeps up to date. Open jobs follow it automatically; these didn't, because the price was typed in by hand or the job is already paid." }),
+      el("button", { class: "primary", "data-act": "use-title-all", style: "font-size:12px;padding:7px 12px;margin:2px 0 8px", text: `Use the title's price on all (${rows.length})`, onclick: useAll }),
+      el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: "The price at the end of the title (like $644-$50) is what the team keeps up to date. Every job follows it automatically, paid or not. These didn't, because someone typed a price in by hand, or the job was already paid before that rule started." }),
       ...rows.map((r) => el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
         el("div", { style: "font-weight:500", text: r.car }),
         el("div", { class: "muted", style: "font-size:11.5px", text: `${r.customerName ? r.customerName + " · " : ""}${formatDateTime(r.date)}` }),
@@ -3752,9 +3758,32 @@ async function renderCleanup(content) {
       ])),
     ]));
   }
+  // Jobs kept at $0 because their title has no price (the add-on appointment next to a priced job). One quiet line, so a price somebody forgot can't hide.
+  const unpricedBox = el("div", { "data-part": "unpriced-card" });
+  async function loadUnpriced() {
+    let rows;
+    try { rows = await api("/api/manager/unpriced"); } catch (e) { return; }
+    unpricedBox.innerHTML = "";
+    if (rows.length === 0) return;
+    const list = el("div", { style: "display:none;margin-top:8px" }, rows.map((r) => el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+      el("div", { style: "font-weight:500", text: r.car }),
+      el("div", { class: "muted", style: "font-size:11.5px", text: `${r.customerName ? r.customerName + " \u00B7 " : ""}${formatDateTime(r.date)}${r.ghlValue ? ` \u00B7 GHL has ${money(r.ghlValue)} (not used)` : ""}` }),
+      el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px;margin-top:5px", text: "Add a price", onclick: async () => {
+        const v = prompt("Price for this job:"); if (v === null || !(parseFloat(v) > 0)) return;
+        try { await api(`/api/manager/jobs/${r.id}`, { method: "PATCH", body: JSON.stringify({ basePrice: v }) }); await loadUnpriced(); } catch (err) { alert(err.message || "Couldn't change that."); }
+      } }),
+    ])));
+    const head = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12.5px", text: "" });
+    const label = (open) => `${open ? "\u25BE" : "\u25B8"} ${rows.length} job${rows.length === 1 ? "" : "s"} with no price in the title, kept at $0 (add-ons booked next to a priced job)`;
+    head.textContent = label(false);
+    head.onclick = () => { const open = list.style.display === "none"; list.style.display = open ? "block" : "none"; head.textContent = label(open); };
+    unpricedBox.appendChild(el("div", { class: "card" }, [head, list]));
+  }
   content.appendChild(priceBox);
+  content.appendChild(unpricedBox);
   content.appendChild(body);
   loadPriceMismatches();
+  loadUnpriced();
   await load();
 }
 
@@ -4194,9 +4223,10 @@ async function renderManagerJobs(content) {
     if ((job.tips || []).length) out.push(tag("TIPS " + money(job.tips.reduce((t, x) => t + (Number(x.amount) || 0), 0)), "var(--cyan)"));
     if (job.closedAtCheck) out.push(tag("⚠ CHECK CLOSE TIME", "var(--amber)"));   // a second car re-created without a real close time: set the true one in Commission Audit
     if (job.paid) out.push(tag("PAID", "var(--green)"));
+    else if (job.unpriced) out.push(tag("$0: NO PRICE IN TITLE", "var(--amber)"));   // an add-on appointment: the price lives on the main job
     else if (job.noPaymentNeeded) out.push(tag("NO CHARGE", "var(--green)"));   // a free redo owes nothing, so it is never "UNPAID" or "NO PRICE"
     else if ((job.status === "arrived" || job.completed) && job.status !== "no_show" && job.status !== "cancelled") out.push(tag("UNPAID", "var(--red)"));
-    if (!(job.basePrice > 0) && !job.noPaymentNeeded) out.push(tag("NO PRICE", "var(--red)"));
+    if (!(job.basePrice > 0) && !job.noPaymentNeeded && !job.unpriced) out.push(tag("NO PRICE", "var(--red)"));
     if (job.status === "arrived" && (!job.employeeNames || job.employeeNames === "Unassigned") && !job.managerHelperNames) out.push(tag("NO TECH", "var(--red)"));   // a manager who worked it counts as someone on the job
     if ((job.status === "arrived" || job.status === "no_show" || job.paid || job.completed) && d.getTime() > Date.now() + 6 * 3600 * 1000) out.push(tag("⚠ CHECK DATE", "var(--red)"));
     return out;
@@ -4289,7 +4319,7 @@ async function renderManagerJobs(content) {
         el("div", { style: "text-align:right;flex:0 0 auto" }, [
           el("div", { class: "mono", style: "color:var(--amber);font-size:17px;font-weight:600", text: money(job.total) }),
           el("div", { class: "muted", style: "font-size:11px", text: `Base ${money(job.basePrice)}${job.upsellTotal > 0 ? ` + upsells ${money(job.upsellTotal)}` : ""}` }),
-          job.noPaymentNeeded ? el("div", { style: "font-size:11.5px;color:var(--green);margin-top:2px", text: "Redo: no charge" }) : null,
+          job.noPaymentNeeded ? el("div", { style: "font-size:11.5px;color:" + (job.unpriced ? "var(--amber)" : "var(--green)") + ";margin-top:2px", text: job.unpriced ? "No price in the title: kept at $0" : "Redo: no charge" }) : null,
           job.depositAmount > 0 ? el("div", { style: "font-size:11.5px;color:var(--green);margin-top:2px", text: `Deposit paid ${money(job.depositAmount)}` }) : null,
           job.depositAmount > 0 && !job.paid ? el("div", { class: "mono", style: "font-size:13px;font-weight:600;margin-top:1px", text: `Balance due ${money(job.balanceDue)}` }) : null,
         ]),

@@ -56,6 +56,16 @@ function parseTitlePricing(title) {
     if (!(total >= 10 && total <= 250000 && dep.value >= 0 && dep.value <= total)) return null;
     return { total: round2(total), deposit: round2(dep.value), balance: round2(total - dep.value) };
   }
+  // "no depo" / "no deposit" says there is NO deposit: that is a clear zero, not an unknown amount. The price is then the first dollar amount in
+  // the title that isn't an add-on written like "(+$20 ...)": "MR gray 2022 bmw x4 front plus sun 179$ same day no depo" is $179 with nothing down.
+  if (/\bno\s*-?\s*depo(?:sit)?\b/i.test(t)) {
+    const dollarsNo = new RegExp(`\\$\\s*(${NUM})`, "g");
+    for (let m = dollarsNo.exec(t); m; m = dollarsNo.exec(t)) {
+      if (/\+\s*$/.test(t.slice(0, m.index))) continue;
+      const total = toNumber(m[1]);
+      return total >= 10 && total <= 250000 ? { total: round2(total), deposit: 0, balance: round2(total) } : null;
+    }
+  }
   // A price that sits alone between dashes, with no deposit mentioned: "MR 2026 Tesla Y Performance - $279 - Sides and Rear".
   // Standing on its own as a dash-separated piece is what makes it safe to believe; "$50 off" or "+ $50 sunstrip" never look like that.
   const segment = new RegExp(`(?:^|\\s)[-–—]\\s*\\$\\s*(${NUM})\\s*[-–—](?=\\s|$)`, "g");
