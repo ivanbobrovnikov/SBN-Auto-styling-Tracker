@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-05-titleprice";
+const BUILD = "2026-11-08-recover";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1158,8 +1158,20 @@ app.patch("/api/employees/:id", requireManager, (req, res) => {
   res.json({ ok: true, initials: emp.initials || "", titleTags: staffTags(emp), tagClashes: staffClashes(db, emp) });
 });
 
+// Removing a person never destroys them: the whole record (PIN, pay settings, initials) goes to "Removed people", where the owner can bring them back. Their jobs, attendance and tips stay
+// where they are, still pointing at their id, so a person brought back is whole again.
+function archivePerson(db, type, person, req) {
+  if (!person) return;
+  db.removedPeople = db.removedPeople || [];
+  db.removedPeople.unshift({ key: newId(), type, id: person.id, name: person.name, removedAt: new Date().toISOString(), removedBy: "Owner", record: JSON.parse(JSON.stringify(person)) });
+  db.removedPeople = db.removedPeople.slice(0, 500);
+  if (!db.auditLog) db.auditLog = [];
+  db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Owner", saleId: null, car: person.name, field: `${type === "salesrep" ? "Sales rep" : type === "manager" ? "Manager" : "Employee"} removed`, oldValue: person.name, newValue: "kept in Removed people" });
+  db.auditLog = db.auditLog.slice(0, 1000);
+}
 app.delete("/api/employees/:id", requireOwner, (req, res) => {
   const db = loadDB();
+  archivePerson(db, "employee", db.employees.find((e) => e.id === req.params.id), req);
   db.employees = db.employees.filter((e) => e.id !== req.params.id);
   saveDB(db);
   res.json({ ok: true });
@@ -1316,6 +1328,7 @@ app.patch("/api/managers/:id", requireOwner, (req, res) => {
 
 app.delete("/api/managers/:id", requireOwner, (req, res) => {
   const db = loadDB();
+  archivePerson(db, "manager", db.managers.find((m) => m.id === req.params.id), req);
   db.managers = db.managers.filter((m) => m.id !== req.params.id);
   saveDB(db);
   res.json({ ok: true });
@@ -1593,6 +1606,7 @@ app.patch("/api/salesreps/:id", requireOwner, (req, res) => {
 
 app.delete("/api/salesreps/:id", requireOwner, (req, res) => {
   const db = loadDB();
+  archivePerson(db, "salesrep", db.salesReps.find((r) => r.id === req.params.id), req);
   db.salesReps = db.salesReps.filter((r) => r.id !== req.params.id);
   saveDB(db);
   res.json({ ok: true });
@@ -4615,6 +4629,8 @@ app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
   const result = await runCloudBackup();
   res.json(result);
 });
+// Bringing back someone who was removed: from the Removed people list, or from this shop's own cloud backups. Its own file.
+require("./recoveryapi")(app, { loadDB, saveDB, requireOwner, newId, hash, cleanStaffInitials, staffTags, backup: () => ({ token: GITHUB_BACKUP_TOKEN, repo: GITHUB_BACKUP_REPO, last: () => lastCloudBackup }) });
 
 // ---------- GHL API bulk import — Phase 1: diagnostic only ----------
 // This does NOT import anything. Each of these makes one real, read-only API call to GHL

@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-05-titleprice";
+const UI_BUILD = "2026-11-08-recover";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -598,7 +598,7 @@ const TAB_ICONS = {
   "owner-summary": "📊", "owner-stats": "📈", "owner-payroll": "💵", "owner-sales": "🗓", "manager-jobs": "🚗",
   "owner-serviced": "✅", "owner-audit": "🕐", "owner-edit-history": "📝",
   "owner-redos": "\u{1F501}", "owner-cleanup": "🧹", "owner-attendance": "✅", "owner-search": "🔍", "owner-team": "🧰",
-  "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-test": "🛠",
+  "owner-managers": "🧑‍💼", "owner-salesreps": "🤝", "owner-removed": "♻️", "owner-test": "🛠",
   "manager-performance": "📈", "manager-shop": "🏪", "sales-schedule": "📋", "sales-fullschedule": "🗓",
   "sales-performance": "📈", "schedule": "🗓", "performance": "📈",
 };
@@ -625,7 +625,7 @@ function tabIcon(key) {
 function renderBottomNav() {
   let allTabs, primaryKeys;
   if (session.role === "owner") {
-    allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-test", "Test tool"]];
+    allTabs = [["owner-summary", "Dashboard"], ["owner-stats", "Statistics"], ["owner-payroll", "Payroll"], ["owner-sales", "All jobs"], ["manager-jobs", "Job status"], ["owner-serviced", "Serviced Cars"], ["owner-arrived", "Cars Arrived"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-audit", "Commission Audit"], ["owner-edit-history", "Edit History"], ["owner-cash", "Cash & Expenses"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["owner-managers", "Managers"], ["owner-salesreps", "Sales Reps"], ["owner-removed", "Removed people"], ["owner-test", "Test tool"]];
     primaryKeys = ["owner-summary", "manager-jobs", "owner-sales", "owner-payroll"];
   } else if (session.role === "manager") {
     allTabs = [["manager-jobs", "Job status"], ["owner-unpaid", "Unpaid Arrivals"], ["owner-cleanup", "Cleanup"], ["owner-redos", "Redos"], ["owner-deadbookings", "No-shows & Cancels"], ["owner-attendance", "Attendance"], ["owner-search", "Search"], ["owner-team", "Employees"], ["manager-cash", "Cash Log"], ["manager-performance", "My performance"], ["manager-shop", "Shop performance"]];
@@ -682,10 +682,11 @@ const MORE_GROUPS = [
   ["Money", ["owner-cash", "manager-cash", "owner-unpaid", "owner-stats", "owner-deadbookings"]],
   ["Jobs", ["owner-serviced", "owner-arrived", "owner-search", "owner-cleanup"]],
   ["Records", ["owner-audit", "owner-edit-history", "owner-attendance", "manager-shop", "owner-redos"]],
-  ["People", ["owner-team", "owner-managers", "owner-salesreps"]],
+  ["People", ["owner-team", "owner-managers", "owner-salesreps", "owner-removed"]],
   ["Tools", ["owner-test"]],
 ];
 const MORE_ICONS = {
+  "owner-removed": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>`,
   "owner-cash": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 12h.01M17.5 12h.01"/></svg>`,
   "manager-cash": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 12h.01M17.5 12h.01"/></svg>`,
   "owner-unpaid": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M14.5 9.2c-.5-.8-1.4-1.2-2.5-1.2-1.5 0-2.5.8-2.5 1.9 0 2.7 5 1.3 5 4 0 1.1-1.1 2-2.5 2-1.1 0-2-.5-2.5-1.3M12 6.5V8M12 16v1.5"/></svg>`,
@@ -1136,6 +1137,7 @@ async function renderOwnerTabContent(content) {
   if (currentTab === "owner-payroll") return renderOwnerPayroll(content);
   if (currentTab === "owner-team") return session.role === "owner" ? renderOwnerTeam(content) : renderManagerRoster(content);
   if (currentTab === "owner-managers") return renderOwnerManagers(content);
+  if (currentTab === "owner-removed") return renderRemovedPeople(content);
   if (currentTab === "owner-salesreps") return renderOwnerSalesReps(content);
   if (currentTab === "owner-attendance") return renderAttendance(content);
   if (currentTab === "owner-cleanup") return renderCleanup(content);
@@ -2896,7 +2898,7 @@ async function renderOwnerTeam(content) {
       list.appendChild(el("div", { class: "card" }, [
         el("div", { class: "row", style: "margin-bottom:8px" }, [
           el("div", { style: "flex:1;font-weight:500", text: e.name }),
-          el("button", { class: "icon-danger", onclick: async () => { await api(`/api/employees/${e.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+          el("button", { class: "icon-danger", onclick: async () => { if (!confirm(`Remove ${e.name}?\n\nThey will not be able to log in. They go to Removed people (More > People), and you can bring them back any time with their PIN and history.`)) return; await api(`/api/employees/${e.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px" }, [
           el("span", { class: "muted", style: "font-size:11.5px;font-weight:600" , text: "Initials for titles:" }), initialsInput, tagsNote,
@@ -3196,7 +3198,7 @@ async function renderOwnerSalesReps(content) {
           setTimeout(() => { resetNotice.textContent = ""; }, 2500);
         }, text: "Reset PIN" }),
         resetNotice,
-        el("button", { class: "icon-danger", onclick: async () => { await api(`/api/salesreps/${r.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+        el("button", { class: "icon-danger", onclick: async () => { if (!confirm(`Remove ${r.name}?\n\nThey will not be able to log in. They go to Removed people (More > People), and you can bring them back any time with their PIN, rates and history.`)) return; await api(`/api/salesreps/${r.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
       ]));
     });
   }
@@ -4994,7 +4996,7 @@ async function renderOwnerManagers(content) {
               loadList();
             } catch (err) { demoteNotice.className = "notice err"; demoteNotice.textContent = err.message || "Couldn't make that change."; }
           }, text: "Demote to tech" }),
-          el("button", { class: "icon-danger", onclick: async () => { await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
+          el("button", { class: "icon-danger", onclick: async () => { if (!confirm(`Remove ${m.name}?\n\nThey will not be able to log in. They go to Removed people (More > People), and you can bring them back any time with their PIN and history.`)) return; await api(`/api/managers/${m.id}`, { method: "DELETE" }); loadList(); }, text: "Remove" }),
         ]),
         el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px" }, [
           el("span", { class: "muted", style: "font-size:11.5px;font-weight:600" , text: "Initials for titles:" }), initialsInput, tagsNote,
