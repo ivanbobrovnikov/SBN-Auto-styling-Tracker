@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-08-recover";
+const BUILD = "2026-11-09-paydetail";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2465,7 +2465,7 @@ app.get("/api/cross-location/people-pay", (req, res) => {
   const run = payRuns(db).find((r) => r.periodId === period.id) || null;
   const waiting = payAdjustments(db).filter((a) => !a.appliedRunId);
   const people = [];
-  teamPayrollLines(db, period).forEach((l) => {
+  teamPayrollLines(db, period, { detail: true }).forEach((l) => {
     const runLine = run && !run.skipped ? (run.lines || []).find((x) => x.key === l.key) || null : null;
     const src = runLine || l;                                   // a closed run's own numbers if there is one
     const adjustments = runLine ? runLine.adjustmentsTotal : run ? 0 : payRound(waiting.filter((a) => payKey(a.personType, a.personId) === l.key).reduce((t, a) => t + a.amount, 0));
@@ -2473,7 +2473,7 @@ app.get("/api/cross-location/people-pay", (req, res) => {
     people.push({ name: l.name, role: l.personType === "manager" ? "manager" : "tech", payType: l.payType || null,
       base: src.base, upsellCommission: src.upsellCommission, walkInCommission: src.walkInCommission, tips: src.tips, subtotal: src.subtotal,
       adjustments, total: payRound(src.subtotal + adjustments), daysPresent: src.daysPresent || 0,
-      changedSinceRun: !!(runLine && payRound(l.subtotal) !== runLine.subtotal) });
+      changedSinceRun: !!(runLine && payRound(l.subtotal) !== runLine.subtotal), detail: l.detail });
   });
   let warnings = [];
   try { warnings = payrollPreview(db, period).warnings.map((w) => ({ code: w.code, count: w.count, text: w.text, items: (w.items || []).slice(0, 12), periodId: w.periodId || null, periodStart: w.periodStart || null, periodEnd: w.periodEnd || null })); } catch (e) { warnings = []; }
@@ -4130,14 +4130,31 @@ const payShortDate = (ymd) => `${MONTHS_SHORT[Number(ymd.slice(5, 7)) - 1]} ${Nu
 const payPlural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
 
 // Every tech and manager's pay for a period: exactly what the Payroll screen shows, split into the pieces a payroll provider asks for.
-function teamPayrollLines(db, period) {
+// One person's days in a pay period, for the payroll tracker's "Days worked" drop-down: each work day with present / half day / missed / not marked (or coming up, for days that have not happened yet), the times if a different
+// shift was entered, and for a manager on an extra car commission the cars that earned it. Read-only.
+function personDetail(db, period, type, p) {
+  const today = trackerToday(), recs = db.attendance.filter((a) => a.personType === type && a.personId === p.id && a.date >= period.start && a.date <= period.end), by = new Map(recs.map((a) => [a.date, a]));
+  const days = [], counts = { present: 0, half: 0, absent: 0, unmarked: 0, upcoming: 0 };
+  for (let d = period.start; d <= period.end; d = paySchedule.add(d, 1)) {
+    const rec = by.get(d), sunday = paySchedule.dow(d) === 0;
+    if (sunday && !(rec && rec.status)) continue;                          // the shop is closed Sundays: not a work day unless someone was marked on it
+    const st = rec && rec.status === "present" ? "present" : rec && rec.status === "half_day" ? "half" : rec && rec.status === "absent" ? "absent" : d > today ? "upcoming" : d === today ? "today" : "unmarked";
+    counts[st === "today" ? "upcoming" : st]++;
+    days.push({ date: d, dow: paySchedule.dow(d), status: st, start: rec ? rec.startTime || "" : "", end: rec ? rec.endTime || "" : "" });
+  }
+  const ex = p.basePay && p.basePay.extraCar, uses = p.payType === "salary" || p.payType === "hourly";
+  if (!uses && !recs.some((a) => a.status)) { days.length = 0; Object.keys(counts).forEach((k) => { counts[k] = 0; }); }     // someone paid per car whose attendance nobody records: nothing to list, not seven "not marked" days
+  return { workDays: days.length, counts, days, usesAttendance: p.payType === "salary" || p.payType === "hourly", sunday: ex ? { rate: ex.rate, amount: ex.amount, cars: ex.cars.map((c) => ({ date: c.date, car: c.car, basePrice: c.basePrice, commission: c.commission })) } : null };
+}
+function teamPayrollLines(db, period, opts) {
   const data = buildPayroll(db, { period: "custom", startDate: period.start, endDate: period.end });
   const line = (type, p) => {
     const upsell = payRound(p.commission), walkIn = payRound(p.walkInCommission), tips = payRound(p.tipsTotal);
     const subtotal = payRound(p.totalPay);                     // the same total the Payroll screen shows for this person
     const base = payRound(subtotal - upsell - walkIn - tips);   // a stray cent of rounding lands here, so the pieces always add up to the total
     return { key: payKey(type, p.id), personType: type, personId: p.id, name: p.name, payType: p.payType || null, base, upsellCommission: upsell, walkInCommission: walkIn, tips, subtotal,
-      daysPresent: p.basePay.daysPresent || 0, daysHalf: p.basePay.daysHalf || 0, daysAbsent: p.basePay.daysAbsent || 0, hours: payRound(p.basePay.hoursCounted || 0) };
+      daysPresent: p.basePay.daysPresent || 0, daysHalf: p.basePay.daysHalf || 0, daysAbsent: p.basePay.daysAbsent || 0, hours: payRound(p.basePay.hoursCounted || 0),
+      ...(opts && opts.detail ? { detail: personDetail(db, period, type, p) } : {}) };
   };
   return [...data.employees.map((e) => line("employee", e)), ...data.managers.map((m) => line("manager", m))];
 }
@@ -4148,10 +4165,10 @@ function payrollPreview(db, period) {
   const days = [];
   for (let d = period.start; d <= period.end; d = paySchedule.add(d, 1)) if (paySchedule.dow(d) !== 0) days.push(d);   // closed Sundays
   const people = [...db.employees.map((p) => ({ type: "employee", p })), ...db.managers.map((p) => ({ type: "manager", p }))].filter((x) => x.p.payType === "salary" || x.p.payType === "hourly");
-  const gaps = [];
+  const gaps = [], todayYmd = trackerToday();
   people.forEach(({ type, p }) => {
     const have = new Set(db.attendance.filter((a) => a.personType === type && a.personId === p.id && a.status).map((a) => a.date));
-    const missing = days.filter((d) => !have.has(d));
+    const missing = days.filter((d) => d < todayYmd && !have.has(d));                // only days that have already happened: a day not yet worked is not missing
     if (missing.length) gaps.push({ name: p.name, days: missing });
   });
   if (gaps.length) {
@@ -4163,6 +4180,16 @@ function payrollPreview(db, period) {
   const jobLine = (s) => `${s.car} (${String(s.date).slice(0, 10)})`;
   const unpaid = jobs.filter((s) => s.status === "arrived" && !s.paid && !redoFree(s));
   if (unpaid.length) warnings.push({ code: "unpaid", count: unpaid.length, text: `${payPlural(unpaid.length, "job")} dated in this period arrived but ${unpaid.length === 1 ? "isn't" : "aren't"} marked paid. Commissions only count paid jobs.`, items: unpaid.slice(0, 8).map(jobLine) });
+  // A manager on an extra car commission (Sundays) is only paid for the cars HE IS MARKED ON. A paid car on one of those days with NOBODY marked on it would pay him $0 without a word, so say so.
+  const xm = db.managers.filter((m) => (parseFloat(m.extraCarRate) || 0) > 0 && Array.isArray(m.extraCarDays) && m.extraCarDays.length && m.payType !== "commission");
+  if (xm.length) {
+    const xdays = new Set(xm.flatMap((m) => m.extraCarDays)), dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"], wd = (iso) => new Date(EASTERN_DAY_FMT.format(new Date(iso)) + "T12:00:00Z").getUTCDay();
+    const orphan = jobs.filter((s) => s.status === "arrived" && s.paid && !redoFree(s) && s.date && xdays.has(wd(s.date)) && !(s.managerHelperIds || []).length && !(saleEmployeeIds(s) || []).length);
+    if (orphan.length) {
+      const who = xm.map((m) => m.name).join(" or "), many = orphan.length > 1, owed = xm.length === 1 ? ` That is up to $${money2(orphan.reduce((a, s) => a + (parseFloat(s.basePrice) || 0) * xm[0].extraCarRate / 100, 0))} more for ${xm[0].name}.` : "";
+      warnings.push({ code: "sundaycars", count: orphan.length, text: `${payPlural(orphan.length, "paid car")} on ${[...xdays].sort().map((d) => dayName[d]).join("/")} ${many ? "have" : "has"} nobody marked as having worked ${many ? "them" : "it"}. If ${who} worked ${many ? "them" : "it"}, mark ${xm.length === 1 ? "him" : "them"} on the job or ${xm.length === 1 ? "he" : "they"} won't be paid the extra car commission.${owed}`, items: orphan.slice(0, 8).map(jobLine) });
+    }
+  }
   const unmarked = jobs.filter((s) => !s.status || s.status === "pending" || s.status === "unconfirmed");
   if (unmarked.length) warnings.push({ code: "unmarked", count: unmarked.length, text: `${payPlural(unmarked.length, "job")} dated in this period ${unmarked.length === 1 ? "was" : "were"} never marked arrived or no-show.`, items: unmarked.slice(0, 8).map(jobLine) });
   const messy = jobs.filter((s) => !redoFree(s) && (!s.basePrice || !s.baseService || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking)));
