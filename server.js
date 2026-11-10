@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-09-halfday";
+const BUILD = "2026-11-10-breakdown";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2463,12 +2463,17 @@ app.get("/api/cross-location/people-pay", (req, res) => {
   const period = req.query.periodId ? all.find((p) => p.id === String(req.query.periodId)) : all[containingIndex];
   if (!period) return res.status(400).json({ error: "That pay period isn't known here." });
   const run = payRuns(db).find((r) => r.periodId === period.id) || null;
-  const waiting = payAdjustments(db).filter((a) => !a.appliedRunId);
+  const waiting = payAdjustments(db).filter((a) => !a.appliedRunId), st0 = payrollStatus(db, period), plan = st0.runnable ? carryPlan(db, period) : { under: [], over: [] };      // the period about to be run: what the last payroll missed (proposed, NOT counted until approved)
   const people = [];
   teamPayrollLines(db, period, { detail: true }).forEach((l) => {
     const runLine = run && !run.skipped ? (run.lines || []).find((x) => x.key === l.key) || null : null;
     const src = runLine || l;                                   // a closed run's own numbers if there is one
-    const adjustments = runLine ? runLine.adjustmentsTotal : run ? 0 : payRound(waiting.filter((a) => payKey(a.personType, a.personId) === l.key).reduce((t, a) => t + a.amount, 0));
+    const myWait = waiting.filter((a) => payKey(a.personType, a.personId) === l.key), myCarry = plan.under.filter((x) => x.key === l.key);
+    const adjustments = runLine ? runLine.adjustmentsTotal : run ? 0 : payRound(myWait.reduce((t, a) => t + a.amount, 0));
+    const adjItems = runLine ? (runLine.adjustments || []).map((a) => ({ text: a.note, amount: a.amount })) : run ? [] : myWait.map((a) => ({ text: a.note, amount: a.amount }));
+    if (l.detail && l.detail.breakdown && adjItems.length) l.detail.breakdown.lines.push({ key: "adjust", label: "Added from earlier pay periods", amount: adjustments, how: runLine ? "Added to this payroll when it was run." : "Approved earlier and waiting for this payroll.", items: adjItems.slice(0, 12) });
+    if (l.detail && l.detail.breakdown && myCarry.length) l.detail.breakdown.lines.push({ key: "proposed", label: "Missed on the last pay period", amount: 0, proposed: payRound(myCarry.reduce((t, x) => t + x.amount, 0)), how: "NOT added yet. It is only added if you approve it when you run payroll.", items: myCarry.map((x) => ({ text: `Changed since the ${x.from} payroll was run`, amount: x.amount })) });
+    if (runLine && l.detail && l.detail.breakdown && payRound(l.subtotal) !== runLine.subtotal) l.detail.breakdown.changedSinceRun = { recorded: runLine.subtotal, now: payRound(l.subtotal) };      // a run keeps its own numbers: say when today's lines no longer match what was recorded
     if (!(src.subtotal !== 0 || adjustments !== 0 || l.payType || runLine)) return;       // nobody on this person's row: leave them off, as a payroll run does
     people.push({ name: l.name, role: l.personType === "manager" ? "manager" : "tech", payType: l.payType || null,
       base: src.base, upsellCommission: src.upsellCommission, walkInCommission: src.walkInCommission, tips: src.tips, subtotal: src.subtotal,
@@ -4133,6 +4138,22 @@ const payPlural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
 // Every tech and manager's pay for a period: exactly what the Payroll screen shows, split into the pieces a payroll provider asks for.
 // One person's days in a pay period, for the payroll tracker's "Days worked" drop-down: each work day with present / half day / missed / not marked (or coming up, for days that have not happened yet), the times if a different
 // shift was entered, and for a manager on an extra car commission the cars that earned it. Read-only.
+// "What's in this number", one person: every piece of their pay as its own line (what it is, how it was worked out, and the individual items behind it), built so the lines add up EXACTLY to their total.
+function payBreakdown(p) {
+  const bp = p.basePay || {}, ex = bp.extraCar || null, plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`, m2 = (n) => "$" + money2(n), lines = [];
+  const baseOnly = payRound((bp.amount || 0) - (ex ? ex.amount : 0));
+  if (p.payType === "salary") lines.push({ key: "base", label: "Salary", amount: baseOnly, how: `${m2(p.salaryPerPeriod)} a pay period = ${m2(bp.dailyRate)} a day. ${bp.daysPresent || 0} worked${bp.daysHalf ? `, ${plural(bp.daysHalf, "half day")} (half pay)` : ""}${bp.daysAbsent ? `, ${bp.daysAbsent} missed (no pay)` : ""}.` });
+  else if (p.payType === "hourly") lines.push({ key: "base", label: "Hourly pay", amount: baseOnly, how: `${m2(p.hourlyRate)} an hour: ${Math.round((bp.hoursCounted || 0) * 100) / 100} hours over ${plural((bp.daysPresent || 0) + (bp.daysHalf || 0), "day")}${bp.daysHalf ? " (a half day counts as half a full day)" : ""}.` });
+  else if (p.payType === "commission") lines.push({ key: "base", label: "Per-car commission", amount: baseOnly, how: `${p.carCommissionRate || 0}% of each car's price, split with anyone else who worked it: ${plural((bp.carDetails || []).length, "car")}.`, items: (bp.carDetails || []).slice(0, 12).map((c) => ({ text: `${String(c.car || "").slice(0, 44)} \u00B7 ${m2(c.basePrice)}${c.splitCount > 1 ? ` split ${c.splitCount} ways` : ""}`, amount: c.yourShare })) });
+  else lines.push({ key: "base", label: "Base pay", amount: baseOnly, how: "No pay type is set up for this person." });
+  if (ex) lines.push({ key: "sunday", label: "Sunday cars", amount: ex.amount, how: `${ex.rate}% of the price of ${plural(ex.cars.length, "car")} worked on ${ex.days.map((d) => ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][d]).join("/")} (only cars that arrived and were paid).`, items: ex.cars.slice(0, 12).map((c) => ({ text: `${String(c.date).slice(0, 10)} \u00B7 ${String(c.car || "").slice(0, 38)} \u00B7 ${m2(c.basePrice)}`, amount: c.commission })) });
+  if (payRound(p.commission) !== 0) lines.push({ key: "upsell", label: "Upsell commission", amount: payRound(p.commission), how: `${p.commissionRate}% of ${m2(p.upsellRevenue)} in upsells (${plural(p.upsellCount || 0, "upsell")}).`, items: (p.upsells || []).slice(0, 10).map((u) => ({ text: `${u.name} \u00D7 ${u.count} \u00B7 ${m2(u.revenue)} sold`, amount: payRound(u.revenue * (p.commissionRate || 0) / 100) })) });
+  if (payRound(p.walkInCommission) !== 0) lines.push({ key: "walkin", label: "Walk-in commission", amount: payRound(p.walkInCommission), how: `${p.walkInCommissionRate}% on walk-ins they closed: ${p.walkInArrivedPaidCount || 0} arrived and paid (of ${p.walkInClosedCount || 0} closed), ${m2(p.walkInRevenue)}.`, items: (p.walkInDetails || []).slice(0, 10).map((w) => ({ text: `${String(w.car || "").slice(0, 40)} \u00B7 ${w.status}${w.paid ? "" : " \u00B7 not paid yet"}`, amount: payRound(w.commissionAmount) })) });
+  if (payRound(p.tipsTotal) !== 0) lines.push({ key: "tips", label: "Tips", amount: payRound(p.tipsTotal), how: `${plural((p.tipDetails || []).length, "tip")}, split evenly with the others on each car.`, items: (p.tipDetails || []).slice(0, 10).map((t) => ({ text: `${String(t.car || "").slice(0, 40)} \u00B7 ${m2(t.totalAmount)} split ${t.splitCount} ways`, amount: payRound(t.yourShare) })) });
+  const sub = payRound(p.totalPay), got = payRound(lines.reduce((t, l) => t + l.amount, 0)), off = payRound(sub - got);
+  if (off !== 0 && Math.abs(off) < 0.05) lines[0].amount = payRound(lines[0].amount + off);          // a stray cent of rounding lands on the first line, so the pieces always add up to the total
+  return { lines };
+}
 function personDetail(db, period, type, p) {
   const today = trackerToday(), recs = db.attendance.filter((a) => a.personType === type && a.personId === p.id && a.date >= period.start && a.date <= period.end), by = new Map(recs.map((a) => [a.date, a]));
   const days = [], counts = { present: 0, half: 0, absent: 0, unmarked: 0, upcoming: 0 };
@@ -4145,7 +4166,7 @@ function personDetail(db, period, type, p) {
   }
   const ex = p.basePay && p.basePay.extraCar, uses = p.payType === "salary" || p.payType === "hourly";
   if (!uses && !recs.some((a) => a.status)) { days.length = 0; Object.keys(counts).forEach((k) => { counts[k] = 0; }); }     // someone paid per car whose attendance nobody records: nothing to list, not seven "not marked" days
-  return { workDays: days.length, counts, days, usesAttendance: p.payType === "salary" || p.payType === "hourly", sunday: ex ? { rate: ex.rate, amount: ex.amount, cars: ex.cars.map((c) => ({ date: c.date, car: c.car, basePrice: c.basePrice, commission: c.commission })) } : null };
+  return { breakdown: payBreakdown(p), workDays: days.length, counts, days, usesAttendance: p.payType === "salary" || p.payType === "hourly", sunday: ex ? { rate: ex.rate, amount: ex.amount, cars: ex.cars.map((c) => ({ date: c.date, car: c.car, basePrice: c.basePrice, commission: c.commission })) } : null };
 }
 function teamPayrollLines(db, period, opts) {
   const data = buildPayroll(db, { period: "custom", startDate: period.start, endDate: period.end });
@@ -4267,17 +4288,23 @@ app.get("/api/owner/payroll-run-status", requireOwner, (req, res) => {
   res.json(body);
 });
 
-app.post("/api/owner/payroll-run", requireOwner, (req, res) => {
-  const db = loadDB();
-  const { start, end, confirmWarnings } = req.body || {};
+// Running a pay period. ONE function, used by the owner's Run payroll button in the shop and by the payroll tracker's 'Run payroll for every shop', so they can never behave differently.
+function runPayrollCore(db, start, end, confirmWarnings, closedBy, approvedCarry) {
   const period = paySchedule.periodByRange(start, end);
-  if (!period || !paySchedule.isRunnableKind(period)) return res.status(400).json({ error: "That isn't one of the pay periods on the schedule." });
+  if (!period || !paySchedule.isRunnableKind(period)) return { status: 400, json: { error: "That isn't one of the pay periods on the schedule." } };
   const st = payrollStatus(db, period);
-  if (st.run) return res.status(409).json({ error: `Payroll for ${payShortDate(period.start)} - ${payShortDate(period.end)} was already run.` });
-  if (!st.over) return res.status(400).json({ error: `This pay period isn't over yet. It ends ${payShortDate(period.end)}, so it can be run from ${payShortDate(paySchedule.add(period.end, 1))}.` });
-  if (st.blockedBy) return res.status(400).json({ error: `Run ${payShortDate(st.blockedBy.start)} - ${payShortDate(st.blockedBy.end)} first. Pay periods are run in order.` });
+  if (st.run) return { status: 409, json: { error: `Payroll for ${payShortDate(period.start)} - ${payShortDate(period.end)} was already run.` } };
+  if (!st.over) return { status: 400, json: { error: `This pay period isn't over yet. It ends ${payShortDate(period.end)}, so it can be run from ${payShortDate(paySchedule.add(period.end, 1))}.` } };
+  if (st.blockedBy) return { status: 400, json: { error: `Run ${payShortDate(st.blockedBy.start)} - ${payShortDate(st.blockedBy.end)} first. Pay periods are run in order.` } };
   const preview = payrollPreview(db, period);
-  if (preview.warnings.length > 0 && !confirmWarnings) return res.status(409).json({ needsConfirm: true, error: "There are things to check before running this payroll.", warnings: preview.warnings });
+  if (preview.warnings.length > 0 && !confirmWarnings) return { status: 409, json: { needsConfirm: true, error: "There are things to check before running this payroll.", warnings: preview.warnings } };
+  // Corrections to the LAST payroll are only added when the owner approved them (approvedCarry: the ids shown in the review). Nothing is ever added on its own, and overpayments are never taken back.
+  const carriedNow = [];
+  if (approvedCarry && approvedCarry.length) {
+    const plan = carryPlan(db, period), have = new Set(plan.under.map((x) => x.id));
+    if (approvedCarry.some((id) => !have.has(id))) return { status: 409, json: { changed: true, error: "A correction you approved is no longer waiting (it changed, or was already added). Nothing was run. Review it again." } };
+    payRuns(db).filter((r) => !r.skipped && r.end < period.start).forEach((r) => { const keep = payrollDiff(db, r).under.filter((x) => approvedCarry.includes(`${r.id}:${x.key}`)); if (keep.length) carriedNow.push(...carryForwardRun(db, r, { under: keep, over: [] }, closedBy)); });
+  };
 
   const lines = teamPayrollLines(db, period).map((l) => ({ ...l, adjustments: [], adjustmentsTotal: 0, total: l.subtotal }));
   const byKey = new Map(lines.map((l) => [l.key, l]));
@@ -4296,15 +4323,56 @@ app.post("/api/owner/payroll-run", requireOwner, (req, res) => {
   const run = {
     id: newId(), periodId: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind, workDays: period.workDays,
     submit: period.submit, paid: period.paid, ...(period.note ? { note: period.note } : {}),
-    closedAt: new Date().toISOString(), closedBy: "Owner", ranWithWarnings: preview.warnings.map((w) => w.code),
-    lines: kept,
+    closedAt: new Date().toISOString(), closedBy, ranWithWarnings: preview.warnings.map((w) => w.code),
+    lines: kept, ...(carriedNow.length ? { carriedFromEarlier: carriedNow.map((a) => ({ name: a.personName, amount: a.amount, note: a.note })) } : {}),
     totals: { base: sum((l) => l.base), upsellCommission: sum((l) => l.upsellCommission), walkInCommission: sum((l) => l.walkInCommission), tips: sum((l) => l.tips), adjustments: sum((l) => l.adjustmentsTotal), total: sum((l) => l.total) },
     carried: {},
   };
   applied.forEach((a) => { a.appliedRunId = run.id; });
   payRuns(db).unshift(run);
   saveDB(db);
-  res.json(run);
+  return { status: 200, json: run };
+}
+
+app.post("/api/owner/payroll-run", requireOwner, (req, res) => {
+  const db = loadDB(), { start, end, confirmWarnings } = req.body || {};
+  const out = runPayrollCore(db, start, end, confirmWarnings, "Owner");
+  res.status(out.status).json(out.json);
+});
+
+// ---- Run payroll from the payroll tracker (secret-gated, like the other cross-location routes). It asks the shop what it would run, and runs through the SAME function as the owner's button. ----
+// The preview carries a fingerprint of everything that matters (the period, the state, every person's pay, the pending adjustments, the notices). A run is refused unless the fingerprint it was reviewed with still matches, so a
+// number or a notice that changed after you looked can never be run unseen.
+function runPreviewFor(db, period) {
+  const st = payrollStatus(db, period), pending = payAdjustments(db).filter((a) => !a.appliedRunId), lines = teamPayrollLines(db, period).filter((l) => l.subtotal !== 0 || l.payType);
+  const plan = st.run ? { under: [], over: [] } : carryPlan(db, period), carryAmt = payRound(plan.under.reduce((t, x) => t + x.amount, 0));
+  const adj = payRound(pending.reduce((t, a) => t + a.amount, 0)), total = payRound(lines.reduce((t, l) => t + l.subtotal, 0) + adj);
+  const warnings = st.run ? [] : payrollPreview(db, period).warnings.filter((w) => w.code !== "corrections").map((w) => ({ code: w.code, count: w.count, text: w.text, items: (w.items || []).slice(0, 12) }));
+  const state = st.run ? (st.run.skipped ? "skipped" : "run") : "open";
+  const fingerprint = require("crypto").createHash("sha1").update(JSON.stringify({ id: period.id, state, over: st.over, runnable: st.runnable, blocked: st.blockedBy ? st.blockedBy.id : null, adj, pending: pending.length, lines: lines.map((l) => [l.key, l.subtotal]), carry: plan.under.map((x) => [x.key, x.amount, x.runId]), warnings: warnings.map((w) => [w.code, w.count]) })).digest("hex");
+  return { location: SHOP_LOCATION_LABEL, today: trackerToday(), period: { id: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind }, state, over: st.over, runnable: st.runnable,
+    blockedBy: st.blockedBy ? { id: st.blockedBy.id, start: st.blockedBy.start, end: st.blockedBy.end, name: st.blockedBy.name } : null,
+    run: st.run ? { closedAt: st.run.closedAt, closedBy: st.run.closedBy, skipped: !!st.run.skipped, total: st.run.totals ? st.run.totals.total : 0 } : null,
+    people: lines.length, total, pendingAdjustments: { count: pending.length, amount: adj }, warnings, fingerprint,
+    carry: { count: plan.under.length, amount: carryAmt, from: plan.last ? `${payShortDate(plan.last.start)} - ${payShortDate(plan.last.end)}` : null, items: plan.under.slice(0, 60).map((x) => ({ id: x.id, name: x.name, amount: x.amount, from: x.from })) }, older: plan.older,
+    overpaid: { count: plan.over.length, items: plan.over.slice(0, 20).map((x) => ({ name: x.name, amount: x.amount, from: x.from })) } };
+}
+app.get("/api/cross-location/payroll-run-preview", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." }); res.set("Cache-Control", "no-store");
+  const period = paySchedule.periods().find((p) => p.id === String(req.query.periodId || ""));
+  if (!period || !paySchedule.isRunnableKind(period)) return res.status(400).json({ error: "That isn't one of the pay periods on the schedule." });
+  res.json(runPreviewFor(loadDB(), period));
+});
+app.post("/api/cross-location/payroll-run", (req, res) => {
+  if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
+  const db = loadDB(), b = req.body || {}, period = paySchedule.periods().find((p) => p.id === String(b.periodId || ""));
+  if (!period || !paySchedule.isRunnableKind(period)) return res.status(400).json({ error: "That isn't one of the pay periods on the schedule." });
+  const now = runPreviewFor(db, period);
+  if (!b.fingerprint || b.fingerprint !== now.fingerprint) return res.status(409).json({ changed: true, error: `Something at ${SHOP_LOCATION_LABEL} changed since you reviewed it (a person's pay, a notice, or the payroll's status). Nothing was run. Review it again.` });
+  const approved = Array.isArray(b.approvedCarry) ? b.approvedCarry.map(String) : [];
+  const out = runPayrollCore(db, period.start, period.end, true, "Owner (payroll tracker)", approved);
+  if (out.status !== 200) return res.status(out.status).json({ error: out.json.error || "Couldn't run it.", ...(out.json.changed ? { changed: true } : {}), ...(out.json.warnings ? { warnings: out.json.warnings } : {}) });
+  const run = out.json; res.json({ ok: true, location: SHOP_LOCATION_LABEL, runId: run.id, closedAt: run.closedAt, people: run.lines.length, total: run.totals.total, ranWithWarnings: run.ranWithWarnings, carried: run.carriedFromEarlier || [] });
 });
 
 // "We paid this period another way, outside the tracker": lets the next one be run (periods go in order) without making up numbers.
@@ -4323,6 +4391,28 @@ app.post("/api/owner/payroll-run/skip", requireOwner, (req, res) => {
   res.json(run);
 });
 
+// Turns what an earlier run UNDERPAID into adjustments waiting for the next check, and remembers (run.carried) how much was carried so it can never be carried or paid twice.
+function carryForwardRun(db, run, diff, who) {
+  run.carried = run.carried || {};
+  return diff.under.map((d) => {
+    run.carried[d.key] = payRound((run.carried[d.key] || 0) + d.delta);
+    const adj = { id: newId(), personType: d.personType, personId: d.personId, personName: d.name, amount: d.delta, note: `Change since ${payShortDate(run.start)} - ${payShortDate(run.end)} payroll was run`, source: "carried", fromRunId: run.id, createdAt: new Date().toISOString(), createdBy: who, appliedRunId: null };
+    payAdjustments(db).push(adj);
+    return adj;
+  });
+}
+// What the LAST payroll got wrong since it was run: people who were underpaid (PROPOSED, and added to the next payroll only if the owner approves each one) and people who look overpaid (only reported: pay is never
+// taken back automatically). Read-only. A payroll that was skipped, or that is not before this period, is not looked at.
+function carryPlan(db, period) {
+  const earlier = payRuns(db).filter((r) => !r.skipped && r.end < period.start).sort((a, b) => (a.start < b.start ? -1 : 1)), last = earlier[earlier.length - 1] || null, under = [], over = []; let older = 0;
+  earlier.forEach((r) => {
+    const d = payrollDiff(db, r), from = `${payShortDate(r.start)} - ${payShortDate(r.end)}`;
+    if (r !== last) { older += d.under.length; return; }                                    // only the LAST pay period is proposed; older ones are only counted (they are never added unless you go to that period yourself)
+    d.under.forEach((x) => under.push({ id: `${r.id}:${x.key}`, key: x.key, personType: x.personType, personId: x.personId, name: x.name, amount: x.delta, from, runId: r.id }));
+    d.over.forEach((x) => over.push({ key: x.key, name: x.name, amount: x.delta, from, runId: r.id }));
+  });
+  return { under, over, older, last: last ? { id: last.id, start: last.start, end: last.end } : null };
+}
 // Anything that turned out UNDERPAID since a period was run goes on the next check as an adjustment. Anything that looks OVERPAID is only flagged:
 // it is never deducted automatically (many states require written permission to deduct from pay).
 app.post("/api/owner/payroll-run/:id/carry-forward", requireOwner, (req, res) => {
@@ -4331,13 +4421,7 @@ app.post("/api/owner/payroll-run/:id/carry-forward", requireOwner, (req, res) =>
   if (!run || run.skipped) return res.status(404).json({ error: "Payroll run not found." });
   const diff = payrollDiff(db, run);
   if (diff.under.length === 0) return res.status(400).json({ error: "Nobody is owed anything extra for this period right now." });
-  run.carried = run.carried || {};
-  const created = diff.under.map((d) => {
-    run.carried[d.key] = payRound((run.carried[d.key] || 0) + d.delta);
-    const adj = { id: newId(), personType: d.personType, personId: d.personId, personName: d.name, amount: d.delta, note: `Change since ${payShortDate(run.start)} - ${payShortDate(run.end)} payroll was run`, source: "carried", fromRunId: run.id, createdAt: new Date().toISOString(), createdBy: "Owner", appliedRunId: null };
-    payAdjustments(db).push(adj);
-    return adj;
-  });
+  const created = carryForwardRun(db, run, diff, "Owner");
   saveDB(db);
   res.json({ created, stillOver: diff.over });
 });
