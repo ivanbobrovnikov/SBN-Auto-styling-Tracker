@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-09-paydetail";
+const BUILD = "2026-11-09-halfday";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -3993,8 +3993,9 @@ function calculateBasePayCore(person, attendanceRecords, sales) {
     if (!a.status) return;
     const startH = timeStringToHours(a.startTime), endH = timeStringToHours(a.endTime);
     let hours;
-    if (startH !== null && endH !== null && endH > startH) hours = endH - startH;
-    else hours = a.status === "half_day" ? DEFAULT_HOURLY_DAY_HOURS / 2 : DEFAULT_HOURLY_DAY_HOURS;
+    if (a.status === "half_day") hours = DEFAULT_HOURLY_DAY_HOURS / 2;           // a half day pays exactly HALF of a full day, whatever times were typed in
+    else if (startH !== null && endH !== null && endH > startH) hours = endH - startH;
+    else hours = DEFAULT_HOURLY_DAY_HOURS;
     amount += hours * (person.hourlyRate || 0);
     hoursCounted += hours;
     if (a.status === "half_day") daysHalf++; else daysPresent++;
