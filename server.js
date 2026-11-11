@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-10-allcars";
+const BUILD = "2026-11-10-upsellguard";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -213,6 +213,12 @@ function balanceDueOf(sale) { return Math.max(0, Math.round((saleTotal(sale) - d
 // title has one, it is the job's price. The order is: a price someone typed in here by hand (never overwritten) > the price
 // in the title > GHL's opportunity value (kept on record as ghlValue so a disagreement is visible).
 // A job that is already paid or completed keeps its price, since that's history that payroll and revenue already rest on.
+// The price in a title is the BASE price. Upsells are recorded on the job separately and added on top, so if someone types the TOTAL into the title (the base plus an upsell that is also recorded on the job), using it as the
+// base price would count that upsell twice. A title that equals base + upsells exactly is therefore left alone: the base price stays the base price.
+function titleIsTotalWithUpsells(sale, titleTotal) {
+  const up = saleUpsellTotal(sale), base = parseFloat(sale.basePrice) || 0;
+  return up > 0 && Math.abs(titleTotal - (base + up)) < 0.5 && Math.abs(titleTotal - base) >= 0.5;
+}
 function applyTitlePricing(db, sale, opts = {}) {
   const tp = parseTitlePricing(sale.car);
   if ((tp ? tp.total : null) !== (sale.titlePrice == null ? null : sale.titlePrice)) sale.priceMismatchDismissed = false; // a new price in the title is worth another look
@@ -245,6 +251,7 @@ function applyTitlePricing(db, sale, opts = {}) {
       if (sale.status === "no_show") return false;
     }
   }
+  if (!opts.force && titleIsTotalWithUpsells(sale, tp.total)) return false;                       // the title is the total with the upsell(s): the base price stays as it is
   const prior = opts.priorPrice !== undefined ? opts.priorPrice : parseFloat(sale.basePrice) || 0;
   sale.priceSource = "title";
   if (Math.abs((parseFloat(sale.basePrice) || 0) - tp.total) >= 0.005) sale.basePrice = tp.total;
@@ -2311,7 +2318,7 @@ function priceMismatchSales(db) {
   return db.sales.filter((s) => {
     if (s.status === "cancelled" || s.status === "no_show" || s.priceMismatchDismissed || redoFree(s)) return false; // a free redo is meant to be $0
     const tp = parseTitlePricing(s.car);
-    return tp && Math.abs((parseFloat(s.basePrice) || 0) - tp.total) >= 0.5 && Date.parse(s.date) >= since;
+    return tp && Math.abs((parseFloat(s.basePrice) || 0) - tp.total) >= 0.5 && !titleIsTotalWithUpsells(s, tp.total) && Date.parse(s.date) >= since;
   }).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60);
 }
 // One tap: use the title's price on every job listed (a price typed by hand is replaced too, since that is what the owner is choosing). Each change is written to Edit History.
@@ -2335,7 +2342,8 @@ app.get("/api/manager/price-mismatches", requireManager, (req, res) => {
   const db = loadDB();
   const rows = priceMismatchSales(db).map((s) => {
     const tp = parseTitlePricing(s.car);
-    return { id: s.id, car: s.car, customerName: s.customerName || "", date: s.date, basePrice: parseFloat(s.basePrice) || 0, titlePrice: tp.total, titleDeposit: tp.deposit, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceLocked: !!s.priceLocked, closed: !!(s.paid || s.completed) };
+    const up = saleUpsellTotal(s), base = parseFloat(s.basePrice) || 0;
+    return { id: s.id, car: s.car, customerName: s.customerName || "", date: s.date, basePrice: base, upsellTotal: up, trackerIncludesUpsell: up > 0 && Math.abs(base - up - tp.total) < 0.5, titlePrice: tp.total, titleDeposit: tp.deposit, ghlValue: s.ghlValue == null ? null : s.ghlValue, priceLocked: !!s.priceLocked, closed: !!(s.paid || s.completed) };
   });
   res.json(rows);
 });

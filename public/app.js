@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-10-allcars";
+const UI_BUILD = "2026-11-10-upsellguard";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3752,6 +3752,7 @@ async function renderCleanup(content) {
         el("div", { style: "font-weight:500", text: r.car }),
         el("div", { class: "muted", style: "font-size:11.5px", text: `${r.customerName ? r.customerName + " · " : ""}${formatDateTime(r.date)}` }),
         el("div", { style: "font-size:12px", text: `Tracker has ${money(r.basePrice)} · the title says ${money(r.titlePrice)}${r.titleDeposit > 0 ? ` (${money(r.titleDeposit)} deposit)` : ""}${r.ghlValue != null ? ` · GHL ${money(r.ghlValue)}` : ""}` }),
+        r.upsellTotal > 0 ? el("div", { "data-part": "price-upsell", style: `font-size:12px;color:${r.trackerIncludesUpsell ? "#6BF0B4" : "var(--muted)"}`, text: r.trackerIncludesUpsell ? `The tracker's price is the total with the ${money(r.upsellTotal)} upsell (${money(r.titlePrice)} + ${money(r.upsellTotal)}). Using the title's price puts the base price back to ${money(r.titlePrice)}. The upsell stays on its own, and the job's total stays ${money(r.basePrice)}.` : `This job also has ${money(r.upsellTotal)} in upsells, kept separately. Changing the base price does not touch them.` }) : null,
         el("div", { style: "font-size:11px;color:var(--amber)", text: [r.priceLocked ? "price typed in by hand" : null, r.closed ? "already paid or completed" : null].filter(Boolean).join(" · ") }),
         el("div", { style: "display:flex;gap:8px;margin-top:6px;flex-wrap:wrap" }, [
           el("button", { class: "primary", style: "font-size:12px;padding:6px 12px", text: `Use the title's price (${money(r.titlePrice)})`, onclick: act(r.id, { useTitlePrice: true }, r.closed ? "This job is already paid or completed. Changing its price changes revenue and commission for that period. Continue?" : null) }),
