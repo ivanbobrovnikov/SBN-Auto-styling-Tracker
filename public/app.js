@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-10-upsellguard";
+const UI_BUILD = "2026-11-12-unpaidbox";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -4498,6 +4498,7 @@ async function renderManagerJobs(content) {
     const p = params || nav.getParams();
     const qs = new URLSearchParams(p).toString();
     const myLoad = ++latestLoadId;
+    drawUnpaidBox();                    // the unpaid count is re-checked every time the screen refreshes, so it is never out of date after someone marks a job paid
     const jobs = await api(`/api/manager/jobs?${qs}`);
     if (myLoad !== latestLoadId) return; // a newer refresh is already on its way; don't draw over it
     drawLateBanner(jobs, p.date);
@@ -4896,6 +4897,28 @@ async function renderManagerJobs(content) {
   const dateIn = nav.el.querySelector('input[type="date"]');
   if (dateIn) dateIn.style.cssText = "width:160px;flex:0 0 auto";
   addToggleBtn.style.marginBottom = "0";
+  // THE FIRST THING A MANAGER SEES: how many cars showed up but haven't been marked paid, as one big block that opens the Unpaid Arrivals list. Amber for a few, red for five or more, and a slim green line when everything is paid.
+  const unpaidBox = el("div", { "data-part": "unpaid-box", style: "margin-bottom:14px" });
+  let unpaidToken = 0;
+  async function drawUnpaidBox() {
+    const mine = ++unpaidToken; let list;
+    try { list = await api("/api/manager/unpaid-arrived"); } catch (e) { return; }          // if it can't be read, say nothing rather than block the screen
+    if (mine !== unpaidToken) return;
+    unpaidBox.innerHTML = "";
+    if (!list.length) { unpaidBox.appendChild(el("div", { "data-level": "clear", style: "display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:12px;background:rgba(61,214,140,0.12);color:var(--green);font-weight:600;font-size:14px", text: "\u2713 Every car that showed up has been marked paid" })); return; }
+    const n = list.length, total = list.reduce((t, j) => t + (j.total || 0), 0), oldest = list.reduce((o, j) => (j.date < o ? j.date : o), list[0].date), red = n >= 5;
+    const oldestLabel = new Date(oldest).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" }), bg = red ? "#D92D20" : "#FFB020", fg = red ? "#FFFFFF" : "#1A1300";
+    unpaidBox.appendChild(el("button", { type: "button", "data-act": "unpaid-box", "data-level": red ? "red" : "amber", "aria-label": `${n} unpaid arrival${n === 1 ? "" : "s"}, ${money(total)} not marked paid. Open the list.`,
+      onclick: () => { currentTab = "owner-unpaid"; localStorage.setItem("lastTab", currentTab); render(); },
+      style: `display:flex;align-items:center;gap:16px;width:100%;box-sizing:border-box;min-height:88px;padding:14px 18px;border:0;border-radius:16px;cursor:pointer;text-align:left;font:inherit;background:${bg};color:${fg};box-shadow:0 6px 18px rgba(0,0,0,0.35)` }, [
+      el("div", { "data-part": "unpaid-count", style: "font-size:56px;font-weight:800;line-height:1;min-width:68px;text-align:center", text: String(n) }),
+      el("div", { style: "flex:1;min-width:0" }, [
+        el("div", { style: "font-size:21px;font-weight:800;letter-spacing:0.04em", text: n === 1 ? "UNPAID ARRIVAL" : "UNPAID ARRIVALS" }),
+        el("div", { "data-part": "unpaid-sub", style: "font-size:14px;font-weight:600;margin-top:2px", text: `${money(total)} not marked paid \u00B7 oldest ${oldestLabel}` }),
+        el("div", { style: "font-size:13px;font-weight:800;letter-spacing:0.05em;margin-top:6px", text: "TAP TO SEE THEM" })]),
+      el("div", { "aria-hidden": "true", style: "font-size:44px;font-weight:700;line-height:1", text: "\u203A" })]));
+  }
+  content.appendChild(unpaidBox);
   content.appendChild(el("div", { style: "display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;margin-bottom:12px" }, [nav.el, el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [addToggleBtn])]));
   content.appendChild(addFormWrap);
   content.appendChild(el("div", { class: "jp-main" }, [leftEl, panelHost]));
