@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-12-unpaidbox";
+const UI_BUILD = "2026-11-12-unpaidbox2";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2051,7 +2051,7 @@ async function renderUnpaidArrived(content) {
     summary.innerHTML = "";
     summary.appendChild(el("div", { class: "row" }, [
       el("span", { class: "muted", style: "font-size:13px", text: `${jobs.length} job${jobs.length !== 1 ? "s" : ""} showed up but haven't been marked paid` }),
-      el("span", { class: "mono", style: "color:var(--amber);font-weight:600", text: money(totalAtStake) }),
+      session.role === "owner" ? el("span", { class: "mono", "data-part": "unpaid-total", style: "color:var(--amber);font-weight:600", text: money(totalAtStake) }) : null,      // the combined dollar total is for the owner; a manager sees each job's own price below, but not the sum
     ]));
     if (jobs.length === 0) { unpaidBody.appendChild(el("div", { class: "muted", text: "Nothing outstanding — every arrived job is marked paid." })); return; }
     jobs.forEach((j) => {
@@ -4906,15 +4906,15 @@ async function renderManagerJobs(content) {
     if (mine !== unpaidToken) return;
     unpaidBox.innerHTML = "";
     if (!list.length) { unpaidBox.appendChild(el("div", { "data-level": "clear", style: "display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:12px;background:rgba(61,214,140,0.12);color:var(--green);font-weight:600;font-size:14px", text: "\u2713 Every car that showed up has been marked paid" })); return; }
-    const n = list.length, total = list.reduce((t, j) => t + (j.total || 0), 0), oldest = list.reduce((o, j) => (j.date < o ? j.date : o), list[0].date), red = n >= 5;
+    const showTotal = session.role === "owner", n = list.length, total = list.reduce((t, j) => t + (j.total || 0), 0), oldest = list.reduce((o, j) => (j.date < o ? j.date : o), list[0].date), red = n >= 5;
     const oldestLabel = new Date(oldest).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" }), bg = red ? "#D92D20" : "#FFB020", fg = red ? "#FFFFFF" : "#1A1300";
-    unpaidBox.appendChild(el("button", { type: "button", "data-act": "unpaid-box", "data-level": red ? "red" : "amber", "aria-label": `${n} unpaid arrival${n === 1 ? "" : "s"}, ${money(total)} not marked paid. Open the list.`,
+    unpaidBox.appendChild(el("button", { type: "button", "data-act": "unpaid-box", "data-level": red ? "red" : "amber", "aria-label": `${n} unpaid arrival${n === 1 ? "" : "s"}${showTotal ? ", " + money(total) + " not marked paid" : ""}. Open the list.`,
       onclick: () => { currentTab = "owner-unpaid"; localStorage.setItem("lastTab", currentTab); render(); },
       style: `display:flex;align-items:center;gap:16px;width:100%;box-sizing:border-box;min-height:88px;padding:14px 18px;border:0;border-radius:16px;cursor:pointer;text-align:left;font:inherit;background:${bg};color:${fg};box-shadow:0 6px 18px rgba(0,0,0,0.35)` }, [
       el("div", { "data-part": "unpaid-count", style: "font-size:56px;font-weight:800;line-height:1;min-width:68px;text-align:center", text: String(n) }),
       el("div", { style: "flex:1;min-width:0" }, [
         el("div", { style: "font-size:21px;font-weight:800;letter-spacing:0.04em", text: n === 1 ? "UNPAID ARRIVAL" : "UNPAID ARRIVALS" }),
-        el("div", { "data-part": "unpaid-sub", style: "font-size:14px;font-weight:600;margin-top:2px", text: `${money(total)} not marked paid \u00B7 oldest ${oldestLabel}` }),
+        el("div", { "data-part": "unpaid-sub", style: "font-size:14px;font-weight:600;margin-top:2px", text: showTotal ? `${money(total)} not marked paid \u00B7 oldest ${oldestLabel}` : `Oldest one: ${oldestLabel}` }),
         el("div", { style: "font-size:13px;font-weight:800;letter-spacing:0.05em;margin-top:6px", text: "TAP TO SEE THEM" })]),
       el("div", { "aria-hidden": "true", style: "font-size:44px;font-weight:700;line-height:1", text: "\u203A" })]));
   }
