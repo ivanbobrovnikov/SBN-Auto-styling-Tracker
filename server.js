@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-12-unpaidbox2";
+const BUILD = "2026-11-12-comtotal";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -3981,7 +3981,7 @@ function calculateBasePayCore(person, attendanceRecords, sales) {
     return { amount, daysPresent, daysHalf, daysAbsent, hoursCounted: 0, dailyRate, configured: true, carDetails: [] };
   }
   if (person.payType === "commission") {
-    // A % of the car's base price, split evenly among everyone who worked it - techs
+    // A % of the car's TOTAL price (the base price plus every upsell on it), split evenly among everyone who worked it - techs
     // (employeeIds) and any manager who helped hands-on (managerHelperIds) both count,
     // both toward the split total and toward their own share. Same split math as tips,
     // just automatic and tied to the job's price instead of a manually entered amount.
@@ -3992,10 +3992,10 @@ function calculateBasePayCore(person, attendanceRecords, sales) {
     let amount = 0;
     const carDetails = myCars.map((s) => {
       const splitCount = allWorkers(s).length;
-      const basePrice = parseFloat(s.basePrice) || 0;
-      const share = Math.round((basePrice * (person.carCommissionRate || 0) / 100 / splitCount) * 100) / 100;
+      const basePrice = parseFloat(s.basePrice) || 0, upsellTotal = saleUpsellTotal(s), total = basePrice + upsellTotal;     // paid on everything the customer paid for: the base price AND the upsells
+      const share = Math.round((total * (person.carCommissionRate || 0) / 100 / splitCount) * 100) / 100;
       amount += share;
-      return { id: s.id, car: s.car, basePrice, splitCount, yourShare: share };
+      return { id: s.id, car: s.car, basePrice, upsellTotal, total, splitCount, yourShare: share };
     });
     return { amount, daysPresent: 0, daysHalf: 0, daysAbsent: 0, hoursCounted: 0, dailyRate: 0, configured: true, carDetails };
   }
@@ -4152,7 +4152,7 @@ function payBreakdown(p) {
   const baseOnly = payRound((bp.amount || 0) - (ex ? ex.amount : 0));
   if (p.payType === "salary") lines.push({ key: "base", label: "Salary", amount: baseOnly, how: `${m2(p.salaryPerPeriod)} a pay period = ${m2(bp.dailyRate)} a day. ${bp.daysPresent || 0} worked${bp.daysHalf ? `, ${plural(bp.daysHalf, "half day")} (half pay)` : ""}${bp.daysAbsent ? `, ${bp.daysAbsent} missed (no pay)` : ""}.` });
   else if (p.payType === "hourly") lines.push({ key: "base", label: "Hourly pay", amount: baseOnly, how: `${m2(p.hourlyRate)} an hour: ${Math.round((bp.hoursCounted || 0) * 100) / 100} hours over ${plural((bp.daysPresent || 0) + (bp.daysHalf || 0), "day")}${bp.daysHalf ? " (a half day counts as half a full day)" : ""}.` });
-  else if (p.payType === "commission") lines.push({ key: "base", label: "Per-car commission", amount: baseOnly, how: `${p.carCommissionRate || 0}% of each car's price, split with anyone else who worked it: ${plural((bp.carDetails || []).length, "car")}.`, items: (bp.carDetails || []).map((c) => ({ text: `${String(c.car || "").slice(0, 44)} \u00B7 ${m2(c.basePrice)}${c.splitCount > 1 ? ` split ${c.splitCount} ways` : ""}`, amount: c.yourShare })) });
+  else if (p.payType === "commission") lines.push({ key: "base", label: "Per-car commission", amount: baseOnly, how: `${p.carCommissionRate || 0}% of each car's TOTAL price (the base price plus any upsells), split with anyone else who worked it: ${plural((bp.carDetails || []).length, "car")}.`, items: (bp.carDetails || []).map((c) => ({ text: `${String(c.car || "").slice(0, 44)} \u00B7 ${m2(c.total != null ? c.total : c.basePrice)}${c.upsellTotal > 0 ? ` (${m2(c.basePrice)} + ${m2(c.upsellTotal)} upsell)` : ""}${c.splitCount > 1 ? ` split ${c.splitCount} ways` : ""}`, amount: c.yourShare })) });
   else lines.push({ key: "base", label: "Base pay", amount: baseOnly, how: "No pay type is set up for this person." });
   if (ex) lines.push({ key: "sunday", label: "Sunday cars", amount: ex.amount, how: `${ex.rate}% of the price of ${plural(ex.cars.length, "car")} worked on ${ex.days.map((d) => ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][d]).join("/")} (only cars that arrived and were paid).`, items: ex.cars.map((c) => ({ text: `${String(c.date).slice(0, 10)} \u00B7 ${String(c.car || "").slice(0, 38)} \u00B7 ${m2(c.basePrice)}`, amount: c.commission })) });
   if (payRound(p.commission) !== 0) lines.push({ key: "upsell", label: "Upsell commission", amount: payRound(p.commission), how: `${p.commissionRate}% of ${m2(p.upsellRevenue)} in upsells (${plural(p.upsellCount || 0, "upsell")}).`, items: (p.upsells || []).map((u) => ({ text: `${u.name} \u00D7 ${u.count} \u00B7 ${m2(u.revenue)} sold`, amount: payRound(u.revenue * (p.commissionRate || 0) / 100) })) });

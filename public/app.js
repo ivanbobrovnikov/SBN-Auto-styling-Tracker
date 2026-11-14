@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-12-unpaidbox2";
+const UI_BUILD = "2026-11-12-comtotal";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1047,7 +1047,7 @@ async function renderPerformance(content) {
         ]),
         stats.payType === "commission" && (stats.basePay.carDetails || []).length > 0
           ? el("div", { style: "margin-top:6px" }, stats.basePay.carDetails.map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
-              el("span", { class: "muted", text: `${c.car} — ${money(c.basePrice)} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
+              el("span", { class: "muted", text: `${c.car} — ${money(c.total != null ? c.total : c.basePrice)}${c.upsellTotal > 0 ? ` (incl. ${money(c.upsellTotal)} upsell)` : ""} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
               el("span", { class: "mono", text: money(c.yourShare) }),
             ])))
           : null,
@@ -1317,7 +1317,7 @@ async function renderOwnerPayroll(content) {
             p.payType === "commission"
               ? (() => {
                   const carsWrap = el("div", { style: "display:none;margin-top:6px" }, (p.basePay.carDetails || []).map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
-                    el("span", { class: "muted", text: `${c.car} — ${money(c.basePrice)} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
+                    el("span", { class: "muted", text: `${c.car} — ${money(c.total != null ? c.total : c.basePrice)}${c.upsellTotal > 0 ? ` (incl. ${money(c.upsellTotal)} upsell)` : ""} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
                     el("span", { class: "mono", text: money(c.yourShare) }),
                   ])));
                   const toggleBtn = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:10.5px;margin-top:2px", onclick: () => {
@@ -4008,7 +4008,7 @@ async function renderManagerPerformance(content) {
         ]),
         stats.payType === "commission" && (stats.basePay.carDetails || []).length > 0
           ? el("div", { style: "margin-top:6px" }, stats.basePay.carDetails.map((c) => el("div", { class: "row", style: "font-size:11px;margin-bottom:3px" }, [
-              el("span", { class: "muted", text: `${c.car} — ${money(c.basePrice)} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
+              el("span", { class: "muted", text: `${c.car} — ${money(c.total != null ? c.total : c.basePrice)}${c.upsellTotal > 0 ? ` (incl. ${money(c.upsellTotal)} upsell)` : ""} (split ${c.splitCount} way${c.splitCount !== 1 ? "s" : ""})` }),
               el("span", { class: "mono", text: money(c.yourShare) }),
             ])))
           : null,
