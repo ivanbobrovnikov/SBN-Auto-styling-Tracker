@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-13-edithistory";
+const BUILD = "2026-11-13-whodid";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -65,9 +65,7 @@ function newId() {
 // Records who changed a price, service, or sales rep assignment, and when — the actual
 // answer to "who changed this and why does the number look different now."
 const AUDIT_KEEP = 8000;           // how many edits Edit History keeps (the newest ones). It used to be 1,000, which with the automatic entries could be only a few days.
-function logAudit(db, req, sale, field, oldValue, newValue) {
-  if (oldValue === newValue) return; // no real change, nothing to log
-  if (!db.auditLog) db.auditLog = [];
+function auditActor(db, req) {
   let actor = "Unknown";
   if (req.auth.label) actor = req.auth.label; // e.g. changes made from the combined rep tracker say so
   else if (req.auth.role === "owner") actor = "Owner";
@@ -75,6 +73,12 @@ function logAudit(db, req, sale, field, oldValue, newValue) {
     const mgr = (db.managers || []).find((m) => m.id === req.auth.id);
     actor = `${mgr ? mgr.name : "Removed manager"} (manager)`;
   }
+  return actor;
+}
+function logAudit(db, req, sale, field, oldValue, newValue) {
+  if (oldValue === newValue) return; // no real change, nothing to log
+  if (!db.auditLog) db.auditLog = [];
+  const actor = auditActor(db, req);
   db.auditLog.unshift({
     id: newId(), timestamp: new Date().toISOString(), actor,
     saleId: sale.id, car: sale.car, field, oldValue: oldValue === undefined ? null : oldValue, newValue,
@@ -235,7 +239,7 @@ function applyTitlePricing(db, sale, opts = {}) {
     sale.basePrice = 0;
     if (!opts.silent) {
       if (!db.auditLog) db.auditLog = [];
-      db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (no price in the title)", saleId: sale.id, car: sale.car, field: "Base price", oldValue: wasPrice, newValue: 0 });
+      db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: opts.actor || "Auto (no price in the title)", saleId: sale.id, car: sale.car, field: opts.actor ? "Base price (from the title)" : "Base price", oldValue: wasPrice, newValue: 0 });
       db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     }
     return true;
@@ -258,7 +262,7 @@ function applyTitlePricing(db, sale, opts = {}) {
   if (Math.abs((parseFloat(sale.basePrice) || 0) - tp.total) >= 0.005) sale.basePrice = tp.total;
   if (!opts.silent && Math.abs(prior - sale.basePrice) >= 0.005) {
     if (!db.auditLog) db.auditLog = [];
-    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (price from the title)", saleId: sale.id, car: sale.car, field: "Base price", oldValue: prior, newValue: sale.basePrice });
+    db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: opts.actor || "Auto (price from the title)", saleId: sale.id, car: sale.car, field: opts.actor ? "Base price (from the title)" : "Base price", oldValue: prior, newValue: sale.basePrice });
     db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
   }
   return Math.abs(prior - sale.basePrice) >= 0.005;
@@ -862,7 +866,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   else sale.basePrice = sale.basePrice || 0;
   sale.priceSource = sale.priceLocked ? "manual" : "ghl";
   sale.calendarId = calendarId || sale.calendarId || null;     // saved first, so the redo-calendar rule can see it
-  applyTitleRules(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true, zeroWhenUnpriced: true }); // a real GHL update for this booking: the title's price wins, paid or not; no price in the title is $0
+  applyTitleRules(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true, zeroWhenUnpriced: true, actor: "GHL booking message" }); // a real GHL update for this booking: the title's price wins, paid or not; no price in the title is $0
   autoFlagRescheduleFromTitle(db, sale); // the title says rescheduled, and there is an earlier dead booking: not a new close
   sale.calendarId = calendarId || sale.calendarId || null;
   sale.syncedFromGHL = true;
@@ -3246,7 +3250,7 @@ function patchJobHandler(req, res) {
       // A title someone corrected by hand is theirs: neither the background sync nor a later GHL event may change it back.
       // (A title picked straight from GHL's own appointment list isn't hand-typed, so it stays free to follow GHL.)
       sale.titleLocked = !req.body.titleFromGhl;
-      applyTitleRules(db, sale, { allowClosed: true });
+      applyTitleRules(db, sale, { allowClosed: true, actor: auditActor(db, req) });          // a downsell typed into the job card is recorded under the person who typed it
       autoFlagRescheduleFromTitle(db, sale);
     } else if (req.body.titleFromGhl) {
       sale.titleLocked = false;
@@ -4842,7 +4846,7 @@ async function runTitleSync() {
         if (title && title !== sale.car) {
           const before = sale.car;
           sale.car = title;
-          applyTitleRules(db, sale, { allowClosed: true, zeroWhenUnpriced: true });
+          applyTitleRules(db, sale, { allowClosed: true, zeroWhenUnpriced: true, actor: "Auto-sync (GHL)" });
           if (!db.auditLog) db.auditLog = [];
           db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
           db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
@@ -5131,7 +5135,7 @@ function reconcileContact(db, contactId, events) {
     // The TITLE follows GHL for every job, not only open ones: the price lives in the title, and it is very often corrected after the car has arrived, been worked on or been paid. A job someone cancelled here,
     // or whose title was edited by hand in the tracker (titleLocked), is left alone. A finished job whose new title has no price keeps its price, and a title that is just the total with an upsell never becomes the base price.
     const title = String(ev.title || "").trim();
-    if (title && title !== j.car && !j.titleLocked && j.status !== "cancelled") { const was = j.car; j.car = title; applyTitleRules(db, j, { allowClosed: true, zeroWhenUnpriced: true }); note(j, "Car/Title", was, j.car); out.titles++; }
+    if (title && title !== j.car && !j.titleLocked && j.status !== "cancelled") { const was = j.car; j.car = title; applyTitleRules(db, j, { allowClosed: true, zeroWhenUnpriced: true, actor: "Auto-sync (GHL)" }); note(j, "Car/Title", was, j.car); out.titles++; }
     if (!open(j)) return;                                                         // the time and the calendar only move for a job that has not been worked
     const ms = evStartMs(ev), jm = Date.parse(j.date);
     if (!isNaN(ms) && (isNaN(jm) || Math.abs(ms - jm) > 60000)) { const was = j.date; j.date = new Date(ms).toISOString(); note(j, "Date/time", was ? String(was).slice(0, 16) : "", j.date.slice(0, 16)); out.times++; }
