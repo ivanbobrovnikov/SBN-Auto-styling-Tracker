@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-13-titlesync";
+const BUILD = "2026-11-13-edithistory";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -64,6 +64,7 @@ function newId() {
 }
 // Records who changed a price, service, or sales rep assignment, and when — the actual
 // answer to "who changed this and why does the number look different now."
+const AUDIT_KEEP = 8000;           // how many edits Edit History keeps (the newest ones). It used to be 1,000, which with the automatic entries could be only a few days.
 function logAudit(db, req, sale, field, oldValue, newValue) {
   if (oldValue === newValue) return; // no real change, nothing to log
   if (!db.auditLog) db.auditLog = [];
@@ -78,7 +79,7 @@ function logAudit(db, req, sale, field, oldValue, newValue) {
     id: newId(), timestamp: new Date().toISOString(), actor,
     saleId: sale.id, car: sale.car, field, oldValue: oldValue === undefined ? null : oldValue, newValue,
   });
-  db.auditLog = db.auditLog.slice(0, 1000); // cap size so this can't grow forever
+  db.auditLog = db.auditLog.slice(0, AUDIT_KEEP); // cap size so this can't grow forever
 }
 // A permanent safeguard, not a separate tool to remember to run — this flags every sale
 // that shares a real customer with another active sale, right where commission actually
@@ -235,7 +236,7 @@ function applyTitlePricing(db, sale, opts = {}) {
     if (!opts.silent) {
       if (!db.auditLog) db.auditLog = [];
       db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (no price in the title)", saleId: sale.id, car: sale.car, field: "Base price", oldValue: wasPrice, newValue: 0 });
-      db.auditLog = db.auditLog.slice(0, 1000);
+      db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     }
     return true;
   }
@@ -258,7 +259,7 @@ function applyTitlePricing(db, sale, opts = {}) {
   if (!opts.silent && Math.abs(prior - sale.basePrice) >= 0.005) {
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (price from the title)", saleId: sale.id, car: sale.car, field: "Base price", oldValue: prior, newValue: sale.basePrice });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
   }
   return Math.abs(prior - sale.basePrice) >= 0.005;
 }
@@ -281,7 +282,7 @@ function applyRedoRules(db, sale, opts = {}) {
     if (opts.silent) return;
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor, saleId: sale.id, car: sale.car, field, oldValue, newValue });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
   };
   const onRedoCalendar = !!sale.calendarId && redoCalendarSet(db).has(String(sale.calendarId));
   if (!sale.isRedo && !sale.redoDismissed && onRedoCalendar) {
@@ -725,7 +726,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
       id: newId(), timestamp: new Date().toISOString(), actor: "Auto-split (new appointment)",
       saleId: sale.id, car: sale.car, field: "GHL Opportunity ID", oldValue: oldKey, newValue: sale.ghlOpportunityId,
     });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     sale = undefined;
   }
   let isNew = !sale;
@@ -757,13 +758,13 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
           id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (reschedule)",
           saleId: sale.id, car: sale.car, field: "GHL Opportunity ID", oldValue: oldOppId, newValue: ghlOpportunityId,
         });
-        db.auditLog = db.auditLog.slice(0, 1000);
+        db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
       }
       // The customer re-confirmed a booking they'd left unconfirmed: it's a normal live appointment again.
       if (sale.status === "unconfirmed") {
         if (!db.auditLog) db.auditLog = [];
         db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (re-confirmed)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "unconfirmed", newValue: "pending" });
-        db.auditLog = db.auditLog.slice(0, 1000);
+        db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
         sale.status = "pending";
       }
     }
@@ -790,7 +791,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
       sale.closedAtCheck = true;
       if (!db.auditLog) db.auditLog = [];
       db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (second car, same day)", saleId: sale.id, car: car || "", field: "Closed At", oldValue: "", newValue: `${sale.closedAt} (when it reached the tracker: please check)` });
-      db.auditLog = db.auditLog.slice(0, 1000);
+      db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     }
   }
   // The customer didn't show, and the appointment was moved to another day: that's the same deal being
@@ -799,7 +800,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
       && (EASTERN_DAY_FMT.format(new Date(sale.date)) !== EASTERN_DAY_FMT.format(new Date(incomingIso)) || Date.parse(incomingIso) >= Date.parse(sale.date) + GHL_MOVE_MS)) {
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-matched (reschedule)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "no_show", newValue: "pending" });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     sale.status = "pending";
   }
   // GHL says this appointment is confirmed again. If the tracker only has it cancelled BECAUSE GHL said so (not because a person tapped Cancel on purpose), it is a live booking again.
@@ -808,7 +809,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     const back = sale.preCancelStatus === "arrived" ? "arrived" : "pending";
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto (confirmed again in GHL after it was cancelled)", saleId: sale.id, car: sale.car, field: "Status", oldValue: "cancelled", newValue: back });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     sale.status = back; delete sale.preCancelStatus; lastUpsertNote.revived = true;
   }
   const prevSnap = isNew ? null : { service: sale.baseService, car: sale.car };
@@ -819,6 +820,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.customerEmail = customerEmail || sale.customerEmail || "";
   sale.contactId = contactId || sale.contactId || null;
   sale.car = sale.titleLocked ? (sale.car || car || "") : (car || sale.car || "");
+  if (prevSnap && prevSnap.car && prevSnap.car !== sale.car) logAudit(db, { auth: { label: "GHL booking message", role: "system" } }, sale, "Car/Title", prevSnap.car, sale.car);       // a booking message that carried a different title
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
   const priorRepId = sale.salesRepId, priorHere = isServiced(sale) || sale.status === "arrived" || !!sale.completed || !!sale.paid;
@@ -847,7 +849,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
     // isSeparateAppointment), so this means the two could not be told apart. Leave a plain trail so an appointment is never swallowed silently.
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "GHL booking (replaced this job's service)", saleId: sale.id, car: sale.car, field: "Service", oldValue: prevSnap.service, newValue: sale.baseService });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     if (!db.debugLog) db.debugLog = [];
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), endpoint: "booking", note: `a booking replaced this job's service (${prevSnap.service} to ${sale.baseService}). If it was really a SECOND appointment, add the missing one with Add a missing job.`, jobs: [{ id: sale.id, was: prevSnap.car, now: sale.car }], body: null });
     db.debugLog = db.debugLog.slice(0, 30);
@@ -1174,7 +1176,7 @@ function archivePerson(db, type, person, req) {
   db.removedPeople = db.removedPeople.slice(0, 500);
   if (!db.auditLog) db.auditLog = [];
   db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Owner", saleId: null, car: person.name, field: `${type === "salesrep" ? "Sales rep" : type === "manager" ? "Manager" : "Employee"} removed`, oldValue: person.name, newValue: "kept in Removed people" });
-  db.auditLog = db.auditLog.slice(0, 1000);
+  db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
 }
 app.delete("/api/employees/:id", requireOwner, (req, res) => {
   const db = loadDB();
@@ -2525,7 +2527,7 @@ app.get("/api/cross-location/appointments-search", (req, res) => {
     salesRepName: s.salesRepId ? ((db.salesReps.find((r) => r.id === s.salesRepId) || {}).name || null) : null, isOnlineBooking: !!s.isOnlineBooking, isWalkIn: !!s.isWalkIn,
     upsells: (s.upsells || []).map((u) => ({ id: u.id, name: u.name, price: u.price, creditedTo: upsellCreditName(db, u), addedVia: u.addedVia || null, createdAt: u.createdAt || null })) })) });
 });
-const auditAdd = (db, entry) => { if (!db.auditLog) db.auditLog = []; db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), ...entry }); db.auditLog = db.auditLog.slice(0, 1000); };
+const auditAdd = (db, entry) => { if (!db.auditLog) db.auditLog = []; db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), ...entry }); db.auditLog = db.auditLog.slice(0, AUDIT_KEEP); };
 // Add an upsell to an appointment, credited to a named sales rep (who must be set up at this location).
 app.post("/api/cross-location/rep-upsell", (req, res) => {
   if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
@@ -2679,7 +2681,7 @@ app.post("/api/cross-location/job-add", (req, res) => {
   db.sales.push(sale);
   if (!db.auditLog) db.auditLog = [];
   db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Rep tracker (owner)", saleId: sale.id, car: sale.car, field: "Job added", oldValue: null, newValue: `${sale.salesRepName} · $${sale.basePrice}` });
-  db.auditLog = db.auditLog.slice(0, 1000);
+  db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
   saveDB(db);
   res.json({ ok: true, id: sale.id });
 });
@@ -3073,7 +3075,7 @@ function autoFlagRescheduleFromTitle(db, onlyJob) {
     if (sameDayOut(partner)) j.reschedulesSameDay = true;        // that same-day deal is out; this booking carries its credit when the customer shows
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: says ? "Auto (title says rescheduled)" : "Auto (a same-day re-booking of a no-show)", saleId: j.id, car: j.car, field: "Reschedule (not a new close)", oldValue: false, newValue: true });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
     flagged += 1;
   });
   return flagged;
@@ -4529,9 +4531,21 @@ app.delete("/api/owner/payroll-adjustments/:id", requireOwner, (req, res) => {
 // (the counter increments on every upsert call, including ones that update an existing
 // job rather than creating a new one — so the counter can honestly exceed the real total).
 // Real audit trail for price, service, and sales rep changes - who changed what, when.
+// Edit History. With no filters it is the newest 200 edits, exactly as before. With ?day=YYYY-MM-DD it is that (Eastern) day, and it can be narrowed to a kind of change (kind=title | price | pricedown | service | rep | status)
+// and to one person or system (actor=...). A "price went down" is a base price edit whose new amount is lower than the old one.
+const auditKind = (e) => { const f = String(e.field || ""); return /^Car\/Title/.test(f) ? "title" : /^Base price/.test(f) ? "price" : /^Service/.test(f) ? "service" : /^Sales rep/.test(f) ? "rep" : /^Status/.test(f) ? "status" : "other"; };
+const auditNum = (v) => { const n = parseFloat(String(v === null || v === undefined ? "" : v).replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : null; };
+const auditDown = (e) => { if (auditKind(e) !== "price") return false; const a = auditNum(e.oldValue), b = auditNum(e.newValue); return a !== null && b !== null && b < a; };
 app.get("/api/owner/audit-log", requireOwner, (req, res) => {
-  const db = loadDB();
-  res.json((db.auditLog || []).slice(0, 200));
+  const db = loadDB(), log = db.auditLog || [], q = req.query || {};
+  if (q.day === undefined && q.kind === undefined && q.actor === undefined) return res.json(log.slice(0, 200));
+  if (q.day !== undefined && q.day !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(String(q.day))) return res.status(400).json({ error: "Pick a day." });
+  const kinds = ["all", "title", "price", "pricedown", "service", "rep", "status"], kind = kinds.includes(q.kind) ? q.kind : "all";
+  const inDay = log.filter((e) => !q.day || EASTERN_DAY_FMT.format(new Date(e.timestamp)) === q.day);
+  const counts = { all: inDay.length, title: inDay.filter((e) => auditKind(e) === "title").length, price: inDay.filter((e) => auditKind(e) === "price").length, pricedown: inDay.filter(auditDown).length, service: inDay.filter((e) => auditKind(e) === "service").length, rep: inDay.filter((e) => auditKind(e) === "rep").length, status: inDay.filter((e) => auditKind(e) === "status").length };
+  const ofKind = inDay.filter((e) => kind === "all" || (kind === "pricedown" ? auditDown(e) : auditKind(e) === kind)), actors = [...new Set(ofKind.map((e) => e.actor))].sort();
+  const rows = ofKind.filter((e) => !q.actor || e.actor === q.actor), LIMIT = q.day ? 1500 : 200;
+  res.json({ day: q.day || null, kind, counts, actors, total: rows.length, truncated: rows.length > LIMIT, entries: rows.slice(0, LIMIT).map((e) => ({ ...e, kind: auditKind(e), down: auditDown(e) })), keeps: AUDIT_KEEP, oldest: log.length ? log[log.length - 1].timestamp : null });
 });
 
 app.get("/api/owner/import-diagnostic", requireOwner, (req, res) => {
@@ -4831,7 +4845,7 @@ async function runTitleSync() {
           applyTitleRules(db, sale, { allowClosed: true, zeroWhenUnpriced: true });
           if (!db.auditLog) db.auditLog = [];
           db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
-          db.auditLog = db.auditLog.slice(0, 1000);
+          db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
           updated++;
         }
       }

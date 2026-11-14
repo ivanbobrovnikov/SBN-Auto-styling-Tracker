@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-13-titlesync";
+const UI_BUILD = "2026-11-13-edithistory";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2361,29 +2361,40 @@ async function renderOwnerCash(content) {
 }
 
 async function renderEditHistory(content) {
-  const body = el("div");
+  // Every change made through the app or pulled in from GHL: who, when, and from what to what. Pick a day, narrow it to titles, prices (or just price DROPS, a customer being sold down), or one person.
+  const body = el("div"), chipsBox = el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" }), sum = el("div", { "data-part": "eh-summary", style: "font-weight:600;margin:4px 0 8px" }), whoBox = el("div", { style: "margin-bottom:12px" });
+  const state = { kind: "all", actor: "", all: false }, KINDS = [["all", "Everything"], ["title", "Titles"], ["price", "Prices"], ["pricedown", "Price went down"], ["service", "Service"], ["rep", "Sales rep"], ["status", "Status"]];
+  const nav = renderDayNav(() => { state.all = false; state.actor = ""; load(); });
+  const dayName = (ymd) => new Date(ymd + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+  const num = (v) => { const n = parseFloat(String(v === null || v === undefined ? "" : v).replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : null; };
   async function load() {
-    const entries = await api("/api/owner/audit-log");
-    clearHeightLocked(body);
-    if (entries.length === 0) { body.appendChild(el("div", { class: "muted", text: "No edits recorded yet." })); return; }
-    entries.forEach((e) => {
-      body.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "row" }, [
-          el("div", {}, [
-            el("div", { style: "font-weight:500", text: e.car || "(unknown car)" }),
-            el("div", { class: "muted", style: "font-size:12px", text: `${e.field} changed by ${e.actor}` }),
-            el("div", { class: "muted", style: "font-size:11px", text: formatDateTime(e.timestamp) }),
-          ]),
-          el("div", { style: "text-align:right;font-size:13px" }, [
-            el("div", { class: "muted", style: "text-decoration:line-through", text: e.oldValue === null || e.oldValue === "" ? "(empty)" : String(e.oldValue) }),
-            el("div", { style: "color:var(--green);font-weight:600", text: String(e.newValue) }),
-          ]),
-        ]),
-      ]));
+    const day = state.all ? "" : nav.getParams().date;
+    let r; try { r = await api(`/api/owner/audit-log?kind=${state.kind}${day ? "&day=" + day : ""}${state.actor ? "&actor=" + encodeURIComponent(state.actor) : ""}`); } catch (e) { body.innerHTML = ""; body.appendChild(el("div", { class: "muted", text: e.message || "Couldn't load the edits." })); return; }
+    clearHeightLocked(body); chipsBox.innerHTML = ""; whoBox.innerHTML = "";
+    KINDS.forEach(([k, label]) => chipsBox.appendChild(el("button", { type: "button", class: state.kind === k ? "primary" : "ghost", "data-act": "eh-kind-" + k, "aria-pressed": String(state.kind === k), style: "min-height:40px;padding:0 14px", text: `${label}${k === "all" ? "" : " (" + (r.counts[k] || 0) + ")"}`, onclick: () => { state.kind = k; state.actor = ""; load(); } })));
+    const allDays = el("button", { type: "button", class: state.all ? "primary" : "ghost", "data-act": "eh-all-days", style: "min-height:40px;padding:0 14px;margin-left:auto", text: state.all ? "Showing all days" : "Show all days", onclick: () => { state.all = !state.all; state.actor = ""; load(); } }); chipsBox.appendChild(allDays);
+    const sel = el("select", { "data-field": "eh-actor", style: "width:100%" }); sel.appendChild(el("option", { value: "", text: "Everyone (" + r.actors.length + ")" })); r.actors.forEach((x) => sel.appendChild(el("option", { value: x, text: x }))); sel.value = state.actor; sel.addEventListener("change", () => { state.actor = sel.value; load(); }); whoBox.appendChild(sel);
+    sum.textContent = state.all ? `The newest ${r.entries.length} edits, across all days` : `${dayName(day)} \u00B7 ${r.counts.all} edit${r.counts.all === 1 ? "" : "s"}${r.counts.all ? ` (${r.counts.title} title${r.counts.title === 1 ? "" : "s"}, ${r.counts.price} price${r.counts.price === 1 ? "" : "s"}${r.counts.pricedown ? `, ${r.counts.pricedown} price drop${r.counts.pricedown === 1 ? "" : "s"}` : ""})` : ""}`;
+    body.innerHTML = "";
+    if (r.entries.length === 0) body.appendChild(el("div", { class: "muted", "data-part": "eh-empty", style: "padding:14px 0", text: state.all ? "No edits recorded yet." : `No ${state.kind === "all" ? "" : "matching "}edits on this day.${r.oldest ? " Edit History goes back to " + new Date(r.oldest).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" }) + "." : ""}` }));
+    r.entries.forEach((e) => {
+      const isPrice = e.kind === "price", o = num(e.oldValue), n = num(e.newValue), fromGhl = /GHL/i.test(e.actor) || /Auto-sync/i.test(e.actor), shown = (v) => (isPrice && num(v) !== null ? money(num(v)) : v === null || v === "" || v === undefined ? "(empty)" : String(v)), what = e.kind === "title" ? "Title" : e.field;
+      body.appendChild(el("div", { class: "card", "data-part": "eh-row", "data-kind": e.kind, "data-down": String(!!e.down) }, [el("div", { class: "row" }, [
+        el("div", { style: "min-width:0" }, [
+          el("div", { style: "font-weight:500", text: e.car || "(unknown car)" }),
+          el("div", { class: "muted", style: "font-size:12px", text: `${what} changed by ${e.actor}` }),
+          el("div", { class: "muted", style: "font-size:11px", text: formatDateTime(e.timestamp) }),
+          e.kind === "title" && fromGhl ? el("div", { class: "muted", style: "font-size:11px;margin-top:2px", text: "From GHL: it can't say who edited it there, only when the tracker saw the change." }) : null]),
+        el("div", { style: isPrice ? "text-align:right;font-size:13px;flex:none;white-space:nowrap" : "text-align:right;font-size:13px;max-width:55%" }, [      // a dollar amount never breaks across lines; a long title does
+          el("div", { class: "muted", style: `text-decoration:line-through;${isPrice ? "" : "word-break:break-word"}`, text: shown(e.oldValue) }),
+          el("div", { style: `color:${e.down ? "var(--red)" : "var(--green)"};font-weight:600;${isPrice ? "" : "word-break:break-word"}`, text: shown(e.newValue) }),
+          isPrice && o !== null && n !== null && o !== n ? el("div", { "data-part": "eh-delta", style: `font-size:12px;font-weight:700;color:${n < o ? "var(--red)" : "var(--green)"}`, text: `${n < o ? "\u2212" : "+"}${money(Math.abs(n - o))}` }) : null])])]));
     });
+    if (r.truncated) body.appendChild(el("div", { class: "muted", style: "font-size:12px", text: `Showing the first ${r.entries.length} of ${r.total}.` }));
+    if (r.keeps) body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-top:10px", text: `Edit History keeps the newest ${r.keeps.toLocaleString("en-US")} edits${r.oldest ? ", back to " + new Date(r.oldest).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" }) : ""}.` }));
   }
-  content.appendChild(el("div", { class: "muted", style: "margin-bottom:12px", text: "Every price, service, and sales rep change made through the app, most recent first." }));
-  content.appendChild(body);
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:12px", text: "Every change made through the app or pulled in from GHL, most recent first. Pick a day, then narrow it to titles, prices, or just prices that went down." }));
+  content.appendChild(nav.el); content.appendChild(chipsBox); content.appendChild(whoBox); content.appendChild(sum); content.appendChild(body);
   await load();
 }
 

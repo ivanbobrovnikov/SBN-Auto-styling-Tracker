@@ -37,7 +37,7 @@ module.exports = function registerRecoveryRoutes(app, { loadDB, saveDB, requireO
     db.removedPeople = (db.removedPeople || []).filter((r) => r.id !== rec.id);
     if (!db.auditLog) db.auditLog = [];
     db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Owner", saleId: null, car: rec.name, field: `${LABEL[type]} brought back (${source})`, oldValue: "removed", newValue: rec.name });
-    db.auditLog = db.auditLog.slice(0, 1000);
+    db.auditLog = db.auditLog.slice(0, 8000);
     return { ok: true, person: shape(rec, type), pinChanged, initialsChanged };
   }
 
