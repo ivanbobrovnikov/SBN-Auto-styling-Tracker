@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-12-comtotal";
+const BUILD = "2026-11-13-titlesync";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -5114,9 +5114,11 @@ function reconcileContact(db, contactId, events) {
     const ev = j.ghlOpportunityId ? byId.get(j.ghlOpportunityId) : null;
     if (!ev || evCancelled(ev)) return;
     if (!j.ghlApptSeen) { j.ghlApptSeen = true; out.seen++; }                     // proof that this job's id really is a GHL appointment id
-    if (!open(j)) return;
+    // The TITLE follows GHL for every job, not only open ones: the price lives in the title, and it is very often corrected after the car has arrived, been worked on or been paid. A job someone cancelled here,
+    // or whose title was edited by hand in the tracker (titleLocked), is left alone. A finished job whose new title has no price keeps its price, and a title that is just the total with an upsell never becomes the base price.
     const title = String(ev.title || "").trim();
-    if (title && title !== j.car && !j.titleLocked) { const was = j.car; j.car = title; applyTitleRules(db, j, { allowClosed: true, zeroWhenUnpriced: true }); note(j, "Car/Title", was, j.car); out.titles++; }
+    if (title && title !== j.car && !j.titleLocked && j.status !== "cancelled") { const was = j.car; j.car = title; applyTitleRules(db, j, { allowClosed: true, zeroWhenUnpriced: true }); note(j, "Car/Title", was, j.car); out.titles++; }
+    if (!open(j)) return;                                                         // the time and the calendar only move for a job that has not been worked
     const ms = evStartMs(ev), jm = Date.parse(j.date);
     if (!isNaN(ms) && (isNaN(jm) || Math.abs(ms - jm) > 60000)) { const was = j.date; j.date = new Date(ms).toISOString(); note(j, "Date/time", was ? String(was).slice(0, 16) : "", j.date.slice(0, 16)); out.times++; }
     if (ev.calendarId && ev.calendarId !== j.calendarId) {
