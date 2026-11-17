@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-13-whodid";
+const BUILD = "2026-11-17-twocars";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -521,7 +521,9 @@ function titleTokens(t) {
     .replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*-\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, " ")
     .replace(/\b(?:re-?scheduled?|resched|rebooked?|moved|new)\b/g, " ")
     .replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
-  if (toks.length > 2 && /^[a-z]{2,3}$/.test(toks[0]) && /^(19|20)\d\d$/.test(toks[1])) toks.shift(); // "fk 2015 toyota ..."
+  // The rep's initials come first, and very often the customer's first name after them: "fk 2015 toyota ...", "fk darrel 2026 bmw x5m ...". Neither says anything about the car, so everything in front of the year goes.
+  const yi = toks.findIndex((t, i) => i >= 1 && i <= 4 && /^(19|20)\d\d$/.test(t));
+  if (toks.length > 2 && /^[a-z]{2,3}$/.test(toks[0]) && yi >= 1 && toks.slice(0, yi).every((t) => /^[a-z]+$/.test(t))) toks.splice(0, yi);
   return toks;
 }
 // The car itself: the year and make at the front of a title ("2015 toyota"). Two titles that name DIFFERENT cars are
@@ -533,6 +535,30 @@ function vehicleKey(t) {
 function vehiclesDiffer(a, b) {
   const ka = vehicleKey(a), kb = vehicleKey(b);
   return !!(ka && kb && ka !== kb);
+}
+// The model word that follows the year and make ("2026 bmw x5m" -> "x5m", "2022 tesla model y" -> "y"), or nothing when that word is really a colour or a service word.
+const NOT_A_MODEL = new Set(["black", "white", "gray", "grey", "silver", "red", "blue", "green", "gold", "tan", "brown", "yellow", "orange", "purple", "maroon", "burgundy", "all", "full", "front", "rear", "sides", "side", "back", "windshield", "tint", "coating", "ceramic", "ppf", "nano", "plus", "and", "with", "drop", "off", "dropoff", "pickup", "night", "walk", "in", "walkin", "sedan", "coupe", "suv", "truck", "s", "r", "sr"]);
+function modelWord(t) {
+  const toks = titleTokens(t);
+  if (!vehicleKey(t) || toks.length < 3) return null;
+  let m = toks[2]; if (m === "model" && toks[3]) m = toks[3];
+  return NOT_A_MODEL.has(m) ? null : m;
+}
+// Different cars: a different year, a different make, or the same year and make with clearly different models ("2026 bmw x5m" and "2026 bmw m3"). It is tolerant of how titles are really typed: "x5" and "x5m" are one car,
+// a typo in a plain-letter word ("acorrd" for "accord") is not a different car, and neither is a longer make ("chevy"/"chevrolet", "benz"/"mercedes"). Numbers are NOT forgiven: "x5" and "x6" are different cars.
+const MAKE_ALIASES = [["benz", "mercedes", "mercedesbenz", "merc"], ["vw", "volkswagen"], ["chevy", "chevrolet"], ["caddy", "cadillac"], ["infiniti", "infinity"], ["lexus", "lexis"]];
+function editDistance(a, b) { const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]); for (let j = 1; j <= b.length; j++) d[0][j] = j; for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); return d[a.length][b.length]; }
+function lettersClose(a, b) { if (!/^[a-z]+$/.test(a) || !/^[a-z]+$/.test(b)) return false; const L = Math.min(a.length, b.length); return L >= 4 && editDistance(a, b) <= (L <= 5 ? 1 : 2); }
+function similarMake(a, b) { return a === b || (Math.min(a.length, b.length) >= 3 && (a.startsWith(b) || b.startsWith(a))) || MAKE_ALIASES.some((g) => g.includes(a) && g.includes(b)) || lettersClose(a, b); }
+function similarModel(a, b) { return a === b || a.startsWith(b) || b.startsWith(a) || lettersClose(a, b); }
+function carsDiffer(a, b) {
+  const ka = vehicleKey(a), kb = vehicleKey(b);
+  if (!ka || !kb) return false;                                   // a title with no readable car is never claimed to be a different car
+  const [ya, ma] = ka.split(" "), [yb, mb] = kb.split(" ");
+  if (ya !== yb) return true;
+  if (!similarMake(ma, mb)) return true;
+  const wa = modelWord(a), wb = modelWord(b);
+  return !!(wa && wb && !similarModel(wa, wb));
 }
 // "Same car and service". Comparing the raw text broke the moment anyone touched the deposit or added "WS" while
 // rescheduling, which made a plain reschedule look like a brand-new deal (and a new close today).
@@ -598,12 +624,12 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
   if (untouched && !vehicleKey(existing.car) && vehicleKey(incomingTitle)) return false;
   // The SAME CAR and the same service, and the earlier appointment has not been worked: that is a reschedule (the same appointment moved), whether its old day has passed or not.
   // A DIFFERENT car is never folded in here: a customer with two cars has two jobs.
-  if (untouched && newMs > oldMs && vehicleKey(existing.car) && vehicleKey(existing.car) === vehicleKey(incomingTitle) && serviceCompat(existing.baseService, incomingService || incomingTitle)) return false;
+  if (untouched && newMs > oldMs && vehicleKey(existing.car) && vehicleKey(existing.car) === vehicleKey(incomingTitle) && !carsDiffer(existing.car, incomingTitle) && serviceCompat(existing.baseService, incomingService || incomingTitle)) return false;
   // Same Eastern day: a time tweak, or the same booking being re-synced - never a new appointment. The ONE exception is a clearly
   // DIFFERENT CAR while the first booking is still live: a customer bringing two cars in on one day. Both bookings arrive under the
   // same GHL id, and without this the second silently overwrote the first (the first car's job simply vanished).
   if (EASTERN_DAY_FMT.format(new Date(oldMs)) === EASTERN_DAY_FMT.format(new Date(newMs))) {
-    return vehiclesDiffer(existing.car, incomingTitle) && !["cancelled", "no_show", "unconfirmed"].includes(existing.status);
+    return carsDiffer(existing.car, incomingTitle) && !["cancelled", "no_show", "unconfirmed"].includes(existing.status);
   }
   // Finished work is history: a new booking after it is a new deal.
   if (isServiced(existing)) return true;
@@ -613,9 +639,9 @@ function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCal
   // finished - is a deal that never got completed. Moving it to another day is a RESCHEDULE of that same
   // deal (it keeps its original closing time, so it doesn't count as a new close) as long as it's the same
   // car and service. This is what Frank does when he edits the existing appointment.
+  // A different CAR is a different booking, even when the old one is still upcoming (a customer with two cars), and however alike the rest of the two titles are: the same price and wording is often typed for both cars.
+  if (carsDiffer(existing.car, incomingTitle)) return true;
   if (titlesMatch(existing.car, incomingTitle)) return false;
-  // A different CAR is a different booking, even when the old one is still upcoming (a customer with two cars).
-  if (vehiclesDiffer(existing.car, incomingTitle)) return true;
   // The same car but a different service: if the old booking is still upcoming and untouched it was simply edited;
   // otherwise it's a new deal for the same customer.
   const upcoming = oldMs >= Date.now() && (!existing.status || existing.status === "pending");
@@ -711,10 +737,10 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   // either booking never splits off a third copy or moves one car's details onto the other's job.
   // It only applies when the job holding the id is on the SAME DAY as this booking (the two-cars-one-day case), and only to a LIVE earlier job: a cancelled
   // or no-show job never absorbs a new booking (that booking would vanish into a dead job), and bookings on other days keep working exactly as before.
-  if (sale && incomingIso && sale.date && vehiclesDiffer(sale.car, car) && EASTERN_DAY_FMT.format(new Date(sale.date)) === EASTERN_DAY_FMT.format(new Date(incomingIso))) {
-    const dayOf = (iso) => EASTERN_DAY_FMT.format(new Date(iso));
+  if (sale && incomingIso && sale.date && carsDiffer(sale.car, car)) {
     const itsOwn = db.sales.find((s) => s !== sale && String(s.ghlOpportunityId || "").startsWith(`${ghlOpportunityId}~earlier-`)
-      && s.date && dayOf(s.date) === dayOf(incomingIso) && !vehiclesDiffer(s.car, car) && vehicleKey(s.car) && ["pending", "arrived"].includes(s.status || "pending"));
+      && s.date && !carsDiffer(s.car, car) && vehicleKey(s.car) && vehicleKey(s.car) === vehicleKey(car) && ["pending", "arrived"].includes(s.status || "pending")
+      && !isSeparateAppointment(s, incomingIso, car, calendarId, baseService, appointmentId));        // and only if that job would itself take this booking as its own (the same car, not a second visit)
     if (itsOwn) sale = itsOwn;
   }
   let secondCarSameDay = false;       // this new job is a second car for a day that already has a live booking under this id
