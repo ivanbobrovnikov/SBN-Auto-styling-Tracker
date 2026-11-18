@@ -49,13 +49,29 @@ module.exports = function registerRecoveryRoutes(app, { loadDB, saveDB, requireO
     if (!r.ok) throw new Error(`GitHub answered ${r.status}`);
     return raw ? r.text() : r.json();
   }
+  const dirOf = () => { const f = backup().folder; return f ? `backups/${f}` : "backups"; };      // this shop's own folder in the backup repo
+  // Backups made before each shop had its own folder sit in the shared top-level files. They are only used for a shop if they are provably ITS OWN: every record has a random ID that exists nowhere else, so an old file
+  // counts only if it shares at least one ID with this shop's current data. A file from another shop shares none and is never offered. The names stay as they were ("latest.json", "2026-11-06.json"): the shop's own folder
+  // is looked in first, and the old shared file only if nothing is there.
+  const ID_LISTS = ["employees", "managers", "salesReps", "removedPeople", "sales"];
+  const idsOf = (d) => { const s = new Set(); ID_LISTS.forEach((k) => (Array.isArray(d && d[k]) ? d[k] : []).forEach((x) => { if (x && typeof x.id === "string") s.add(x.id); })); return s; };
+  const days = (l) => (Array.isArray(l) ? l.filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f.name)).map((f) => f.name) : []);
   async function sources() {
-    const list = await gh("backups/snapshots", false);
-    const days = Array.isArray(list) ? list.filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f.name)).map((f) => f.name).sort().reverse() : [];
-    return ["latest.json", ...days];
+    const own = await gh(`${dirOf()}/snapshots`, false); let old = null;
+    if (backup().folder) { try { old = await gh("backups/snapshots", false); } catch (e) {} }
+    return ["latest.json", ...[...new Set([...days(own), ...days(old)])].sort().reverse()];
   }
   const label = (name) => (name === "latest.json" ? "the latest hourly backup" : `the backup of ${name.replace(".json", "")}`);
-  async function load(name) { const txt = await gh(name === "latest.json" ? "backups/latest.json" : `backups/snapshots/${name}`, true); if (txt == null) return null; return JSON.parse(txt); }
+  async function load(name) {
+    const f = backup().folder, file = name === "latest.json" ? "latest.json" : `snapshots/${name}`;
+    let txt = await gh(`${dirOf()}/${file}`, true), legacy = false;
+    if (txt == null && f) { txt = await gh(`backups/${file}`, true); legacy = txt != null; }                  // nothing in this shop's folder: the earlier shared file, if it is this shop's own
+    if (txt == null) return null;
+    const snap = JSON.parse(txt);
+    if (f && snap && snap._backup && snap._backup.folder && snap._backup.folder !== f) return null;      // a copy that says it is another shop's is never used
+    if (legacy) { const mine = idsOf(loadDB()); let shared = false; for (const id of idsOf(snap)) { if (mine.has(id)) { shared = true; break; } } if (!shared) return null; }
+    return snap;
+  }
 
   app.get("/api/owner/removed-people", requireOwner, (req, res) => {
     const db = loadDB(), cfg = backup();

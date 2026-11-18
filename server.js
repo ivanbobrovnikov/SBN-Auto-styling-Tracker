@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-18-newshop";
+const BUILD = "2026-11-18-backupfolder";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -4807,31 +4807,42 @@ const GITHUB_BACKUP_TOKEN = process.env.GITHUB_BACKUP_TOKEN || "";
 const GITHUB_BACKUP_REPO = process.env.GITHUB_BACKUP_REPO || ""; // format: "yourusername/your-repo"
 let lastCloudBackup = null;
 
+// EACH SHOP KEEPS ITS BACKUPS IN ITS OWN FOLDER of the repo (backups/<shop>/latest.json and backups/<shop>/snapshots/<day>.json), so several shops can share one backup repository without overwriting each other.
+// The folder is the shop's label turned into a plain word (West Palm Beach, FL becomes west-palm-beach-fl); GITHUB_BACKUP_FOLDER sets it by hand if a shop's label ever has to change.
+// (Before this, every shop wrote to the same two file names: the last shop to back up owned latest.json, and only the first shop each day got a daily snapshot.)
+const GITHUB_API_BASE = process.env.GITHUB_API_BASE || "https://api.github.com";
+const BACKUP_FOLDER = String(process.env.GITHUB_BACKUP_FOLDER || SHOP_LOCATION_LABEL || "shop").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "shop";
 async function runCloudBackup() {
   if (!GITHUB_BACKUP_TOKEN || !GITHUB_BACKUP_REPO) {
-    lastCloudBackup = { time: new Date().toISOString(), ok: false, error: "Not configured — set GITHUB_BACKUP_TOKEN and GITHUB_BACKUP_REPO." };
+    lastCloudBackup = { time: new Date().toISOString(), ok: false, error: "Not configured ? set GITHUB_BACKUP_TOKEN and GITHUB_BACKUP_REPO." };
     return lastCloudBackup;
   }
   try {
     const db = loadDB();
-    const content = Buffer.from(JSON.stringify(db, null, 2)).toString("base64");
-    const apiBase = `https://api.github.com/repos/${GITHUB_BACKUP_REPO}/contents`;
+    const content = Buffer.from(JSON.stringify({ ...db, _backup: { shop: SHOP_LOCATION_LABEL, folder: BACKUP_FOLDER, at: new Date().toISOString(), build: BUILD } }, null, 2)).toString("base64");   // the file says which shop it is from
+    const apiBase = `${GITHUB_API_BASE}/repos/${GITHUB_BACKUP_REPO}/contents`;
     const headers = {
       Authorization: `Bearer ${GITHUB_BACKUP_TOKEN}`,
       Accept: "application/vnd.github+json",
       "Content-Type": "application/json",
+      "User-Agent": "sbn-tracker",
     };
+    const dir = `backups/${BACKUP_FOLDER}`;
 
-    // Always-current backup — one file, overwritten every time, for a fast restore.
-    let sha;
-    try {
-      const getRes = await fetch(`${apiBase}/backups/latest.json`, { headers });
-      if (getRes.ok) { const j = await getRes.json(); sha = j.sha; }
-    } catch (e) {}
-    const putRes = await fetch(`${apiBase}/backups/latest.json`, {
-      method: "PUT", headers,
-      body: JSON.stringify({ message: `Backup ${new Date().toISOString()}`, content, sha }),
-    });
+    // Always-current backup ? one file, overwritten every time, for a fast restore. If GitHub says the file changed under us (409), look again and try once more.
+    let putRes;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let sha;
+      try {
+        const getRes = await fetch(`${apiBase}/${dir}/latest.json`, { headers });
+        if (getRes.ok) { const j = await getRes.json(); sha = j.sha; }
+      } catch (e) {}
+      putRes = await fetch(`${apiBase}/${dir}/latest.json`, {
+        method: "PUT", headers,
+        body: JSON.stringify({ message: `Backup ${SHOP_LOCATION_LABEL} ${new Date().toISOString()}`, content, sha }),
+      });
+      if (putRes.ok || (putRes.status !== 409 && putRes.status !== 422)) break;
+    }
     if (!putRes.ok) {
       const errBody = await putRes.text();
       lastCloudBackup = { time: new Date().toISOString(), ok: false, error: `GitHub returned ${putRes.status}: ${errBody.slice(0, 200)}` };
@@ -4840,7 +4851,7 @@ async function runCloudBackup() {
 
     // Also keep one dated snapshot per day, so there's real history to fall back to.
     const today = new Date().toISOString().slice(0, 10);
-    const snapshotPath = `backups/snapshots/${today}.json`;
+    const snapshotPath = `${dir}/snapshots/${today}.json`;
     let snapshotExists = false;
     try {
       const checkRes = await fetch(`${apiBase}/${snapshotPath}`, { headers });
@@ -4849,7 +4860,7 @@ async function runCloudBackup() {
     if (!snapshotExists) {
       await fetch(`${apiBase}/${snapshotPath}`, {
         method: "PUT", headers,
-        body: JSON.stringify({ message: `Daily snapshot ${today}`, content }),
+        body: JSON.stringify({ message: `Daily snapshot ${SHOP_LOCATION_LABEL} ${today}`, content }),
       });
     }
 
@@ -4861,7 +4872,7 @@ async function runCloudBackup() {
 }
 
 app.get("/api/owner/backup-status", requireOwner, (req, res) => {
-  res.json({ configured: !!(GITHUB_BACKUP_TOKEN && GITHUB_BACKUP_REPO), last: lastCloudBackup });
+  res.json({ configured: !!(GITHUB_BACKUP_TOKEN && GITHUB_BACKUP_REPO), last: lastCloudBackup, folder: BACKUP_FOLDER });
 });
 
 app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
@@ -4869,7 +4880,7 @@ app.post("/api/owner/backup-now", requireOwner, async (req, res) => {
   res.json(result);
 });
 // Bringing back someone who was removed: from the Removed people list, or from this shop's own cloud backups. Its own file.
-require("./recoveryapi")(app, { loadDB, saveDB, requireOwner, newId, hash, cleanStaffInitials, staffTags, backup: () => ({ token: GITHUB_BACKUP_TOKEN, repo: GITHUB_BACKUP_REPO, last: () => lastCloudBackup }) });
+require("./recoveryapi")(app, { loadDB, saveDB, requireOwner, newId, hash, cleanStaffInitials, staffTags, backup: () => ({ token: GITHUB_BACKUP_TOKEN, repo: GITHUB_BACKUP_REPO, folder: BACKUP_FOLDER, last: () => lastCloudBackup }) });
 
 // ---------- GHL API bulk import — Phase 1: diagnostic only ----------
 // This does NOT import anything. Each of these makes one real, read-only API call to GHL
