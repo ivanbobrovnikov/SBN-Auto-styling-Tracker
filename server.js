@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-17-twocars";
+const BUILD = "2026-11-18-credit2";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -479,6 +479,23 @@ function autoCloserNote(db, sale, before) {
   if (sale.walkInClosedAuto === "title" && sale.walkInClosedByName && sale.walkInClosedByName !== before) logAudit(db, { auth: { label: "Auto (title)", role: "system" } }, sale, "Walk-in closer", before || "", sale.walkInClosedByName);
 }
 
+// Credit for a deal follows the initials in its title, with two protections:
+//  - a credit someone assigned BY HAND (the job card's rep picker, or Cleanup in the rep tracker) is never taken back by a booking message or a sync; it is theirs until they change it again.
+//  - every time credit moves because a title changed, Edit History records it ("Sales rep (from the title)"), so a move is never silent.
+const creditSettled = (s) => isServiced(s) || s.status === "arrived" || !!s.completed || !!s.paid;
+function manualRepCredit(db, sale) {
+  if (sale.repLocked) return true;
+  return (db.auditLog || []).some((e) => e.saleId === sale.id && e.field === "Sales rep" && (e.actor === "Owner" || /\(manager\)$/.test(String(e.actor)) || /rep tracker/i.test(String(e.actor))));       // assigned by hand before this was tracked as a lock
+}
+function creditFollowsTitle(db, req, sale, opts = {}) {
+  if (manualRepCredit(db, sale)) return false;
+  if (opts.skipWorked && creditSettled(sale)) return false;     // an automatic check never moves credit on a car that has already arrived or been paid
+  const rep = repFromTitleInitials(db, sale.car);
+  if (!rep || rep.id === sale.salesRepId) return false;
+  logAudit(db, req, sale, "Sales rep (from the title)", sale.salesRepName, rep.name);
+  sale.salesRepId = rep.id; sale.salesRepName = rep.name; sale.isWalkIn = false;
+  return true;
+}
 function resolveSalesRepAttribution(db, salesRepName, appointmentTitle) {
   // Title initials are the trusted source now — proven more reliable than GHL's own
   // "Contact Owner" field, which reflects generic account ownership rather than who
@@ -702,6 +719,7 @@ function backfillCloseAppt(db) { let n = 0; db.sales.forEach((s) => { if (!s.clo
 const evActive = (e) => /^(new|confirmed)$/i.test(String(e.appointmentStatus || e.status || "").trim());
 const GHL_MOVE_MS = 30 * 60000;                                     // moved later by at least this much to count as rescheduled (not a time tweak)
 const GHL_RESCHED = { auth: { label: "Auto-sync (GHL): it was rescheduled in GHL", role: "system" } };
+const GHL_SYNC = { auth: { label: "Auto-sync (GHL)", role: "system" } };
 // A DIFFERENT rep re-closed a deal that had gone dead: it is theirs now, and its close time is when they re-closed it (the original rep's dead close is folded away).
 function reCloseCredit(db, req, sale, att, whenIso) {
   const was = sale.salesRepName; sale.salesRepId = att.salesRepId; sale.salesRepName = att.salesRepName; sale.isWalkIn = false;
@@ -853,26 +871,34 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   if (prevSnap && prevSnap.car && prevSnap.car !== sale.car) logAudit(db, { auth: { label: "GHL booking message", role: "system" } }, sale, "Car/Title", prevSnap.car, sale.car);       // a booking message that carried a different title
   sale.employeeIds = matched.map((e) => e.id);
   sale.employeeNames = matched.map((e) => e.name).concat(unmatched.map((n) => n + " (unmatched)")).join(", ") || "Unassigned";
-  const priorRepId = sale.salesRepId, priorHere = isServiced(sale) || sale.status === "arrived" || !!sale.completed || !!sale.paid;
-  if (attribution) {
-    sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
-    if (attribution.walkInClosedByType && !sale.closerLocked) {            // a closer chosen by hand is never overwritten
+  const priorRepId = sale.salesRepId, priorRepName = sale.salesRepName, priorHere = isServiced(sale) || sale.status === "arrived" || !!sale.completed || !!sale.paid;
+  // The title that counts for credit is the tracker's own when someone typed it by hand (GHL's copy may still carry the old initials), and a credit assigned by hand is left exactly as it is.
+  const att = (!isNew && sale.titleLocked) ? resolveSalesRepAttribution(db, salesRepName, sale.car) : attribution;
+  const repHeld = !isNew && !!priorRepId && manualRepCredit(db, sale);
+  if (repHeld) { /* credit assigned by hand: a booking message never takes it back */ }
+  else if (att) {
+    sale.salesRepId = att.salesRepId; sale.salesRepName = att.salesRepName; sale.isWalkIn = att.isWalkIn;
+    if (att.walkInClosedByType && !sale.closerLocked) {            // a closer chosen by hand is never overwritten
       const wasCloser = sale.walkInClosedByName;
-      sale.walkInClosedByType = attribution.walkInClosedByType;
-      sale.walkInClosedById = attribution.walkInClosedById;
-      sale.walkInClosedByName = attribution.walkInClosedByName;
-      sale.walkInClosedAuto = attribution.closerSource || null;
+      sale.walkInClosedByType = att.walkInClosedByType;
+      sale.walkInClosedById = att.walkInClosedById;
+      sale.walkInClosedByName = att.walkInClosedByName;
+      sale.walkInClosedAuto = att.closerSource || null;
       autoCloserNote(db, sale, wasCloser);
     }
   }
   else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
   else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
+  let reclosed = false;
   // A DIFFERENT rep's initials are on this booking now and the deal had not been worked: that rep re-closed it. The credit moved with the title; the close time moves with it too.
-  if (!isNew && attribution && attribution.salesRepId && priorRepId && priorRepId !== attribution.salesRepId && !priorHere) {
+  if (!isNew && !repHeld && att && att.salesRepId && priorRepId && priorRepId !== att.salesRepId && !priorHere) {
+    reclosed = true;
     const wasClosed = sale.closedAt; sale.closedAt = (closedAt ? normalizeDate(closedAt) : null) || new Date().toISOString(); sale.closedAtSource = "reclose";
     const sys = { auth: { label: "GHL booking (re-closed by another rep)", role: "system" } };
-    logAudit(db, sys, sale, "Sales rep (re-closed by another rep)", "", attribution.salesRepName); logAudit(db, sys, sale, "Closed At (re-closed)", wasClosed || "", sale.closedAt);
+    logAudit(db, sys, sale, "Sales rep (re-closed by another rep)", "", att.salesRepName); logAudit(db, sys, sale, "Closed At (re-closed)", wasClosed || "", sale.closedAt);
   }
+  // Credit moved with the title on a car that had already been worked (so it was not a re-close): it used to move with no record at all.
+  if (!isNew && !repHeld && !reclosed && priorRepId && sale.salesRepId && sale.salesRepId !== priorRepId) logAudit(db, { auth: { label: "GHL booking message", role: "system" } }, sale, "Sales rep (from the title)", priorRepName, sale.salesRepName);
   sale.baseService = baseService || sale.baseService || "";
   if (prevSnap && serviceLine(prevSnap.service) && serviceLine(sale.baseService) && serviceLine(prevSnap.service) !== serviceLine(sale.baseService)) {
     // An existing job just had its SERVICE swapped by an incoming booking (tint to ceramic, say). A second appointment normally stays its own job (see
@@ -2473,8 +2499,10 @@ app.post("/api/cross-location/cleanup-fix", (req, res) => {
   if (isOnlineBooking !== undefined) sale.isOnlineBooking = !!isOnlineBooking;
   if (salesRepId !== undefined) {
     const rep = db.salesReps.find((r) => r.id === salesRepId);
+    if (rep && rep.id !== sale.salesRepId) logAudit(db, { auth: { label: "Rep tracker (owner)", role: "system" } }, sale, "Sales rep", sale.salesRepName, rep.name);
     sale.salesRepId = salesRepId;
     sale.salesRepName = rep ? rep.name : sale.salesRepName;
+    sale.repLocked = true;          // assigned by hand
   }
   saveDB(db);
   res.json({ ok: true });
@@ -2716,6 +2744,28 @@ app.post("/api/cross-location/job-add", (req, res) => {
   res.json({ ok: true, id: sale.id });
 });
 
+// Jobs whose credited rep is not the rep named in the initials of the title, and that nobody assigned by hand: either the title was changed after the credit was given (in GHL, or on the job card of a car that had already arrived),
+// or the credit was wrong from the start. One tap gives the credit to the rep in the title, or keeps it as it is (and stops this job being listed).
+app.get("/api/manager/credit-mismatch", requireManager, (req, res) => {
+  const db = loadDB(), lo = Date.now() - 60 * 86400000;
+  const rows = db.sales.filter((s) => s.status !== "cancelled" && !s.isRedo && s.date && Date.parse(s.date) >= lo && !manualRepCredit(db, s)).map((s) => {
+    const t = repFromTitleInitials(db, s.car);
+    return t && t.id !== s.salesRepId ? { id: s.id, car: s.car, date: s.date, status: s.status || "pending", paid: !!s.paid, price: parseFloat(s.basePrice) || 0, creditedTo: s.salesRepName || "Unassigned", titleRep: t.name, titleRepId: t.id, closedAt: s.closedAt || null } : null;
+  }).filter(Boolean).sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  res.json({ rows, days: 60 });
+});
+app.post("/api/manager/credit-fix", requireManager, (req, res) => {
+  const db = loadDB(), sale = db.sales.find((x) => x.id === (req.body || {}).saleId), action = (req.body || {}).action;
+  if (!sale) return res.status(404).json({ error: "Job not found." });
+  if (!["title", "keep"].includes(action)) return res.status(400).json({ error: "Pick give the credit to the rep in the title, or keep it." });
+  const t = repFromTitleInitials(db, sale.car);
+  if (!t) return res.status(400).json({ error: "This job's title has no rep's initials." });
+  if (action === "title") {
+    if (t.id !== sale.salesRepId) { logAudit(db, req, sale, "Sales rep (from the title)", sale.salesRepName, t.name); sale.salesRepId = t.id; sale.salesRepName = t.name; sale.isWalkIn = false; sale.isOnlineBooking = false; }
+  } else { logAudit(db, req, sale, "Sales rep (kept as is)", t.name, sale.salesRepName || "Unassigned"); sale.repLocked = true; }
+  saveDB(db);
+  res.json({ ok: true, creditedTo: sale.salesRepName });
+});
 // Auto-fix as much of Cleanup as can be safely derived from data already on the job —
 // the car/title text — using the exact same detection already proven for the live GHL
 // flow and bulk import. Only acts when a real pattern is found; price can never be
@@ -3277,6 +3327,7 @@ function patchJobHandler(req, res) {
       // (A title picked straight from GHL's own appointment list isn't hand-typed, so it stays free to follow GHL.)
       sale.titleLocked = !req.body.titleFromGhl;
       applyTitleRules(db, sale, { allowClosed: true, actor: auditActor(db, req) });          // a downsell typed into the job card is recorded under the person who typed it
+      creditFollowsTitle(db, req, sale);                                                     // new initials in the title mean a different rep closed it: the credit follows, and it is recorded under whoever typed it
       autoFlagRescheduleFromTitle(db, sale);
     } else if (req.body.titleFromGhl) {
       sale.titleLocked = false;
@@ -3367,6 +3418,7 @@ function patchJobHandler(req, res) {
     logAudit(db, req, sale, "Sales rep", sale.salesRepName, rep ? rep.name : "Unassigned");
     sale.salesRepId = req.body.salesRepId;
     sale.salesRepName = rep ? rep.name : "Unassigned";
+    sale.repLocked = true;          // assigned by hand: a booking message or a sync will not take it back
     sale.isWalkIn = false;
     sale.isOnlineBooking = false;
   }
@@ -4873,6 +4925,7 @@ async function runTitleSync() {
           const before = sale.car;
           sale.car = title;
           applyTitleRules(db, sale, { allowClosed: true, zeroWhenUnpriced: true, actor: "Auto-sync (GHL)" });
+          creditFollowsTitle(db, GHL_SYNC, sale, { skipWorked: true });
           if (!db.auditLog) db.auditLog = [];
           db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: "Auto-sync (GHL)", saleId: sale.id, car: sale.car, field: "Car/Title", oldValue: before, newValue: sale.car });
           db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
@@ -5161,7 +5214,7 @@ function reconcileContact(db, contactId, events) {
     // The TITLE follows GHL for every job, not only open ones: the price lives in the title, and it is very often corrected after the car has arrived, been worked on or been paid. A job someone cancelled here,
     // or whose title was edited by hand in the tracker (titleLocked), is left alone. A finished job whose new title has no price keeps its price, and a title that is just the total with an upsell never becomes the base price.
     const title = String(ev.title || "").trim();
-    if (title && title !== j.car && !j.titleLocked && j.status !== "cancelled") { const was = j.car; j.car = title; applyTitleRules(db, j, { allowClosed: true, zeroWhenUnpriced: true, actor: "Auto-sync (GHL)" }); note(j, "Car/Title", was, j.car); out.titles++; }
+    if (title && title !== j.car && !j.titleLocked && j.status !== "cancelled") { const was = j.car; j.car = title; applyTitleRules(db, j, { allowClosed: true, zeroWhenUnpriced: true, actor: "Auto-sync (GHL)" }); note(j, "Car/Title", was, j.car); creditFollowsTitle(db, GHL_SYNC, j, { skipWorked: true }); out.titles++; }
     if (!open(j)) return;                                                         // the time and the calendar only move for a job that has not been worked
     const ms = evStartMs(ev), jm = Date.parse(j.date);
     if (!isNaN(ms) && (isNaN(jm) || Math.abs(ms - jm) > 60000)) { const was = j.date; j.date = new Date(ms).toISOString(); note(j, "Date/time", was ? String(was).slice(0, 16) : "", j.date.slice(0, 16)); out.times++; }

@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-17-twocars";
+const UI_BUILD = "2026-11-18-credit2";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3537,6 +3537,26 @@ async function renderDeadBookings(content) {
 }
 
 async function renderCleanup(content) {
+  // CREDIT AND TITLE DISAGREE: jobs credited to one rep while the title carries another rep's initials. One tap gives the credit to the rep in the title, or keeps it (and stops listing it).
+  const creditCard = el("div", { class: "card", "data-part": "credit-card" });
+  content.appendChild(creditCard);
+  const drawCredit = async () => {
+    let r; try { r = await api("/api/manager/credit-mismatch"); } catch (e) { return; }
+    creditCard.innerHTML = "";
+    if (!r.rows.length) { creditCard.appendChild(el("div", { "data-part": "credit-clear", style: "color:var(--green);font-weight:600;font-size:14px", text: "\u2713 Every job's credit matches the initials in its title" })); return; }
+    creditCard.appendChild(el("div", { style: "font-weight:700;color:var(--warn);margin-bottom:2px", text: `${r.rows.length} job${r.rows.length === 1 ? "" : "s"} credited to a different rep than the title says` }));
+    creditCard.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text: `Last ${r.days} days and upcoming. The title's initials say who closed it. If the title is right, give the credit to that rep; if the credit is right, keep it and this stops listing it.` }));
+    r.rows.forEach((x) => {
+      const when = new Date(x.date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" }), state = x.paid ? "paid" : x.status === "arrived" ? "arrived" : x.status === "no_show" ? "no-show" : "pending";
+      const give = el("button", { type: "button", class: "primary", "data-act": "credit-title", style: "min-height:40px;padding:0 14px", text: `Give the credit to ${x.titleRep}`, onclick: async () => { give.disabled = keep.disabled = true; try { await api("/api/manager/credit-fix", { method: "POST", body: JSON.stringify({ saleId: x.id, action: "title" }) }); } catch (e) { alert(e.message || "Couldn't change it."); } drawCredit(); } });
+      const keep = el("button", { type: "button", class: "ghost", "data-act": "credit-keep", style: "min-height:40px;padding:0 14px", text: `Keep ${x.creditedTo}`, onclick: async () => { give.disabled = keep.disabled = true; try { await api("/api/manager/credit-fix", { method: "POST", body: JSON.stringify({ saleId: x.id, action: "keep" }) }); } catch (e) { alert(e.message || "Couldn't change it."); } drawCredit(); } });
+      creditCard.appendChild(el("div", { "data-part": "credit-row", style: "border-top:1px solid var(--line);padding:10px 0" }, [
+        el("div", { style: "font-weight:500;word-break:break-word", text: x.car }),
+        el("div", { class: "muted", style: "font-size:12px", text: `${when} \u00B7 ${state} \u00B7 credited to ${x.creditedTo} \u00B7 the title says ${x.titleRep}` }),
+        el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" }, [give, keep])]));
+    });
+  };
+  drawCredit();
   // The live link to GHL: whether the tracker is mirroring GHL (edits and calendar moves), and a button to check right now.
   const ghlCard = el("div", { class: "card", "data-part": "ghl-card" });
   content.appendChild(ghlCard);
