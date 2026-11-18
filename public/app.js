@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-18-credit2";
+const UI_BUILD = "2026-11-18-newshop";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -1457,6 +1457,19 @@ async function renderOwnerPayroll(content) {
       }
       return el("div", { style: "margin-top:12px" }, [toggle, panel]);
     }
+
+    // A brand-new shop (no payroll run yet) is offered a one-tap start, on whichever period is showing: otherwise every earlier period has to be marked done one at a time.
+    const newShopBox = el("div", { "data-part": "new-shop-box" });                  // only appears on a shop that has never run payroll
+    api("/api/owner/payroll-new-shop").then((info) => {
+      if (!info.eligible || !info.options.length) return;
+      newShopBox.appendChild(el("div", { style: "margin:10px 0 4px;font-weight:600", text: "Is this a new shop?" }));
+      newShopBox.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text: "It has no payroll history yet, so every earlier pay period would have to be marked done one at a time. Pick where this shop's payroll starts and everything before it is marked done in one tap. Nothing is calculated or paid for those." }));
+      info.options.forEach((o) => newShopBox.appendChild(el("button", { type: "button", class: "primary", "data-act": "new-shop-start", "data-start": o.start, style: "margin:0 8px 8px 0;min-height:44px", text: `Start payroll with ${ymdShort(o.start)} \u2013 ${ymdShort(o.end)}${o.skipCount ? ` (marks ${o.skipCount} earlier period${o.skipCount === 1 ? "" : "s"} done)` : ""}`, onclick: async () => {
+        if (!confirm(`Start this shop's payroll with ${ymdShort(o.start)} - ${ymdShort(o.end)}?\n\nEvery pay period before it will be marked as handled outside the tracker. Nothing is calculated or saved for them.`)) return;
+        try { await api("/api/owner/payroll-run/skip-before", { method: "POST", body: JSON.stringify({ start: o.start }) }); location.reload(); } catch (e) { alert(e.message || "Couldn't do that."); }
+      } })));
+    }).catch(() => {});
+    if (!st.run) card.appendChild(newShopBox);
 
     if (st.run && st.run.skipped) {
       card.appendChild(note(`Marked as paid another way on ${formatDateTime(st.run.closedAt)}. No numbers were saved for this period.`));

@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-18-credit2";
+const BUILD = "2026-11-18-newshop";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -4483,6 +4483,29 @@ app.post("/api/owner/payroll-run/skip", requireOwner, (req, res) => {
   res.json(run);
 });
 
+// A BRAND-NEW shop has no payroll history, so every earlier pay period would otherwise have to be marked "paid another way" one at a time before its first real one could be run, and until then
+// "Run payroll for every shop" is blocked for ALL shops. This lists where a new shop can start (the period that just ended, or the current one) and marks everything before it done in one go.
+// It only works on a shop that has never run real payroll, only touches periods that are already over, and makes exactly the records the single "paid another way" button makes.
+function newShopOptions(db) {
+  const runs = payRuns(db), today = trackerToday();
+  if (runs.some((r) => !r.skipped || r.note === "Before this shop started")) return { eligible: false, options: [] };      // real payroll has been run, or the one-tap start was already used: it is a one-time setup, so it can never be tapped by accident later
+  const open = paySchedule.periods().filter((p) => paySchedule.isRunnableKind(p) && !runs.some((r) => r.periodId === p.id)), over = open.filter((p) => p.end < today);
+  if (!over.length) return { eligible: false, options: [] };
+  const cands = [over[over.length - 1], paySchedule.periodContaining(today)].filter((p, i, a) => p && paySchedule.isRunnableKind(p) && a.findIndex((q) => q.id === p.id) === i);
+  const options = cands.map((p) => ({ start: p.start, end: p.end, name: p.name, skipCount: over.filter((o) => o.end < p.start).length })).filter((o) => o.skipCount > 0);
+  return { eligible: options.length > 0, options };
+}
+app.get("/api/owner/payroll-new-shop", requireOwner, (req, res) => res.json(newShopOptions(loadDB())));
+app.post("/api/owner/payroll-run/skip-before", requireOwner, (req, res) => {
+  const db = loadDB(), before = (req.body || {}).start, info = newShopOptions(db);
+  if (!info.eligible) return res.status(409).json({ error: "This shop has already started its payroll, so earlier periods can't be skipped in one go." });
+  const pick = info.options.find((o) => o.start === before);
+  if (!pick) return res.status(400).json({ error: "Pick one of the pay periods offered." });
+  const runs = payRuns(db), today = trackerToday(), todo = paySchedule.periods().filter((p) => paySchedule.isRunnableKind(p) && p.end < pick.start && p.end < today && !runs.some((r) => r.periodId === p.id));
+  todo.forEach((period) => runs.unshift({ id: newId(), periodId: period.id, start: period.start, end: period.end, name: period.name, kind: period.kind, workDays: period.workDays, submit: period.submit, paid: period.paid, closedAt: new Date().toISOString(), closedBy: "Owner", skipped: true, note: "Before this shop started", lines: [], totals: { base: 0, upsellCommission: 0, walkInCommission: 0, tips: 0, adjustments: 0, total: 0 }, carried: {} }));
+  saveDB(db);
+  res.json({ ok: true, skipped: todo.length, startsWith: { start: pick.start, end: pick.end } });
+});
 // Turns what an earlier run UNDERPAID into adjustments waiting for the next check, and remembers (run.carried) how much was carried so it can never be carried or paid twice.
 function carryForwardRun(db, run, diff, who) {
   run.carried = run.carried || {};
