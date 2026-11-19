@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-19-projection";
+const BUILD = "2026-11-19-oldwarnings";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -4314,7 +4314,7 @@ function payrollPreview(db, period) {
   const messy = jobs.filter((s) => !redoFree(s) && (!s.basePrice || !s.baseService || (!s.salesRepId && !s.isWalkIn && !s.isOnlineBooking)));
   if (messy.length) warnings.push({ code: "cleanup", count: messy.length, text: `${payPlural(messy.length, "job")} ${messy.length === 1 ? "is" : "are"} missing a price, service or sales rep (see Cleanup).`, items: messy.slice(0, 8).map(jobLine) });
   // Corrections made to an EARLIER check after it was run that nobody has put on a check yet: say so now, so an underpayment isn't forgotten.
-  payRuns(db).filter((r) => !r.skipped && r.end < period.start).sort((x, y) => (x.start < y.start ? -1 : 1)).forEach((r) => {
+  payRuns(db).filter((r) => !r.skipped && r.end < period.start && correctionsWatched(r)).sort((x, y) => (x.start < y.start ? -1 : 1)).forEach((r) => {
     const d = payrollDiff(db, r);
     if (d.under.length) warnings.push({ code: "corrections", count: d.under.length, text: `${payShortDate(r.start)} - ${payShortDate(r.end)} payroll has ${payPlural(d.under.length, "correction")} since it was run that no check has picked up yet. Open that period: press "Re-run this payroll" if its checks have not gone out yet, or "Add the underpayments to the next check" if they have.`, items: d.under.map((x) => `${x.name}: +$${x.delta.toFixed(2)}`), periodId: r.periodId, periodStart: r.start, periodEnd: r.end });
   });
@@ -4333,6 +4333,11 @@ function payrollStatus(db, period) {
 
 // After a period has been run, things can still change (attendance corrected, a job marked paid late, a tip added). This is what is
 // different now compared with what was calculated, per person. Anything already carried forward to a later check is not counted again.
+// Corrections to an EARLIER payroll (its numbers changed after it was run) are only watched for pay periods that started on or after Nov 5, 2026 (PAYROLL_CORRECTIONS_FROM changes that). Before that, pay rules changed after those checks
+// had gone out (commission on the total, the half-day rule...), so recalculating an old run with today's rules flagged people as "underpaid" for checks that were right when they were paid. An old period is still fully there on its own
+// screen (its own corrections, Re-run, carry forward); it just no longer raises warnings or proposals on a newer period.
+const PAY_CORRECTIONS_FROM = process.env.PAYROLL_CORRECTIONS_FROM || "2026-11-05";
+const correctionsWatched = (run) => run.start >= PAY_CORRECTIONS_FROM;
 function payrollDiff(db, run) {
   if (run.skipped) return { under: [], over: [] };
   const period = paySchedule.periodByRange(run.start, run.end);
@@ -4524,7 +4529,7 @@ function carryForwardRun(db, run, diff, who) {
 // What the LAST payroll got wrong since it was run: people who were underpaid (PROPOSED, and added to the next payroll only if the owner approves each one) and people who look overpaid (only reported: pay is never
 // taken back automatically). Read-only. A payroll that was skipped, or that is not before this period, is not looked at.
 function carryPlan(db, period) {
-  const earlier = payRuns(db).filter((r) => !r.skipped && r.end < period.start).sort((a, b) => (a.start < b.start ? -1 : 1)), last = earlier[earlier.length - 1] || null, under = [], over = []; let older = 0;
+  const earlier = payRuns(db).filter((r) => !r.skipped && r.end < period.start && correctionsWatched(r)).sort((a, b) => (a.start < b.start ? -1 : 1)), last = earlier[earlier.length - 1] || null, under = [], over = []; let older = 0;
   earlier.forEach((r) => {
     const d = payrollDiff(db, r), from = `${payShortDate(r.start)} - ${payShortDate(r.end)}`;
     if (r !== last) { older += d.under.length; return; }                                    // only the LAST pay period is proposed; older ones are only counted (they are never added unless you go to that period yourself)
