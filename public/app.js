@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-19-oldwarnings";
+const UI_BUILD = "2026-11-19-payperiodfix";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -126,11 +126,9 @@ function nextOrTodayTuesday(fromDateStr) {
   return d.toISOString().slice(0, 10);
 }
 
-// The real payroll cycle is anchored to Tuesday, August 25, 2026 — every 14 days from
-// there, forever (Sept 8, Sept 22, Oct 6, ...). A free date-picker let you accidentally
-// land on a Tuesday that doesn't align with that cadence (e.g. Sept 1, which is a real
-// Tuesday but only 7 days after the anchor, not 14) — this stepper makes that impossible.
-const PAY_PERIOD_ANCHOR = "2026-08-25";
+// The pay cycle is Thursday through Wednesday, every 14 days, anchored on the Wednesday that ends a period (Aug 26, 2026): Oct 22 - Nov 4, Nov 5 - Nov 18, Nov 19 - Dec 2, and so on (the old Wednesday-to-Tuesday cycle ended Oct 7).
+// This is ONLY the fallback for when the server's pay schedule can't be loaded, so it has to match the real cycle. It used to be the old Tuesday-ending one, which silently showed Nov 4 - Nov 17 instead of Nov 5 - Nov 18.
+const PAY_PERIOD_ANCHOR = "2026-08-26";
 // Sales reps run a genuinely different cadence — Thursday morning through the following
 // Wednesday night, one calendar day offset from the tech/manager cycle above. Same 14-day
 // length, just shifted, so this gets its own anchor rather than reusing the one above.
@@ -150,8 +148,13 @@ function nearestValidPayPeriodEnd(referenceDateStr, anchorOverride) {
 let payScheduleCache = null;
 let pendingPayrollRange = null;                      // set by a link like /#payroll=2026-10-13_2026-10-21, used once by the owner's Payroll screen
 const takePendingRange = () => { const r = pendingPayrollRange; pendingPayrollRange = null; return r; };
+let payScheduleLoading = false;
 async function loadPayScheduleCache() {
-  try { const sc = await api("/api/pay-schedule"); payScheduleCache = { periods: sc.periods }; } catch (e) { payScheduleCache = null; }        // if it can't be loaded the picker simply behaves as it did before
+  // Three tries (now, then half a second later, then a second and a half later): one hiccup (a shop restarting, a weak signal) must not leave the whole session on the fallback cycle.
+  for (const wait of [0, 500, 1500]) {
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    try { const sc = await api("/api/pay-schedule"); payScheduleCache = { periods: sc.periods }; return; } catch (e) { payScheduleCache = null; }
+  }
 }
 
 // teamSchedule (techs and managers only) is the server's pay schedule: { periods, currentIndex }. Without it, or for sales reps (who pass their own
@@ -223,7 +226,8 @@ function renderPeriodPicker(onChange, defaultPeriod = "month", payPeriodAnchor, 
         ? `Covers ${formatPlainDate(p.start)} – ${formatPlainDate(p.end)} (payroll processed ${formatPlainDate(p.end)}) · old Wed–Tue cycle`
         : `Covers ${formatPlainDate(p.start)} \u2013 ${formatPlainDate(p.end)}` + [p.name, p.submit ? `submit ${fmtDay(p.submit)}` : "", p.paid ? `paid ${fmtDay(p.paid)}` : ""].filter(Boolean).map((x) => ` \u00B7 ${x}`).join("") + (p.note ? ` (${p.note})` : "") + (p.closedRunId ? (p.skipped ? " \u00B7 \u2713 paid another way" : " \u00B7 \u2713 payroll run") : "");
     } else {
-      payPeriodLabel.textContent = `Covers ${fmt(start)} – ${fmt(end)} (payroll processed ${fmt(end)})`;
+      const standard = !payPeriodAnchor;               // a sales screen brings its own cycle; anything else here is standing in for the real schedule, which could not be loaded
+      payPeriodLabel.textContent = `Covers ${fmt(start)} \u2013 ${fmt(end)}` + (standard ? " \u00B7 standard 2-week cycle (the pay schedule couldn't be loaded, so pay dates aren't shown here)" : ` (payroll processed ${fmt(end)})`);
     }
   }
 
@@ -296,6 +300,7 @@ async function boot() {
 }
 
 function render() {
+  if (session.role && !payScheduleCache && !payScheduleLoading) { payScheduleLoading = true; loadPayScheduleCache().finally(() => { payScheduleLoading = false; }); }      // still without the real schedule: try again in the background, so the next screen opened has it
   const app = document.getElementById("app");
   app.innerHTML = "";
 
