@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-19-redocrew";
+const BUILD = "2026-11-19-projection";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -2521,7 +2521,12 @@ app.get("/api/cross-location/revenue", (req, res) => {
   if (!crossSecretOk(req)) return res.status(401).json({ error: "Bad secret." });
   const db = loadDB(), { start, end } = dateRangeFor(req.query), r2 = (n) => Math.round(n * 100) / 100;
   const sales = revenueEligible(db.sales.filter((s) => inRange(s.date, start, end)), db), paid = sales.filter((s) => s.paid);
-  res.json({ revenue: r2(paid.reduce((a, s) => a + saleTotal(s), 0)), upsellRevenue: r2(paid.reduce((a, s) => a + saleUpsellTotal(s), 0)), walkInRevenue: r2(paid.filter((s) => s.isWalkIn).reduce((a, s) => a + saleTotal(s), 0)),
+  // The PROJECTION: what is collected, plus what is booked on top of it: cars that have arrived but are not paid yet, and jobs still to come (booked, not shown yet). The same buckets as the Dashboard's booking pipeline;
+  // a cancelled job is already out, and a no-show or unconfirmed job is never counted. Base price plus upsells, and nothing before the revenue start date, exactly like the revenue itself.
+  const tot = (list) => r2(list.reduce((a, s) => a + saleTotal(s), 0)), unpaid = sales.filter((s) => !s.paid), arrivedUnpaid = unpaid.filter((s) => s.status === "arrived"), pending = unpaid.filter((s) => !s.status || s.status === "pending");
+  const priced = (list) => list.filter((s) => saleTotal(s) > 0).length;       // the counts are of jobs that carry a price (a free redo is not "a job booked")
+  const booked = { arrivedUnpaid: tot(arrivedUnpaid), arrivedUnpaidCount: priced(arrivedUnpaid), pending: tot(pending), pendingCount: priced(pending) }; booked.projected = r2(tot(paid) + booked.arrivedUnpaid + booked.pending);
+  res.json({ booked, revenue: r2(paid.reduce((a, s) => a + saleTotal(s), 0)), upsellRevenue: r2(paid.reduce((a, s) => a + saleUpsellTotal(s), 0)), walkInRevenue: r2(paid.filter((s) => s.isWalkIn).reduce((a, s) => a + saleTotal(s), 0)),
     paidJobs: paid.length, carsServiced: sales.filter((s) => s.completed).length, range: { start: EASTERN_DAY_FMT.format(new Date(start)), end: EASTERN_DAY_FMT.format(new Date(end)) } });
 });
 app.get("/api/cross-location/people-pay", (req, res) => {
