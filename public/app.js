@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-18-backupfolder";
+const UI_BUILD = "2026-11-19-redocrew";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3451,6 +3451,31 @@ function redoCalendarCard(onChange) {
   draw().catch(() => box.remove()); return box;
 }
 
+// Find the original job for a redo under ANY customer, from right where the redo is listed. Type a name, a phone number, a car or a tech; tap the job it came from.
+function redoFinder(redo, onLinked) {
+  const box = el("div", { "data-part": "redo-finder", style: "margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:12px" });
+  const input = el("input", { type: "search", "data-field": "finder-q", placeholder: "Customer name, phone, car or tech", "aria-label": "Find the original job", value: redo.customerName || "", style: "width:100%;font-size:16px;box-sizing:border-box" });
+  const list = el("div", { style: "margin-top:8px" });
+  box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Search ANY customer. Only cars that were worked and finished before this redo are listed." })); box.appendChild(input); box.appendChild(list);
+  let timer = 0, token = 0;
+  async function search() {
+    const mine = ++token, q = input.value.trim(); list.innerHTML = "";
+    if (q.length < 2) { list.appendChild(el("div", { class: "muted", "data-part": "finder-hint", style: "font-size:12.5px", text: "Type at least 2 letters or a few digits of the phone number." })); return; }
+    let r; try { r = await api(`/api/manager/redos/find-original?redoId=${encodeURIComponent(redo.saleId)}&q=${encodeURIComponent(q)}`); } catch (e) { list.appendChild(el("div", { class: "muted", style: "font-size:12.5px", text: e.message || "Couldn't search." })); return; }
+    if (mine !== token) return;
+    if (!r.results.length) { list.appendChild(el("div", { class: "muted", "data-part": "finder-empty", style: "font-size:12.5px", text: "No finished job matches that. Try the phone number, the last name, or the car." })); return; }
+    r.results.forEach((o) => list.appendChild(el("button", { type: "button", class: "ghost", "data-act": "finder-pick", "data-id": o.id, ...(o.linkable ? {} : { disabled: true }), style: "display:block;width:100%;text-align:left;margin:0 0 6px;font-size:12.5px;min-height:44px;padding:8px 10px;white-space:normal", onclick: async () => {
+      if (!confirm(`Link this redo to:\n\n${o.car}\n${o.customerName || "(no name)"} \u00B7 ${o.date}\n\nIt will count against: ${o.people}.`)) return;
+      try { await api(`/api/manager/jobs/${o.id}/redo`, { method: "POST", body: JSON.stringify({ reason: "Not set yet", redoSaleId: redo.saleId }) }); await onLinked(); } catch (e) { alert(e.message || "Couldn't link it."); } } }, [
+      el("div", { style: "font-weight:500;overflow-wrap:anywhere", text: o.car }),
+      el("div", { class: "muted", style: "font-size:11.5px", text: `${o.customerName || "(no name)"} \u00B7 ${o.customerPhone || "no phone"} \u00B7 ${o.date}` }),
+      el("div", { class: "muted", style: "font-size:11.5px", text: o.linkable ? `Worked by ${o.people}` : "No tech is recorded on this job, so it can't be linked" })])));
+  }
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 300); });
+  setTimeout(() => { input.focus(); search(); }, 0);
+  return box;
+}
+
 async function renderRedos(content) {
   let data = null, view = "people"; const open = new Set(), body = el("div");
   const picker = renderPeriodPicker((p) => load(p), "month");
@@ -3477,10 +3502,11 @@ async function renderRedos(content) {
     if (d.needsLinking.length) body.appendChild(el("div", { class: "cneeds", "data-part": "needs-linking" }, [el("div", { class: "cgroup" }, [
       el("div", { style: "padding:10px 14px;font-weight:500", text: `Needs linking (${d.needsLinking.length})` }),
       el("div", { class: "muted", style: "padding:0 14px 6px;font-size:12.5px", text: "These redo appointments aren't tied to the original job yet, so nobody is counted. Pick the job it came from." }),
-      el("div", { class: "cgroup-body" }, d.needsLinking.map((n) => el("div", { class: "crow", "data-part": "link-row" }, [el("div", { style: "flex:1;min-width:0" }, [
+      el("div", { class: "cgroup-body" }, d.needsLinking.map((n) => { const slot = el("div", { "data-part": "finder-slot" }); return el("div", { class: "crow", "data-part": "link-row" }, [el("div", { style: "flex:1;min-width:0" }, [
         el("div", { style: "font-size:14px;overflow-wrap:anywhere", text: `${n.car}${n.customerName ? " \u00B7 " + n.customerName : ""}` }), el("div", { class: "muted", style: "font-size:11.5px", text: `Redo booked for ${n.date}` }),
         el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px" }, [...n.candidates.map((c) => el("button", { class: "ghost", "data-act": "pick-original", style: "font-size:12px;min-height:34px;padding:5px 11px", text: `${c.car.slice(0, 38)} \u00B7 ${c.date} \u00B7 ${c.people || "no tech"}`, onclick: run(() => api(`/api/manager/jobs/${c.id}/redo`, { method: "POST", body: JSON.stringify({ reason: "Not set yet", redoSaleId: n.saleId }) })) })),
-          el("button", { class: "ghost", "data-act": "dismiss-redo", style: "font-size:12px;min-height:34px;padding:5px 11px", text: "No original job", onclick: run(() => api("/api/manager/redos/dismiss", { method: "POST", body: JSON.stringify({ saleId: n.saleId }) })) })])])])))])]));
+          el("button", { class: "ghost", "data-act": "find-original", style: "font-size:12px;min-height:34px;padding:5px 11px", text: "Find another job\u2026", onclick: () => { if (slot.firstChild) { slot.innerHTML = ""; return; } slot.appendChild(redoFinder(n, reload)); } }),
+          el("button", { class: "ghost", "data-act": "dismiss-redo", style: "font-size:12px;min-height:34px;padding:5px 11px", text: "No original job", onclick: run(() => api("/api/manager/redos/dismiss", { method: "POST", body: JSON.stringify({ saleId: n.saleId }) })) })]), slot])]); }))])]));
     body.appendChild(el("div", { class: "seg2", role: "tablist" }, [["people", "Who gets the most"], ["recent", "Every redo"], ["reasons", "Why"]].map(([k, l]) => el("button", { class: "tab-btn" + (view === k ? " active" : ""), "data-view": k, role: "tab", onclick: () => { view = k; draw(); }, text: l }))));
     if (view === "people") {
       if (!d.people.length) body.appendChild(el("div", { class: "muted", style: "padding:10px 0", text: "No cars or redos in this period." }));

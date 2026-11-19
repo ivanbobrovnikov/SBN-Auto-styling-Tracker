@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-18-backupfolder";
+const BUILD = "2026-11-19-redocrew";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -5028,11 +5028,12 @@ function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = 
 const REDO_REASONS = ["Contamination (dust or dirt in the film)", "Bubbles or water pockets", "Peeling or lifting edges", "Scratch or damage", "Gap or missed spot", "Wrong cut or size", "Film or product defect", "Coating streaks or high spots", "Customer not happy with the look", "Other", "Not set yet"];
 const redoList = (db) => (db.redos = db.redos || []);
 function redoRoster(db, sale) {
-  const out = [];
-  saleEmployeeIds(sale).forEach((id) => { const e = db.employees.find((x) => x.id === id); out.push({ type: "employee", id, name: e ? e.name : (sale.employeeNames || "Removed employee") }); });
-  (sale.managerHelperIds || []).forEach((id) => { const m = db.managers.find((x) => x.id === id); out.push({ type: "manager", id, name: m ? m.name : "Removed manager" }); });
+  const out = [], seen = new Set(), add = (p) => { const k = `${p.type}:${p.id}`; if (!seen.has(k)) { seen.add(k); out.push(p); } };      // a person listed twice on a job is still ONE person: a redo (or a car worked) is never counted against them twice
+  saleEmployeeIds(sale).forEach((id) => { const e = db.employees.find((x) => x.id === id); add({ type: "employee", id, name: e ? e.name : (sale.employeeNames || "Removed employee") }); });
+  (sale.managerHelperIds || []).forEach((id) => { const m = db.managers.find((x) => x.id === id); add({ type: "manager", id, name: m ? m.name : "Removed manager" }); });
   return out;
 }
+const redoPeopleOnce = (e) => [...new Map((e.people || []).map((p) => [`${p.type}:${p.id}`, p])).values()];      // events logged before this had the same person twice when the job did; they count once
 function redoActorName(db, req) { if (req.auth && req.auth.role === "owner") return "Owner"; const m = (db.managers || []).find((x) => req.auth && x.id === req.auth.id); return m ? m.name : "Manager"; }
 function createRedoEvent(db, orig, body, actor) {
   const roster = redoRoster(db, orig), wanted = Array.isArray(body.people) ? body.people.map(String) : null;
@@ -5062,7 +5063,7 @@ function redoStats(db, query) {
   const events = redoList(db).filter((e) => e.date >= startDay && e.date <= endDay).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.createdAt < b.createdAt ? 1 : -1)));
   const people = new Map(), get = (p) => { const k = `${p.type}:${p.id}`; if (!people.has(k)) people.set(k, { key: k, type: p.type, id: p.id, name: p.name, redos: 0, cars: 0, reasons: {} }); return people.get(k); };
   db.sales.filter((s) => s.status === "arrived" && !s.isRedo && s.date && EASTERN_DAY_FMT.format(new Date(s.date)) >= startDay && EASTERN_DAY_FMT.format(new Date(s.date)) <= endDay).forEach((s) => redoRoster(db, s).forEach((p) => { get(p).cars++; }));
-  events.filter((e) => !e.notFault).forEach((e) => e.people.forEach((p) => { const r = get(p); r.redos++; r.reasons[e.reason] = (r.reasons[e.reason] || 0) + 1; }));
+  events.filter((e) => !e.notFault).forEach((e) => redoPeopleOnce(e).forEach((p) => { const r = get(p); r.redos++; r.reasons[e.reason] = (r.reasons[e.reason] || 0) + 1; }));
   const list = [...people.values()].map((p) => ({ ...p, rate: p.cars ? Math.round((p.redos / p.cars) * 1000) / 10 : null })).sort((a, b) => b.redos - a.redos || (b.rate || 0) - (a.rate || 0) || a.name.localeCompare(b.name));
   const counted = events.filter((e) => !e.notFault), reasonCounts = {}; counted.forEach((e) => { reasonCounts[e.reason] = (reasonCounts[e.reason] || 0) + 1; });
   const carsTotal = db.sales.filter((s) => s.status === "arrived" && !s.isRedo && s.date && EASTERN_DAY_FMT.format(new Date(s.date)) >= startDay && EASTERN_DAY_FMT.format(new Date(s.date)) <= endDay).length;
@@ -5101,6 +5102,21 @@ app.get("/api/manager/redos", requireManager, (req, res) => {
   out.needsLinking = db.sales.filter((s) => s.isRedo && !s.redoNoOriginal && s.status !== "cancelled" && !redoList(db).some((e) => e.redoSaleId === s.id)).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 40)
     .map((s) => ({ saleId: s.id, car: s.car, customerName: s.customerName || "", date: String(s.date || "").slice(0, 10), candidates: redoCandidates(db, s).slice(0, 6).map((o) => ({ id: o.id, car: o.car, date: String(o.date || "").slice(0, 10), people: redoRoster(db, o).map((p) => p.name).join(", ") })) }));
   res.json(out);
+});
+// Find the original job for a redo that isn't tied to one yet, under ANY customer (the suggestions only cover the same customer record, and a redo is often booked under another name or number).
+// Only cars that were actually worked qualify: finished ("arrived"), not themselves a redo, and dated before the redo. Every word typed has to match somewhere (name, phone digits, email, car or title, tech).
+app.get("/api/manager/redos/find-original", requireManager, (req, res) => {
+  const db = loadDB(), redo = db.sales.find((x) => x.id === req.query.redoId && x.isRedo);
+  if (!redo) return res.status(404).json({ error: "Redo not found." });
+  const q = String(req.query.q || "").trim().toLowerCase(), words = q.split(/\s+/).filter(Boolean), at = Date.parse(redo.date);
+  if (q.length < 2) return res.json({ results: [] });
+  const digitsOf = (v) => String(v || "").replace(/\D/g, ""), qd = digitsOf(q), isPhone = qd.length >= 4 && /^[\d\s()+\-.]+$/.test(q);      // "(609) 555-0199", "609-555", "5550199": a phone number, typed any way
+  const results = db.sales.filter((o) => o.id !== redo.id && !o.isRedo && o.status === "arrived" && Date.parse(o.date) < at).filter((o) => {
+    if (isPhone) return digitsOf(o.customerPhone).includes(qd);
+    const hay = [o.customerName, o.customerPhone, o.customerEmail, o.car, o.employeeNames, o.baseService].map((v) => String(v || "").toLowerCase()).join(" ");
+    return words.every((w) => hay.includes(w));
+  }).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 25).map((o) => { const people = redoRoster(db, o).map((p) => p.name); return { id: o.id, car: o.car, customerName: o.customerName || "", customerPhone: o.customerPhone || "", date: String(o.date || "").slice(0, 10), service: o.baseService || "", people: people.join(", "), linkable: people.length > 0 }; });
+  res.json({ results });
 });
 app.get("/api/manager/jobs/:id/redos", requireManager, (req, res) => {
   const db = loadDB(), sale = db.sales.find((s) => s.id === req.params.id);
