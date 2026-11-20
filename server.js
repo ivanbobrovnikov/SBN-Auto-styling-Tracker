@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-19-payperiodfix";
+const BUILD = "2026-11-20-reschedule";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -920,6 +920,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   sale.calendarId = calendarId || sale.calendarId || null;     // saved first, so the redo-calendar rule can see it
   applyTitleRules(db, sale, { priorPrice: priceBeforeUpdate, silent: isNew, allowClosed: true, zeroWhenUnpriced: true, actor: "GHL booking message" }); // a real GHL update for this booking: the title's price wins, paid or not; no price in the title is $0
   autoFlagRescheduleFromTitle(db, sale); // the title says rescheduled, and there is an earlier dead booking: not a new close
+  if (isNew) autoFlagQuickReschedule(db, sale);      // a re-booking right after the earlier one ended (or after a missed day) is that booking moved, not a new close
   sale.calendarId = calendarId || sale.calendarId || null;
   sale.syncedFromGHL = true;
   if (!sale.status) sale.status = "pending";
@@ -1829,6 +1830,7 @@ app.post("/api/webhook/ghl/cancel", (req, res) => {
   if (!wasCancelled) sale.preCancelStatus = sale.status || "pending";       // remembered, so confirming it again in GHL puts it back as it was
   delete sale.cancelledManually;                                            // this cancel came from GHL, not from a person tapping Cancel
   sale.status = "cancelled";
+  if (!wasCancelled) sale.endedAt = new Date().toISOString();                // when it ended, so a re-booking right after can be recognised as a reschedule
   if (!wasCancelled) maybeQueueMissedText(db, sale, "cancelled");
   hookNote(db, { route: "cancelled", outcome: "cancelled", appt: String(payload.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
   saveDB(db);
@@ -1847,6 +1849,7 @@ app.post("/api/webhook/ghl/unconfirm", (req, res) => {
   if (target.ambiguous) { hookNote(db, { route: "unconfirmed", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const sale = target.sale;
   if (!sale) { hookNote(db, { route: "unconfirmed", outcome: "not found", reason: "the tracker has no job for this appointment", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: false }); }
+  if (sale.status !== "unconfirmed") sale.endedAt = new Date().toISOString();
   sale.status = "unconfirmed";
   hookNote(db, { route: "unconfirmed", outcome: "marked unconfirmed", appt: String(payload.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
   saveDB(db);
@@ -3116,6 +3119,55 @@ function reschedulePartnerOf(db, j, byKey) {
     .filter((e) => e.id !== j.id && !isServiced(e) && (isDeadBooking(e) || sameDayOut(e)) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
     .sort((a, b) => (a.date < b.date ? 1 : -1))[0] || null;
 }
+// ===== A RESCHEDULE IS NOT A NEW CLOSE =====
+// A booking that is really an earlier booking MOVED must not count as a new close today, and must not take today as its close time. The title-based rule above only catches a booking whose title says "rescheduled"; a customer who cancels and
+// re-books (or misses the day and re-books) used to count as a brand-new close until somebody flagged it AND corrected the close time by hand.
+//   - Same customer, same car, same service, same rep. The earlier booking was never worked, and it either ENDED (cancelled, no-show, unconfirmed) within the hour before this one arrived, or its appointment time passed with nobody
+//     coming, a few days ago at most (RESCHEDULE_WINDOW_MINUTES and RESCHEDULE_MISSED_DAYS change those). A different car, a different service, a car that was actually worked, or a different rep (it may be a real re-close) is left alone.
+//   - A booking flagged as a reschedule, by this rule or by hand, keeps the ORIGINAL close time (the earlier booking's). A close time the owner typed in is never touched.
+// "Count as a close" still puts one back as a real close, and the owner's decision is never overridden again.
+const RESCHEDULE_WINDOW_MS = (parseFloat(process.env.RESCHEDULE_WINDOW_MINUTES) || 60) * 60000;
+const RESCHEDULE_MISSED_MS = (parseFloat(process.env.RESCHEDULE_MISSED_DAYS) || 3) * 86400000;
+const DEAD_NOW = ["cancelled", "no_show", "unconfirmed"];
+function stampEnded(sale, before) { if (DEAD_NOW.includes(sale.status) && sale.status !== before) sale.endedAt = new Date().toISOString(); }
+function quickReschedulePartner(db, j) {
+  const k = customerKeyOf(j); if (!k) return null;
+  const now = Date.now(), jc = Date.parse(j.closedAt || j.date); let reason = null;
+  const e = db.sales.filter((e) => {
+    if (e.id === j.id || e.isRedo || isServiced(e) || customerKeyOf(e) !== k) return false;
+    if (e.salesRepId && j.salesRepId && e.salesRepId !== j.salesRepId) return false;                 // another rep re-booking it may be a genuine re-close: left for a person
+    if (carsDiffer(e.car, j.car) || !serviceCompat(e.baseService, j.baseService)) return false;
+    if (!(titlesMatch(e.car, j.car) || (vehicleKey(e.car) && vehicleKey(e.car) === vehicleKey(j.car)))) return false;
+    if (!(Date.parse(e.closedAt || e.date) < jc - 60000)) return false;
+    if (e.endedAt && DEAD_NOW.includes(e.status)) { const ago = now - Date.parse(e.endedAt); if (ago >= -60000 && ago <= RESCHEDULE_WINDOW_MS) { e.__why = "rebooked-right-after"; return true; } }
+    if (e.status !== "cancelled" && isDeadBooking(e)) { const since = now - Date.parse(e.date); if (since >= 0 && since <= RESCHEDULE_MISSED_MS) { e.__why = "rebooked-after-miss"; return true; } }
+    return false;
+  }).sort((a, b) => (a.date < b.date ? 1 : -1))[0] || null;
+  if (e) { reason = e.__why; db.sales.forEach((x) => { delete x.__why; }); }
+  return e ? { partner: e, reason } : null;
+}
+function autoFlagQuickReschedule(db, j) {
+  if (!j || j.isReschedule || j.rescheduleDismissed || j.isRedo || j.status === "cancelled" || !j.salesRepId || !afterRevenueStart(j, db)) return false;
+  const found = quickReschedulePartner(db, j); if (!found) return false;
+  j.isReschedule = true; j.rescheduleAutoFlagged = true; j.rescheduleAutoReason = found.reason;
+  if (!db.auditLog) db.auditLog = [];
+  db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: found.reason === "rebooked-right-after" ? "Auto (re-booked right after the earlier booking ended)" : "Auto (re-booked after a missed appointment)", saleId: j.id, car: j.car, field: "Reschedule (not a new close)", oldValue: false, newValue: true });
+  db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
+  keepOriginalCloseTimes(db, j);
+  return true;
+}
+function keepOriginalCloseTimes(db, onlyJob) {
+  const byKey = customerIndex(db), sys = { auth: { label: "Auto (a reschedule keeps its original close time)", role: "system" } }; let fixed = 0;
+  (onlyJob ? [onlyJob] : db.sales.filter((j) => j.isReschedule)).slice().sort((a, b) => ((a.closedAt || "") < (b.closedAt || "") ? -1 : 1)).forEach((j) => {
+    if (!j.isReschedule || j.reschedulesSameDay || j.closedAtSource === "owner" || j.closedAtKept) return;        // a same-day deal has its own rule; a time the owner typed is final
+    const p = reschedulePartnerOf(db, j, byKey) || ((quickReschedulePartner(db, j) || {}).partner);
+    if (!p) return;
+    const orig = p.closedAt || p.date; if (!orig || !(Date.parse(j.closedAt) > Date.parse(orig))) return;
+    const was = j.closedAt; j.closedAtBefore = was; j.closedAtSourceBefore = j.closedAtSource || null; j.closedAt = orig; j.closedAtSource = "reschedule"; j.closedAtKept = p.id;      // the time it had is remembered, so "Count as a close" can put it back
+    logAudit(db, sys, j, "Closed At (kept from the original booking)", was || "", orig); fixed++;
+  });
+  return fixed;
+}
 function findPossibleReschedules(db, days = 7) {
   const cutoff = Date.now() - days * 86400000;
   const byKey = customerIndex(db);
@@ -3259,10 +3311,15 @@ function patchJobHandler(req, res) {
     const flag = !!req.body.isReschedule;
     logAudit(db, req, sale, "Reschedule (not a new close)", !!sale.isReschedule, flag);
     // Put back as a close after the tracker flagged it by itself: that is the owner's decision, so the title is never allowed to flag it again.
-    if (!flag && sale.rescheduleAutoFlagged) sale.rescheduleDismissed = true;
+    if (!flag && (sale.rescheduleAutoFlagged || sale.closedAtKept)) sale.rescheduleDismissed = true;       // "Count as a close" is the owner's decision, whether the tracker flagged it or it was flagged by hand
     sale.rescheduleAutoFlagged = false;
     sale.isReschedule = flag;
     if (flag) { const pp = reschedulePartnerOf(db, sale, customerIndex(db)); if (pp && sameDayOut(pp)) sale.reschedulesSameDay = true; else delete sale.reschedulesSameDay; } else delete sale.reschedulesSameDay;
+    if (flag) keepOriginalCloseTimes(db, sale);       // flagging it as a reschedule also puts back the close time it had before it was moved
+    if (!flag && sale.closedAtKept) {                  // "Count as a close": it counts when it was really closed (the time it had before the original was put back), and is never put back again
+      const wasT = sale.closedAt; sale.closedAt = sale.closedAtBefore || sale.closedAt; sale.closedAtSource = sale.closedAtSourceBefore || "tracker";
+      delete sale.closedAtKept; delete sale.closedAtBefore; delete sale.closedAtSourceBefore; logAudit(db, req, sale, "Closed At (counted as a close again)", wasT || "", sale.closedAt);
+    }
   }
   // "Not a reschedule": the owner looked at a Cleanup suggestion and says it's a genuinely separate deal.
   if (req.body.rescheduleDismissed !== undefined) {
@@ -3362,11 +3419,12 @@ function patchJobHandler(req, res) {
       logAudit(db, req, sale, "Closed At", sale.closedAt, normalized);
       sale.closedAt = normalized;
       sale.closedAtCheck = false;          // someone has now looked at it and set it
-      sale.closedAtSource = "owner";
+      sale.closedAtSource = "owner"; delete sale.closedAtKept; delete sale.closedAtBefore; delete sale.closedAtSourceBefore;      // a time typed in by hand is final: nothing puts an "original" back over it
     }
   }
   const statusBefore = sale.status || "pending";
   if (req.body.status !== undefined) { sale.status = req.body.status; sale.arrivedByComplete = false; if (sale.status === "cancelled") sale.cancelledManually = true; else { delete sale.cancelledManually; delete sale.preCancelStatus; } }      // someone chose the status themselves (a cancel by a person is remembered, so GHL confirming the appointment again never undoes it)
+  if (req.body.status !== undefined) stampEnded(sale, statusBefore);
   if (req.body.status !== undefined && (sale.status === "no_show" || sale.status === "cancelled") && statusBefore !== sale.status) maybeQueueMissedText(db, sale, sale.status);
   if (req.body.completed !== undefined) {
     // A car can't be serviced without having shown up, so marking Service complete also marks a still-waiting car as Arrived. A sales rep's commission
@@ -5029,7 +5087,7 @@ app.post("/api/manager/jobs/merge", requireOwner, (req, res) => {
   if (!r.ok) return res.status(r.status || 400).json({ error: r.error }); saveDB(db); res.json(r);
 });
 app.post("/api/owner/auto-clean", requireOwner, (req, res) => { const out = runAutoMerge(); res.json(out); });
-function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db), b = backfillCloseAppt(db); if (r.count || m.count || l || c || b) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
+function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db), b = backfillCloseAppt(db), k = keepOriginalCloseTimes(db); if (r.count || m.count || l || c || b || k) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
 
 // ===== REDO TRACKING =====
 // A redo record belongs to the ORIGINAL job and to the people who worked it (the techs, and any manager who helped hands-on), because their work is what came back.
@@ -5379,7 +5437,7 @@ app.post("/api/owner/ghl-alignment/fix", requireOwner, async (req, res) => {
   const db = loadDB(), sale = db.sales.find((s) => s.id === first.id), r = alignmentRows(db, sale.contactId, events).find((x) => x.saleId === sale.id), action = (req.body || {}).action;
   if (!r || r.action !== action) return res.status(409).json({ error: "GHL no longer shows that difference, so nothing was changed." });
   const sys = { auth: { label: "GHL comparison (owner)", role: "system" } };
-  if (action === "cancel") { sale.preCancelStatus = sale.status || "pending"; delete sale.cancelledManually; logAudit(db, sys, sale, "Status", sale.status || "pending", "cancelled"); sale.status = "cancelled"; saveDB(db); return res.json({ ok: true }); }
+  if (action === "cancel") { sale.preCancelStatus = sale.status || "pending"; delete sale.cancelledManually; logAudit(db, sys, sale, "Status", sale.status || "pending", "cancelled"); sale.status = "cancelled"; sale.endedAt = new Date().toISOString(); saveDB(db); return res.json({ ok: true }); }
   if (action === "bring-back") { const ev = events.find((e) => e.id === sale.ghlOpportunityId); bringBackMoved(db, sale, evStartMs(ev)); saveDB(db); return res.json({ ok: true }); }
   if (action === "heal") { const out = await syncContactNow(sale.contactId); return res.json({ ok: true, ...(out || {}) }); }
   res.status(400).json({ error: "Unknown action." });
