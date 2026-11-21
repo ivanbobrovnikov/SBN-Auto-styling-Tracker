@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-20-reschedule";
+const BUILD = "2026-11-20-autoprice";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -229,6 +229,7 @@ function applyTitlePricing(db, sale, opts = {}) {
   if ((tp ? tp.total : null) !== (sale.titlePrice == null ? null : sale.titlePrice)) sale.priceMismatchDismissed = false; // a new price in the title is worth another look
   sale.titlePrice = tp ? tp.total : null;
   sale.titleDeposit = tp ? tp.deposit : null;
+  sale.siblingPriced = tp ? false : hasPricedSibling(db, sale, opts.sibIndex);       // is the price carried by another job of this customer's for the same car? (see unpricedByTitle)
   if (!tp) {
     // No price in the title. For a booking that came from GHL that means $0: GHL's opportunity value is kept on record (ghlValue) but is not used as the price.
     // Only when a live GHL event asks for it (zeroWhenUnpriced), only for a job that is still open, and never over a price someone typed in or a finished job.
@@ -277,7 +278,15 @@ function redoFree(s) { return (!!s.isRedo || unpricedByTitle(s)) && saleTotal(s)
 // A booking from GHL whose title has no price is $0 by design (for example the tint that is added to a ceramic coating job is booked as its own
 // appointment, and the price lives on the coating job). It is not a separate sale, so it is treated like a free redo: it needs no payment, isn't counted
 // as a new close and doesn't clutter Cleanup. A job someone added by hand, or whose price was typed in, is never "unpriced".
-function unpricedByTitle(s) { return !!s.ghlOpportunityId && !s.priceLocked && !s.isRedo && s.titlePrice == null; }
+// ...but ONLY when the price really lives on another job: the same customer has a priced job for the same car close by (the coating the tint was added to). A booking whose title simply has no readable price, with nothing like that beside it,
+// is NOT hidden: it is a sale that is missing its price, so it still shows as a close for the rep, still appears in Cleanup as "price needed", and is still caught by an arrival with no price. (Before, any title the reader could not read made the
+// job vanish from the rep's closes and from Cleanup without a word.) s.siblingPriced is worked out whenever the title rules run, and again by the periodic sweep.
+function unpricedByTitle(s) { return !!s.ghlOpportunityId && !s.priceLocked && !s.isRedo && s.titlePrice == null && s.siblingPriced === true; }
+function hasPricedSibling(db, sale, idx) {
+  const k = customerKeyOf(sale); if (!k || !sale.date) return false;
+  const list = (idx || customerIndex(db))[k] || [], at = Date.parse(sale.date);
+  return list.some((e) => e.id !== sale.id && e.status !== "cancelled" && !e.isRedo && ((parseFloat(e.basePrice) || 0) > 0 || e.titlePrice != null) && !carsDiffer(e.car, sale.car) && Math.abs(Date.parse(e.date) - at) <= 60 * 86400000);
+}
 const isFinishedJob = (s) => !!s.paid || !!s.completed || s.status === "arrived" || s.status === "no_show" || s.status === "cancelled";
 const redoCalendarSet = (db) => new Set((db.redoCalendarIds || []).map(String));
 function applyRedoRules(db, sale, opts = {}) {
@@ -5086,7 +5095,27 @@ app.post("/api/manager/jobs/merge", requireOwner, (req, res) => {
   const db = loadDB(), b = req.body || {}, r = mergeJobPair(db, req, b.liveId, b.earlierId, { force: true, label: "Merged back (you said these are the same appointment)" });
   if (!r.ok) return res.status(r.status || 400).json({ error: r.error }); saveDB(db); res.json(r);
 });
-app.post("/api/owner/auto-clean", requireOwner, (req, res) => { const out = runAutoMerge(); res.json(out); });
+app.post("/api/owner/auto-clean", requireOwner, (req, res) => { const out = runAutoMerge(); out.titles = runTitleSweep(); res.json(out); });
+// ===== TITLES ARE READ CONTINUOUSLY =====
+// Every few minutes every job in the working window (booked in the last 60 days or the next 150, plus any job still without a price) has its title read again under the same rules as a booking message: a price that has appeared in the
+// title is picked up, a title's price the reader can now understand is picked up, and the "price lives on another job" flag is kept current. It needs no GHL connection (the title is already here), changes nothing a person typed
+// (a locked price), nothing on a cancelled job, and a paid or completed job's existing price stays history; it only fills a blank there. And a close from the last 45 minutes that is still without a price has its customer re-read from GHL (when that is
+// connected), since the price is often typed into the title a minute after the booking. PRICE_SWEEP_MINUTES changes how often (default 3); 0 turns it off.
+const PRICE_SWEEP_MS = (process.env.PRICE_SWEEP_MINUTES !== undefined && process.env.PRICE_SWEEP_MINUTES !== "" ? parseFloat(process.env.PRICE_SWEEP_MINUTES) : 3) * 60000;
+function runTitleSweep() {
+  const db = loadDB(), idx = customerIndex(db), now = Date.now(); let changed = 0; const fresh = [];
+  db.sales.forEach((sale) => {
+    if (!sale.car) return;
+    const at = Date.parse(sale.date), inWindow = !isNaN(at) && at >= now - 60 * 86400000 && at <= now + 150 * 86400000, gap = !((parseFloat(sale.basePrice) || 0) > 0);
+    if (!inWindow && !gap) return;                                 // an old job that has its price is history
+    const sib = sale.siblingPriced, price = sale.basePrice, redo = !!sale.isRedo;
+    if (applyTitleRules(db, sale, { sibIndex: idx }) || sale.siblingPriced !== sib || sale.basePrice !== price || !!sale.isRedo !== redo) changed++;
+    if (sale.salesRepId && gap && sale.titlePrice == null && !sale.isRedo && !sale.priceLocked && sale.status !== "cancelled" && sale.contactId && Date.parse(sale.closedAt) > now - 45 * 60000) fresh.push(sale.contactId);
+  });
+  if (changed) saveDB(db);
+  if (ghlConfigured()) [...new Set(fresh)].slice(0, 8).forEach((c) => scheduleContactSync(c, 0));
+  return { changed, fresh: fresh.length };
+}
 function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db), b = backfillCloseAppt(db), k = keepOriginalCloseTimes(db); if (r.count || m.count || l || c || b || k) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
 
 // ===== REDO TRACKING =====
@@ -6169,6 +6198,7 @@ const server = app.listen(PORT, () => {
   // directly, on its own, every 30 minutes, no manual click required.
   setTimeout(runTitleSync, 30 * 1000);
   setInterval(runTitleSync, 10 * 60 * 1000);
+  if (PRICE_SWEEP_MS > 0) { setTimeout(() => { try { runTitleSweep(); } catch (e) { console.error("title sweep failed:", e.message); } }, 25 * 1000); setInterval(() => { try { runTitleSweep(); } catch (e) { console.error("title sweep failed:", e.message); } }, PRICE_SWEEP_MS); }
   setTimeout(runAutoMerge, 20 * 1000);                 // duplicates already in the system are cleaned up by themselves, now and every 10 minutes
   setInterval(runAutoMerge, 10 * 60 * 1000);
   // The full check against GHL used to run only when someone pressed "Check GHL now". It now runs by itself, so a no-show that GHL moved to a new day (which GHL never announces) comes back on its own.
