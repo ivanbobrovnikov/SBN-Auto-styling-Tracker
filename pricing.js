@@ -150,4 +150,14 @@ function looseTotal(t, knownDeposit) {
   return null;
 }
 
-module.exports = { parseTitlePricing };
+// Does the title write an amount at all: a number with a $ sign, or a bare number that is not a year, a percentage, a size or a time. Used only to tell "no price was ever written in this title"
+// from "something that could be a price is written but I can't tell", for the report on why prices are missing. (A model number like "GLC 300" counts, so that report says "may be".)
+function titleMentionsAmount(title) {
+  const t = String(title || "");
+  if (/\$\s*\d/.test(t) || /\d\s*\$/.test(t)) return true;
+  const re = new RegExp(`(^|[^\\w$.,#/:])(${NUM})(?![\\w%.:])(?!\\s*(?:%|ft\\b|in\\b|inch|windows?|doors?|am\\b|pm\\b|x\\b|yr|year))`, "gi");
+  for (let m = re.exec(t); m; m = re.exec(t)) { const v = toNumber(m[2]); if (v >= 50 && v <= 250000 && !looksLikeYear(v)) return true; }
+  return false;
+}
+
+module.exports = { parseTitlePricing, titleMentionsAmount };

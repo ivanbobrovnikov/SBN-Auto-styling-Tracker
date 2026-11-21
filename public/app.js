@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-20-autoprice";
+const UI_BUILD = "2026-11-20-pricewhy";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -3601,6 +3601,26 @@ async function renderCleanup(content) {
     });
   };
   drawCredit();
+  // WHY PRICES ARE MISSING: jobs with a rep and no price, and the reason for each, from what this shop has actually received (see the server's priceHealth).
+  const priceCard = el("div", { class: "card", "data-part": "price-health" });
+  content.appendChild(priceCard);
+  (async () => {
+    let r; try { r = await api("/api/owner/price-health"); } catch (e) { return; }
+    priceCard.innerHTML = "";
+    if (!r.total) { priceCard.appendChild(el("div", { "data-part": "price-clear", style: "color:var(--green);font-weight:600;font-size:14px", text: "\u2713 Every job from the last 30 days and upcoming has a price (or is part of another job that does)" })); if (!r.configured) priceCard.appendChild(el("div", { "data-part": "price-ghl", style: "color:var(--warn);font-size:12.5px;margin-top:6px", text: "The live link to GHL is not set up on this shop, so a price typed into a title in GHL after booking can't reach here." })); return; }
+    priceCard.appendChild(el("div", { style: "font-weight:700;color:var(--warn);margin-bottom:2px", text: `${r.total} job${r.total === 1 ? "" : "s"} with a rep and no price (${r.upcoming} upcoming)` }));
+    const line = (t, c, part) => priceCard.appendChild(el("div", { class: c || "muted", "data-part": part || "price-line", style: "font-size:12.5px;margin:3px 0" + (c === "warn" ? ";color:var(--warn)" : ""), text: t }));
+    if (r.none) line(`${r.none}: no price is written in any title this shop has received. The price has to be typed into the title in GHL.`);
+    if (r.unsure) line(`${r.unsure}: a number is written but it can't be told to be the price (it may be a model number). Check these.`);
+    if (r.configured) line(`Live link to GHL: connected${r.lastRunAt ? ", last full check " + formatDateTime(r.lastRunAt) : ""}. Jobs still without a price are asked about again every few minutes, so a title edited in GHL arrives by itself.`);
+    else line("Live link to GHL: NOT SET UP on this shop. A price typed into the title in GHL after the booking can never reach it. Add GHL_API_TOKEN and GHL_LOCATION_ID in Railway Variables.", "warn", "price-ghl");
+    const list = el("div", { "data-part": "price-list", style: "display:none;margin-top:6px" }), toggle = el("button", { type: "button", class: "ghost", "data-act": "price-toggle", style: "min-height:36px;padding:0 12px;margin-top:6px", text: "Show these jobs", onclick: () => { const open = list.style.display !== "none"; list.style.display = open ? "none" : ""; toggle.textContent = open ? "Show these jobs" : "Hide these jobs"; } });
+    r.examples.forEach((x) => list.appendChild(el("div", { "data-part": "price-row", style: "border-top:1px solid var(--line);padding:8px 0" }, [
+      el("div", { style: "font-weight:500;word-break:break-word", text: x.car || "(no title)" }),
+      el("div", { class: "muted", style: "font-size:12px", text: `${new Date(x.date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" })} \u00B7 ${x.repName || "no rep"} \u00B7 ${x.kind === "unsure" ? "a number is written, can't tell if it's the price" : "no price written"}` }),
+      x.earlier.length ? el("div", { class: "muted", style: "font-size:11.5px", text: "Earlier title: " + x.earlier[x.earlier.length - 1] }) : null])));
+    priceCard.appendChild(toggle); priceCard.appendChild(list);
+  })();
   // The live link to GHL: whether the tracker is mirroring GHL (edits and calendar moves), and a button to check right now.
   const ghlCard = el("div", { class: "card", "data-part": "ghl-card" });
   content.appendChild(ghlCard);

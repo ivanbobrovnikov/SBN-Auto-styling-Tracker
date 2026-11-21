@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-20-autoprice";
+const BUILD = "2026-11-20-pricewhy";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -205,7 +205,7 @@ function inRange(dateStr, start, end) {
 function saleUpsellTotal(sale) {
   return (sale.upsells || []).reduce((a, u) => a + (parseFloat(u.price) || 0), 0);
 }
-const { parseTitlePricing } = require("./pricing");
+const { parseTitlePricing, titleMentionsAmount } = require("./pricing");
 const { titleSaysReschedule, titleSaysRedo } = require("./titlewords");
 function saleTotal(sale) {
   return (parseFloat(sale.basePrice) || 0) + saleUpsellTotal(sale);
@@ -227,6 +227,7 @@ function titleIsTotalWithUpsells(sale, titleTotal) {
 function applyTitlePricing(db, sale, opts = {}) {
   const tp = parseTitlePricing(sale.car);
   if ((tp ? tp.total : null) !== (sale.titlePrice == null ? null : sale.titlePrice)) sale.priceMismatchDismissed = false; // a new price in the title is worth another look
+  { const lg = sale.titleLog || (sale.titleLog = []); if (sale.car && (!lg.length || lg[lg.length - 1].t !== sale.car)) { lg.push({ t: sale.car, at: new Date().toISOString() }); if (lg.length > 4) lg.shift(); } }      // the last few titles this job has had, for "why is the price missing"
   sale.titlePrice = tp ? tp.total : null;
   sale.titleDeposit = tp ? tp.deposit : null;
   sale.siblingPriced = tp ? false : hasPricedSibling(db, sale, opts.sibIndex);       // is the price carried by another job of this customer's for the same car? (see unpricedByTitle)
@@ -1758,10 +1759,15 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
   if (pool.length > 1 && syncCar) { const byCar = pool.filter((s) => titlesMatch(s.car, syncCar)); if (byCar.length) pool = byCar; }
   const sale = pool.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const before = { basePrice: sale.basePrice, salesRepName: sale.salesRepName };
-  if (basePrice !== undefined) {
-    sale.ghlValue = parseFloat(basePrice) || 0;       // kept on record only. It used to be written over the job's price, even a job that was already paid; the TITLE sets the price
-    applyTitleRules(db, sale, { priorPrice: before.basePrice, allowClosed: true, zeroWhenUnpriced: true });
+  // The message carries the job's CURRENT title. It used to be used only to pick the job and was then thrown away, so a price typed into the title in GHL after the booking never arrived by this route. Now the new title is taken when it is plainly
+  // this job's title being edited (the same car, the same words), never over a title someone edited by hand here, and never on a cancelled job.
+  let titleTook = false;
+  const incomingTitle = String(syncCar || "").trim();
+  if (incomingTitle && !sale.titleLocked && sale.status !== "cancelled" && incomingTitle !== String(sale.car || "").trim() && !carsDiffer(sale.car, incomingTitle) && titlesMatch(sale.car, incomingTitle)) {
+    logAudit(db, { auth: { label: "GHL sync message", role: "system" } }, sale, "Car/Title", sale.car, incomingTitle); sale.car = incomingTitle; titleTook = true;
   }
+  if (basePrice !== undefined) sale.ghlValue = parseFloat(basePrice) || 0;       // kept on record only. It used to be written over the job's price, even a job that was already paid; the TITLE sets the price
+  if (basePrice !== undefined || titleTook) applyTitleRules(db, sale, { priorPrice: before.basePrice, allowClosed: true, zeroWhenUnpriced: true });
   const attribution = resolveSalesRepAttribution(db, salesRepName, sale.car);
   if (attribution) {
     sale.salesRepId = attribution.salesRepId; sale.salesRepName = attribution.salesRepName; sale.isWalkIn = attribution.isWalkIn;
@@ -5096,6 +5102,20 @@ app.post("/api/manager/jobs/merge", requireOwner, (req, res) => {
   if (!r.ok) return res.status(r.status || 400).json({ error: r.error }); saveDB(db); res.json(r);
 });
 app.post("/api/owner/auto-clean", requireOwner, (req, res) => { const out = runAutoMerge(); out.titles = runTitleSweep(); res.json(out); });
+// ===== WHY IS THE PRICE MISSING =====
+// For every job with a sales rep that has no price (the last 30 days and the next 90), say WHY, from what this shop has actually received: no price was written in any title it has seen, or a number is written that the reader can't be
+// sure is the price (a model number looks the same), and whether the live link to GHL is connected at all, since without it a price typed into the title in GHL after the booking can never arrive. A job that is only an add-on to another priced job is not counted.
+function priceHealth(db) {
+  const now = Date.now(), lo = now - 30 * 86400000, hi = now + 90 * 86400000;
+  const rows = db.sales.filter((s) => s.salesRepId && s.status !== "cancelled" && !s.isRedo && !s.priceLocked && !((parseFloat(s.basePrice) || 0) > 0) && !redoFree(s) && afterRevenueStart(s, db) && Date.parse(s.date) >= lo && Date.parse(s.date) <= hi).map((s) => {
+    const titles = (s.titleLog || []).map((x) => x.t); if (!titles.includes(s.car)) titles.push(s.car);
+    const rep = db.salesReps.find((r) => r.id === s.salesRepId);
+    return { id: s.id, car: s.car || "", date: s.date, repName: rep ? rep.name : (s.salesRepName || ""), status: s.status || "pending", kind: titles.some(titleMentionsAmount) ? "unsure" : "none", earlier: titles.filter((t) => t !== s.car).slice(-2), readAt: s.titleReadAt || null };
+  }).sort((a, b) => (a.date < b.date ? 1 : -1));
+  return { location: SHOP_LOCATION_LABEL, configured: ghlConfigured(), lastRunAt: ghlLast.at, total: rows.length, none: rows.filter((r) => r.kind === "none").length, unsure: rows.filter((r) => r.kind === "unsure").length, upcoming: rows.filter((r) => Date.parse(r.date) >= now).length, examples: rows.slice(0, 40) };
+}
+app.get("/api/owner/price-health", requireOwner, (req, res) => res.json(priceHealth(loadDB())));
+app.get("/api/cross-location/price-health", (req, res) => { if (req.query.secret !== CROSS_LOCATION_SECRET) return res.status(401).json({ error: "Bad secret." }); res.json(priceHealth(loadDB())); });
 // ===== TITLES ARE READ CONTINUOUSLY =====
 // Every few minutes every job in the working window (booked in the last 60 days or the next 150, plus any job still without a price) has its title read again under the same rules as a booking message: a price that has appeared in the
 // title is picked up, a title's price the reader can now understand is picked up, and the "price lives on another job" flag is kept current. It needs no GHL connection (the title is already here), changes nothing a person typed
@@ -5110,11 +5130,19 @@ function runTitleSweep() {
     if (!inWindow && !gap) return;                                 // an old job that has its price is history
     const sib = sale.siblingPriced, price = sale.basePrice, redo = !!sale.isRedo;
     if (applyTitleRules(db, sale, { sibIndex: idx }) || sale.siblingPriced !== sib || sale.basePrice !== price || !!sale.isRedo !== redo) changed++;
-    if (sale.salesRepId && gap && sale.titlePrice == null && !sale.isRedo && !sale.priceLocked && sale.status !== "cancelled" && sale.contactId && Date.parse(sale.closedAt) > now - 45 * 60000) fresh.push(sale.contactId);
+    // still no price: ask GHL what this customer's appointment is called NOW (the price is often typed into the title after the booking). The newest closes first, then the others in turn, each at most every 20 minutes, a few customers per pass.
+    if (sale.salesRepId && gap && sale.titlePrice == null && !sale.siblingPriced && !sale.isRedo && !sale.priceLocked && sale.status !== "cancelled" && sale.contactId) {
+      const isFresh = Date.parse(sale.closedAt) > now - 45 * 60000, lastRead = Date.parse(sale.titleReadAt) || 0;
+      if (isFresh || now - lastRead > 20 * 60000) fresh.push({ sale, isFresh, lastRead });
+    }
   });
+  let asked = 0;
+  if (ghlConfigured()) {
+    const seen = new Set();
+    fresh.sort((a, b) => (a.isFresh === b.isFresh ? a.lastRead - b.lastRead : a.isFresh ? -1 : 1)).forEach((f) => { if (asked >= 8 || seen.has(f.sale.contactId)) return; seen.add(f.sale.contactId); f.sale.titleReadAt = new Date().toISOString(); asked++; changed++; scheduleContactSync(f.sale.contactId, 0); });
+  }
   if (changed) saveDB(db);
-  if (ghlConfigured()) [...new Set(fresh)].slice(0, 8).forEach((c) => scheduleContactSync(c, 0));
-  return { changed, fresh: fresh.length };
+  return { changed, waiting: fresh.length, asked };
 }
 function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db), b = backfillCloseAppt(db), k = keepOriginalCloseTimes(db); if (r.count || m.count || l || c || b || k) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
 
