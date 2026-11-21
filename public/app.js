@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-20-pricewhy";
+const UI_BUILD = "2026-11-20-sameday";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -2485,14 +2485,14 @@ async function renderCommissionAudit(content) {
         const list = el("div", { style: "display:none;margin-top:6px;padding-left:8px;border-left:2px solid var(--amber)" }, activity.leftOut.map((c) => el("div", { class: "row", style: "font-size:11.5px;margin-bottom:6px" }, [
           el("div", {}, [
             el("div", { text: c.car || "(no car)" }),
-            el("div", { class: "muted", style: "font-size:10.5px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · closed ${formatDateTime(c.closedAt)} · scheduled ${formatDateTime(c.date)}${c.kind === "same-day" ? " · same-day, didn't show" : c.auto ? (c.autoReason === "same-day-rebook" ? " · flagged automatically (a same-day re-booking of a no-show)" : " · flagged automatically (the title says rescheduled)") : ""}` }),
+            el("div", { class: "muted", style: "font-size:10.5px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · closed ${formatDateTime(c.closedAt)} · scheduled ${formatDateTime(c.date)}${c.kind === "same-day" ? " · same-day, no deposit, didn't show" : c.auto ? (c.autoReason === "same-day-rebook" ? " · flagged automatically (a same-day re-booking of a no-show)" : " · flagged automatically (the title says rescheduled)") : ""}` }),
           ]),
           el("div", { style: "text-align:right" }, [
             el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
           ]),
         ])));
         const nSD = activity.leftOut.filter((c) => c.kind === "same-day").length, nRe = n - nSD;
-        const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} booking${n !== 1 ? "s" : ""} left out of closing activity: ${[nRe ? `${nRe} rescheduled (still paid when the client shows)` : "", nSD ? `${nSD} same-day that didn't show (counts again if the customer does)` : ""].filter(Boolean).join(", ")}. Change it in the rep tracker's Audit tab.`;
+        const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} booking${n !== 1 ? "s" : ""} left out of closing activity: ${[nRe ? `${nRe} rescheduled (still paid when the client shows)` : "", nSD ? `${nSD} same-day with no deposit that didn't show (counts again if the customer does)` : ""].filter(Boolean).join(", ")}. Change it in the rep tracker's Audit tab.`;
         const toggle = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12px;margin-top:8px;color:var(--amber)", text: label(false), onclick: () => {
           const open = list.style.display !== "none";
           list.style.display = open ? "none" : "block";
@@ -2580,7 +2580,7 @@ async function renderCommissionAudit(content) {
               el("div", { class: "muted", style: "font-size:12.5px", text: r.customerName || "" }),
               el("div", { class: "muted", style: "font-size:11.5px", text: `Closed: ${r.closedAtEastern} — ${r.duringHours ? "in-hours" : "after-hours"} (${r.rateApplied}%)` }),
               r.isReschedule ? el("div", { style: "font-size:11px;color:var(--amber)", text: "↻ Reschedule: left out of closing activity, still paid when the client shows" }) : null,
-              r.sameDayOut ? el("div", { style: "font-size:11px;color:var(--amber)", "data-part": "same-day-note", text: "↻ Same-day booking that didn't show: not counted as a close (counts again if the customer shows). Still a job for the VA, and still paid if they show." }) : null,
+              r.sameDayOut ? el("div", { style: "font-size:11px;color:var(--amber)", "data-part": "same-day-note", text: "↻ Same-day booking with no deposit that didn't show: not counted as a close (a deposit would have counted it; it counts again if the customer shows). Still a job for the VA, and still paid if they show." }) : null,
               r.closedAtCheck ? el("div", { style: "font-size:11px;color:var(--amber)", text: "⚠ This time is when the booking reached the tracker, not a confirmed close time. If it was closed earlier, set the real time below and press Save (pressing Save on a correct time confirms it)." }) : null,
               el("div", { style: "display:flex;gap:6px;align-items:center;margin-top:4px" }, [closedAtInput, saveClosedAtBtn]),
             ]),

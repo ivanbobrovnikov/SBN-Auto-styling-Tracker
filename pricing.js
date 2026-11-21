@@ -47,6 +47,13 @@ function parseTitlePricing(title) {
   for (let m = depoAfter.exec(t); m; m = depoAfter.exec(t)) deposits.push({ start: m.index + m[1].length, end: m.index + m[0].length, value: toNumber(m[2]) });
   const depoBefore = new RegExp(`depo(?:sit)?\\s*:?\\s*\\$?\\s*(${NUM})`, "gi");
   for (let m = depoBefore.exec(t); m; m = depoBefore.exec(t)) deposits.push({ start: m.index, end: m.index + m[0].length, value: toNumber(m[1]) });
+  // Two amounts either side of the word: "$50 Depo $199", "50 depo 199", "$199 Depo $50". The deposit is always the SMALLER one and the price the larger, so it does not matter which side of "depo" each is on.
+  // Only when that really is the end of the price (nothing but a note about the visit after it), neither is a year, and a "%" or a size after the second one never counts ("50 depo 35% tint").
+  { const around = new RegExp(`(^|[^\\w$.,])(\\$?)\\s*(${NUM})\\s*depo(?:sit)?\\s*[-:,]?\\s*\\$?\\s*(${NUM})(?![\\w.%])(?=\\s*(?:$|[-\\u2013\\u2014,;.)]|(?:${VISIT_NOTE})\\b))`, "i").exec(t);
+    if (around) {
+      const a = toNumber(around[3]), b = toNumber(around[4]), yearLike = !around[2] && looksLikeYear(a);
+      if (!yearLike && a >= 10 && b >= 10 && a !== b && Math.max(a, b) <= 250000) { const total = Math.max(a, b), dep = Math.min(a, b); return { total: round2(total), deposit: round2(dep), balance: round2(total - dep) }; }
+    } }
   if (deposits.length > 0) {
     const dep = deposits.sort((a, b) => a.start - b.start)[deposits.length - 1];
     const amounts = [];

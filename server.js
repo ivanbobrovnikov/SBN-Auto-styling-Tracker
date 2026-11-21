@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-20-pricewhy";
+const BUILD = "2026-11-20-sameday";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -713,12 +713,19 @@ function isSameDayDeal(s) {
 const showedUp = (s) => s.status === "arrived" || !!s.paid || !!s.completed;
 // A booking flagged as a reschedule is normally NOT a new close. The exception: it re-books a same-day deal that had lapsed (so that deal's own close is out), and the customer has now come in: then it carries the credit.
 const resched = (s) => !!s.isReschedule && !(s.reschedulesSameDay && showedUp(s));
-function sameDayOut(s, nowMs) {                                               // true = this deal does NOT count as a close right now
+// A same-day deal whose time has come and gone without the car coming in (marked a no-show, or two hours past the appointment). Whether it COUNTS is a separate question: see sameDayOut.
+function sameDayLapsed(s, nowMs) {
   if (s.sameDayExempt || s.status === "cancelled" || !isSameDayDeal(s) || showedUp(s)) return false;
   return s.status === "no_show" || (nowMs || Date.now()) > apptAtClose(s) + SAME_DAY_GRACE_MS;
 }
+// A same-day deal with NO deposit that doesn't show doesn't count as a close. One with a DEPOSIT taken (the title says "-$50depo") does count toward closed value, whether the customer shows, doesn't, or reschedules:
+// the money is already in. (It counts on the day it was closed, never moved to the day they show.)
+function sameDayOut(s, nowMs) {                                               // true = this deal does NOT count as a close right now
+  return depositOf(s) <= 0 && sameDayLapsed(s, nowMs);
+}
 // The moment a deal counts as closed: when it was closed, unless it is a same-day deal that did not show on time and came in later (after a reschedule): then the day it showed.
 function closeTime(s) {
+  if (depositOf(s) > 0) return s.closedAt || s.date;                         // a deposit was taken: it was closed when it was closed, on the day it showed or not
   if (s.isReschedule && s.reschedulesSameDay && showedUp(s)) return s.date;
   if (isSameDayDeal(s) && showedUp(s) && Date.parse(s.date) > apptAtClose(s) + SAME_DAY_GRACE_MS) return s.date;
   return s.closedAt || s.date;
@@ -3131,7 +3138,7 @@ function reschedulePartnerOf(db, j, byKey) {
   if (!k) return null;
   const closedMs = Date.parse(j.closedAt || j.date);
   return (byKey[k] || [])
-    .filter((e) => e.id !== j.id && !isServiced(e) && (isDeadBooking(e) || sameDayOut(e)) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
+    .filter((e) => e.id !== j.id && !isServiced(e) && (isDeadBooking(e) || sameDayLapsed(e)) && Date.parse(e.closedAt || e.date) < closedMs - 60000 && titlesMatch(e.car, j.car))
     .sort((a, b) => (a.date < b.date ? 1 : -1))[0] || null;
 }
 // ===== A RESCHEDULE IS NOT A NEW CLOSE =====
@@ -3155,7 +3162,7 @@ function quickReschedulePartner(db, j) {
     if (!(titlesMatch(e.car, j.car) || (vehicleKey(e.car) && vehicleKey(e.car) === vehicleKey(j.car)))) return false;
     if (!(Date.parse(e.closedAt || e.date) < jc - 60000)) return false;
     if (e.endedAt && DEAD_NOW.includes(e.status)) { const ago = now - Date.parse(e.endedAt); if (ago >= -60000 && ago <= RESCHEDULE_WINDOW_MS) { e.__why = "rebooked-right-after"; return true; } }
-    if (e.status !== "cancelled" && isDeadBooking(e)) { const since = now - Date.parse(e.date); if (since >= 0 && since <= RESCHEDULE_MISSED_MS) { e.__why = "rebooked-after-miss"; return true; } }
+    if (e.status !== "cancelled" && (isDeadBooking(e) || sameDayLapsed(e))) { const since = now - Date.parse(e.date); if (since >= 0 && since <= RESCHEDULE_MISSED_MS) { e.__why = "rebooked-after-miss"; return true; } }
     return false;
   }).sort((a, b) => (a.date < b.date ? 1 : -1))[0] || null;
   if (e) { reason = e.__why; db.sales.forEach((x) => { delete x.__why; }); }
@@ -3165,6 +3172,7 @@ function autoFlagQuickReschedule(db, j) {
   if (!j || j.isReschedule || j.rescheduleDismissed || j.isRedo || j.status === "cancelled" || !j.salesRepId || !afterRevenueStart(j, db)) return false;
   const found = quickReschedulePartner(db, j); if (!found) return false;
   j.isReschedule = true; j.rescheduleAutoFlagged = true; j.rescheduleAutoReason = found.reason;
+  if (sameDayOut(found.partner)) j.reschedulesSameDay = true;          // that same-day deal (no deposit) is out: this booking carries its credit when the customer shows. With a deposit the earlier deal already counts, so this one is simply left out.
   if (!db.auditLog) db.auditLog = [];
   db.auditLog.unshift({ id: newId(), timestamp: new Date().toISOString(), actor: found.reason === "rebooked-right-after" ? "Auto (re-booked right after the earlier booking ended)" : "Auto (re-booked after a missed appointment)", saleId: j.id, car: j.car, field: "Reschedule (not a new close)", oldValue: false, newValue: true });
   db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
@@ -5429,19 +5437,35 @@ function scheduleContactSync(contactId, delayMs) {
 // "Check GHL now": every customer with an open job from two weeks back to three months ahead.
 let ghlHealRunning = false;
 const ghlEveryMinutes = () => { const v = process.env.GHL_CHECK_MINUTES; const n = v === undefined || v === "" ? 15 : Number(v); return Number.isFinite(n) && n >= 0 ? n : 15; };      // how often it checks by itself (15 minutes unless set; 0 turns it off)
+// Which customers to check against GHL, most urgent first. The window is long (jobs from 14 days ago to 90 days ahead, dead ones back 60 days) and new jobs sit at the END of the data, so cutting the list at its first 300 meant that on a busy
+// shop the NEWEST bookings were never checked: a price typed into a title later, a moved appointment, a rescheduled same-day deal. Now: 1) a job with no price, a same-day deal that didn't show, a no-show from the last 3 days, or any job within
+// 3 days either way; 2) the next three weeks; 3) the rest, and inside each group whoever was checked longest ago, so every customer is reached in turn.
+const healSeen = new Map(), HEAL_BATCH = parseInt(process.env.GHL_HEAL_BATCH, 10) || 300, HEAL_PAUSE_MS = process.env.GHL_HEAL_PAUSE_MS !== undefined && process.env.GHL_HEAL_PAUSE_MS !== "" ? parseInt(process.env.GHL_HEAL_PAUSE_MS, 10) : 150;
+function ghlContactsToCheck(db, limit) {
+  const now = Date.now(), DAY = 86400000, lo = now - 14 * DAY, loDead = now - 60 * DAY, hi = now + 90 * DAY, dead = (s) => s.status === "no_show" || s.status === "cancelled", tier = new Map();
+  db.sales.forEach((s) => {
+    if (!s.contactId || s.isRedo) return;
+    const at = Date.parse(s.date); if (isNaN(at) || at > hi || at < (dead(s) ? loDead : lo)) return;
+    const gap = s.salesRepId && !((parseFloat(s.basePrice) || 0) > 0) && s.titlePrice == null && !s.siblingPriced && s.status !== "cancelled" && !s.priceLocked;
+    let t = 2;
+    if (gap || (sameDayLapsed(s) && at > now - 3 * DAY) || (s.status === "no_show" && at > now - 3 * DAY) || Math.abs(at - now) <= 3 * DAY) t = 0; else if (at >= now - 14 * DAY && at <= now + 21 * DAY) t = 1;
+    if (!tier.has(s.contactId) || t < tier.get(s.contactId)) tier.set(s.contactId, t);
+  });
+  return [...tier.entries()].sort((a, b) => a[1] - b[1] || (healSeen.get(a[0]) || 0) - (healSeen.get(b[0]) || 0)).slice(0, limit).map((x) => x[0]);
+}
 async function runGhlHeal() {
   if (!ghlConfigured()) return { configured: false };
   if (ghlHealRunning) return { configured: true, busy: true, checked: 0, titles: 0, times: 0, calendars: 0, merged: 0, revived: 0, mergedNames: [], revivedNames: [], unreadable: 0 };
   ghlHealRunning = true;
   try {
     const db0 = loadDB(), now = Date.now(), lo = now - 14 * 86400000, loDead = now - 60 * 86400000, hi = now + 90 * 86400000, dead = (s) => s.status === "no_show" || s.status === "cancelled";
-    const contacts = [...new Set(db0.sales.filter((s) => s.contactId && !s.isRedo && Date.parse(s.date) <= hi && Date.parse(s.date) >= (dead(s) ? loDead : lo)).map((s) => s.contactId))].slice(0, 300);
+    const contacts = ghlContactsToCheck(db0, HEAL_BATCH);
     const total = { configured: true, checked: 0, titles: 0, times: 0, calendars: 0, merged: 0, revived: 0, mergedNames: [], revivedNames: [], unreadable: 0 };
     for (const c of contacts) {
       const r = await syncContactNow(c);
       if (!r) { total.unreadable++; continue; }
-      total.checked++; ["titles", "times", "calendars", "merged", "revived"].forEach((k) => { total[k] += r[k]; }); total.mergedNames.push(...r.mergedNames); total.revivedNames.push(...r.revivedNames);
-      await new Promise((res) => setTimeout(res, 150));
+      total.checked++; healSeen.set(c, Date.now()); ["titles", "times", "calendars", "merged", "revived"].forEach((k) => { total[k] += r[k]; }); total.mergedNames.push(...r.mergedNames); total.revivedNames.push(...r.revivedNames);
+      if (HEAL_PAUSE_MS > 0) await new Promise((res) => setTimeout(res, HEAL_PAUSE_MS));
     }
     ghlLast = { at: new Date().toISOString(), result: { checked: total.checked, titles: total.titles, times: total.times, calendars: total.calendars, merged: total.merged, revived: total.revived, unreadable: total.unreadable } };
     return total;
@@ -5476,7 +5500,7 @@ function alignmentRows(db, contactId, events) {
 async function ghlAlignmentReport() {
   if (!ghlConfigured()) return { configured: false };
   const db = loadDB(), now = Date.now(), lo = now - 14 * 86400000, loDead = now - 60 * 86400000, hi = now + 90 * 86400000, dead = (s) => s.status === "no_show" || s.status === "cancelled";
-  const contacts = [...new Set(db.sales.filter((s) => s.contactId && !s.isRedo && Date.parse(s.date) <= hi && Date.parse(s.date) >= (dead(s) ? loDead : lo)).map((s) => s.contactId))].slice(0, 300);
+  const contacts = ghlContactsToCheck(db, 300);
   const rows = []; let checked = 0, unreadable = 0;
   for (const c of contacts) {
     const events = await ghlEventsFor(c); if (!events) { unreadable++; continue; } checked++;
