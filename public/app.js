@@ -90,7 +90,7 @@ const el = (tag, attrs = {}, children = []) => {
   return e;
 };
 // Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
-const UI_BUILD = "2026-11-25-onedeal";
+const UI_BUILD = "2026-11-25-sameappt";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -5178,7 +5178,7 @@ function renderHookLog(content) {
       el("div", { class: "row", style: "gap:8px;align-items:baseline" }, [el("span", { class: "muted", style: "font-size:11.5px", text: `${when(e.at)} \u00B7 ${routeName[e.route] || e.route}` }), el("b", { style: `font-size:12.5px;color:${color(e.outcome)}`, text: e.outcome + (e.count > 1 ? ` \u00D7${e.count}` : "") })]),
       (e.customer || e.car) ? el("div", { style: "font-size:12.5px;margin-top:2px", text: [e.customer, e.car].filter(Boolean).join(" \u00B7 ") }) : null,
       (e.reason || e.merged) ? el("div", { class: "muted", style: "font-size:11.5px;margin-top:2px", text: [e.reason, e.merged ? "folded into an earlier job for the same car" : ""].filter(Boolean).join(" \u00B7 ") }) : null,
-      e.appt ? el("div", { class: "muted", "data-part": "hook-id", style: "font-size:11px;margin-top:2px;word-break:break-all", text: "ID: " + e.appt + (e.contactId ? " \u00B7 contact: " + e.contactId : "") }) : null,       // the ID GHL sent: a cancel only finds a job whose booking carried the SAME ID
+      e.appt ? el("div", { class: "muted", "data-part": "hook-id", style: "font-size:11px;margin-top:2px;word-break:break-all", text: "ID: " + e.appt + (e.apptId && e.apptId !== e.appt ? " \u00B7 appointment: " + e.apptId : "") + (e.contactId ? " \u00B7 contact: " + e.contactId : "") }) : null,       // the ID GHL sent: a cancel only finds a job whose booking carried the SAME ID
     ])));
   }
   box.appendChild(el("div", { class: "muted", style: "margin-bottom:8px", text: "WHAT THE SHOP RECEIVED FROM GHL (LAST 200)" }));

@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-25-onedeal";
+const BUILD = "2026-11-25-sameappt";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -633,7 +633,14 @@ function couldBeSameBooking(a, b) {
   return live(a) && live(b) && !vehiclesDiffer(a.car, b.car) && serviceCompat(a.baseService, b.baseService);
 }
 const onlyPossibleSame = (group) => group.filter((a) => group.some((b) => b !== a && couldBeSameBooking(a, b)));
-function isSeparateAppointment(existing, incomingIso, incomingTitle, incomingCalendarId, incomingService, incomingApptId) {
+// Does this shop's booking workflow put the APPOINTMENT's own id in ghlOpportunityId? Then the same id is the same appointment edited (whatever was changed: the car text, the calendar, the service, the rep) and a different id is a different appointment (a customer
+// with two cars has two). Set GHL_IDS_ARE_APPOINTMENTS=1 (or 0) to say so; otherwise the shop learns it: yes when a message carries an appointment id equal to ghlOpportunityId, no when one ghlOpportunityId turns out to cover several appointments (the older
+// setup, where the id belongs to the customer's opportunity and the car, calendar and time have to be compared to tell an edit from a second booking).
+const IDS_ARE_APPTS = String(process.env.GHL_IDS_ARE_APPOINTMENTS || "").toLowerCase();
+function idsAreAppointments(db) { if (/^(1|true|yes)$/.test(IDS_ARE_APPTS)) return true; if (/^(0|false|no)$/.test(IDS_ARE_APPTS)) return false; return db.idsAreAppointments === true; }
+const baseOppId = (id) => String(id || "").split("~")[0];
+function isSeparateAppointment(...args) { return isSeparateAppointmentRule(...args); }
+function isSeparateAppointmentRule(existing, incomingIso, incomingTitle, incomingCalendarId, incomingService, incomingApptId) {
   if (!incomingIso || !existing.date) return false;
   const oldMs = Date.parse(existing.date), newMs = Date.parse(incomingIso);
   if (isNaN(oldMs) || isNaN(newMs)) return false;
@@ -762,7 +769,9 @@ function uniqueOrphanMatches(db, events, deadJobs) {
   deadJobs.forEach((j) => { const jm = Date.parse(j.date); events.forEach((e) => { const ms = evStartMs(e); if (e.id && evActive(e) && !isNaN(ms) && ms >= jm + GHL_MOVE_MS && ms >= now - 86400000 && !taken(e.id) && titlesMatch(j.car, e.title)) { if (!byEv.has(e.id)) byEv.set(e.id, []); byEv.get(e.id).push(j); if (!byJob.has(j.id)) byJob.set(j.id, []); byJob.get(j.id).push(e); } }); });
   const out = new Map(); byJob.forEach((evs, jid) => { if (evs.length === 1 && byEv.get(evs[0].id).length === 1) out.set(jid, evs[0]); }); return out;
 }
-function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId, appointmentId }) {
+function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmail, contactId, car, employeeName, salesRepName, baseService, basePrice, ghlOpportunityId, closedAt, calendarId, appointmentId: apptIn }) {
+  const idsAppt = idsAreAppointments(db), appointmentId = apptIn || (idsAppt ? baseOppId(ghlOpportunityId) : undefined);          // the appointment id this message is about
+  const isSeparateAppointment = (s, ...rest) => isSeparateAppointmentRule(idsAppt && !s.ghlAppointmentId && s.ghlOpportunityId ? { ...s, ghlAppointmentId: baseOppId(s.ghlOpportunityId) } : s, ...rest);
   // employeeName can be a single tech or several, e.g. "Jordan Smith, Sam Rivera" —
   // this is how tag-teamed jobs (multiple techs on one car) get represented.
   const rawNames = String(employeeName || "").split(/[,&]/).map((n) => n.trim()).filter(Boolean);
@@ -916,13 +925,7 @@ function upsertSaleFromGHL(db, { date, customerName, customerPhone, customerEmai
   else if (salesRepName) { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = salesRepName + " (unmatched)"; }
   else { sale.salesRepId = sale.salesRepId || null; sale.salesRepName = sale.salesRepName || "Unassigned"; }
   let reclosed = false;
-  // A DIFFERENT rep's initials are on this booking now and the deal had not been worked: that rep re-closed it. The credit moved with the title; the close time moves with it too.
-  if (!isNew && !repHeld && att && att.salesRepId && priorRepId && priorRepId !== att.salesRepId && !priorHere) {
-    reclosed = true;
-    const wasClosed = sale.closedAt; sale.closedAt = (closedAt ? normalizeDate(closedAt) : null) || new Date().toISOString(); sale.closedAtSource = "reclose";
-    const sys = { auth: { label: "GHL booking (re-closed by another rep)", role: "system" } };
-    logAudit(db, sys, sale, "Sales rep (re-closed by another rep)", "", att.salesRepName); logAudit(db, sys, sale, "Closed At (re-closed)", wasClosed || "", sale.closedAt);
-  }
+  // An edit to the SAME appointment never moves its close time, whoever made it, even when another rep's initials are now in the title: the credit follows the title (the line below leaves a trail), the close stays on the day it was made.
   // Credit moved with the title on a car that had already been worked (so it was not a re-close): it used to move with no record at all.
   if (!isNew && !repHeld && !reclosed && priorRepId && sale.salesRepId && sale.salesRepId !== priorRepId) logAudit(db, { auth: { label: "GHL booking message", role: "system" } }, sale, "Sales rep (from the title)", priorRepName, sale.salesRepName);
   sale.baseService = baseService || sale.baseService || "";
@@ -1722,6 +1725,12 @@ app.post("/api/webhook/ghl", (req, res) => {
   // accept the common spellings of the calendar field (the tracker only ever looked for "calendarId")
   if (!data.calendarId) { const c = data.calendar_id || data.calendarID || (data.calendar && (data.calendar.id || (typeof data.calendar === "string" ? data.calendar : ""))) || ""; if (c) data.calendarId = c; }
   if (!data.appointmentId) { const a = data.appointment_id || data.appointmentID || data.apptId || (data.appointment && (data.appointment.id || (typeof data.appointment === "string" ? data.appointment : ""))) || ""; if (a) data.appointmentId = String(a); }
+  if (!data.appointmentId) { const cal = req.body && typeof req.body.calendar === "object" && req.body.calendar ? req.body.calendar : {}; const std = cal.appointmentId || cal.appointment_id || (req.body && (req.body.appointmentId || req.body.appointment_id)) || ""; if (std) data.appointmentId = String(std); }      // GHL's own appointment id from its standard data, whatever custom fields the workflow sends
+  if (data.ghlOpportunityId && data.appointmentId && IDS_ARE_APPTS === "") {                                        // learn what this shop's ids are
+    if (String(data.appointmentId) === String(data.ghlOpportunityId) && db.idsAreAppointments === undefined) db.idsAreAppointments = true;
+    const holder = db.sales.find((x) => x.ghlOpportunityId === data.ghlOpportunityId);
+    if (holder && holder.ghlAppointmentId && String(holder.ghlAppointmentId) !== String(data.appointmentId)) db.idsAreAppointments = false;      // one id covering several appointments: it is the customer's opportunity, not an appointment
+  }
   if (!data.ghlOpportunityId) {
     if (!db.debugLog) db.debugLog = [];
     db.debugLog.unshift({ receivedAt: new Date().toISOString(), contentType: req.headers["content-type"] || "(none)", failedReason: "missing ghlOpportunityId", body: req.body });
@@ -1734,7 +1743,7 @@ app.post("/api/webhook/ghl", (req, res) => {
   const merged = autoMergeDuplicates(db, sale.contactId || data.contactId);   // the same booking under a new id is folded in straight away
   const edited = autoMergeMoved(db, sale.contactId || data.contactId); Object.assign(merged.remap, edited.remap);
   autoLinkRedos(db);                                                            // a redo appointment is linked back to the car's earlier job when that is clear
-  hookNote(db, { route: "booking", outcome: lastUpsertNote.isNew ? "created" : lastUpsertNote.revived ? "brought back (confirmed again)" : "updated", appt: String(data.ghlOpportunityId), contactId: String(sale.contactId || data.contactId || ""), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id, merged: Object.keys(merged.remap || {}).length > 0 });
+  hookNote(db, { route: "booking", outcome: lastUpsertNote.isNew ? "created" : lastUpsertNote.revived ? "brought back (confirmed again)" : "updated", appt: String(data.ghlOpportunityId), apptId: String(data.appointmentId || ""), contactId: String(sale.contactId || data.contactId || ""), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id, merged: Object.keys(merged.remap || {}).length > 0 });
   saveDB(db);
   scheduleContactSync(sale.contactId || data.contactId, 2000);               // a moment later, ask GHL what this customer really has now
   res.json({ ok: true, saleId: (() => { let id = sale.id; for (let k = 0; k < 3 && merged.remap[id]; k++) id = merged.remap[id]; return id; })(), matchedEmployees: sale.employeeIds.length });
@@ -5447,7 +5456,7 @@ function reconcileContact(db, contactId, events) {
     const j = db.sales.find((x) => x.id === jid), ms = evStartMs(e), att = resolveSalesRepAttribution(db, "", e.title);
     j.ghlOpportunityId = e.id; j.ghlApptSeen = true; if (e.calendarId) j.calendarId = e.calendarId;
     bringBackMoved(db, j, ms); out.revived++; out.revivedNames.push(j.customerName || j.car);
-    if (att && att.salesRepId && j.salesRepId && att.salesRepId !== j.salesRepId) reCloseCredit(db, GHL_RESCHED, j, att, normalizeDate(e.dateAdded) || new Date().toISOString());
+    if (att && att.salesRepId && j.salesRepId && att.salesRepId !== j.salesRepId) reCloseCredit(db, GHL_RESCHED, j, att, null);
   });
   mine().forEach((j) => {
     const ev = j.ghlOpportunityId ? byId.get(j.ghlOpportunityId) : null;
