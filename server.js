@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-25-hookid";
+const BUILD = "2026-11-25-cancelmatch";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -1725,7 +1725,7 @@ app.post("/api/webhook/ghl", (req, res) => {
   const merged = autoMergeDuplicates(db, sale.contactId || data.contactId);   // the same booking under a new id is folded in straight away
   const edited = autoMergeMoved(db, sale.contactId || data.contactId); Object.assign(merged.remap, edited.remap);
   autoLinkRedos(db);                                                            // a redo appointment is linked back to the car's earlier job when that is clear
-  hookNote(db, { route: "booking", outcome: lastUpsertNote.isNew ? "created" : lastUpsertNote.revived ? "brought back (confirmed again)" : "updated", appt: String(data.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id, merged: Object.keys(merged.remap || {}).length > 0 });
+  hookNote(db, { route: "booking", outcome: lastUpsertNote.isNew ? "created" : lastUpsertNote.revived ? "brought back (confirmed again)" : "updated", appt: String(data.ghlOpportunityId), contactId: String(sale.contactId || data.contactId || ""), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id, merged: Object.keys(merged.remap || {}).length > 0 });
   saveDB(db);
   scheduleContactSync(sale.contactId || data.contactId, 2000);               // a moment later, ask GHL what this customer really has now
   res.json({ ok: true, saleId: (() => { let id = sale.id; for (let k = 0; k < 3 && merged.remap[id]; k++) id = merged.remap[id]; return id; })(), matchedEmployees: sale.employeeIds.length });
@@ -1802,7 +1802,7 @@ app.post("/api/webhook/ghl/sync", (req, res) => {
 // alone can't say which car the event is about, and guessing could cancel the wrong car. If the event names the car, that decides it. If it
 // doesn't, and there is more than one live booking that day, NOTHING is changed and it is written to the Debug log for the owner, which is
 // safer than quietly changing the wrong job.
-function resolveGhlTarget(db, body, endpoint, req) {
+function resolveByGhlId(db, body, endpoint, req) {
   const id = body.ghlOpportunityId;
   const holder = db.sales.find((s) => s.ghlOpportunityId === id);
   if (!holder) return { sale: null };
@@ -1835,6 +1835,36 @@ function resolveGhlTarget(db, body, endpoint, req) {
   return { ambiguous: true };
 }
 
+// What GHL itself sends with every appointment event, whatever custom fields the workflow adds: the contact's id at the top, and a "calendar" block with the appointment's own id, calendar, title and start time.
+function ghlAltIds(raw, payload) {
+  raw = raw || {}; payload = payload || {};
+  const cal = raw.calendar && typeof raw.calendar === "object" ? raw.calendar : {};
+  const appts = [...new Set([cal.appointmentId, cal.appointment_id, raw.appointmentId, raw.appointment_id, payload.appointmentId].filter(Boolean).map(String))];
+  const contactId = String(raw.contact_id || raw.contactId || payload.contactId || (raw.contact && raw.contact.id) || "");
+  return { appts, contactId, calId: String(cal.id || raw.calendarId || payload.calendarId || ""), start: cal.startTime || raw.startTime || payload.startTime || "", title: String(cal.title || payload.car || payload.title || payload.appointmentTitle || ""), hasId: appts.length > 0 || !!contactId };
+}
+const seenId = (payload, req) => String((payload && payload.ghlOpportunityId) || ghlAltIds(req && req.body, payload).appts[0] || "");
+const notFoundReason = (target, req, payload) => {
+  const alt = ghlAltIds(req && req.body, payload), seen = [alt.contactId ? `contact ${alt.contactId}` : "", alt.appts[0] ? `appointment ${alt.appts[0]}` : ""].filter(Boolean).join(", ");
+  return "the tracker has no job for this appointment" + (target && target.several ? ` (this customer has ${target.several} live bookings that fit and the event didn't say which, so nothing was changed)` : "") + (seen ? `. GHL also sent: ${seen}` : "");
+};
+// The job a cancel / unconfirm / delete is about. First by the id the workflow sent (a cancel only finds a job whose booking carried the SAME id). If that finds nothing, a workflow that sends a different id than the booking did used to leave the job untouched while GHL
+// showed "Executed", so now: 1) GHL's own appointment id from the standard data, an exact match; 2) for a cancel or unconfirm only (both can be undone by confirming again), the customer, but only when exactly ONE live booking of theirs fits what the
+// event says (its start time within 15 minutes, its calendar or its title). More than one, or none that fits: nothing changes. A delete never guesses.
+function resolveGhlTarget(db, body, endpoint, req) {
+  const first = body.ghlOpportunityId ? resolveByGhlId(db, body, endpoint, req) : { sale: null };
+  if (first.sale || first.ambiguous) return first;
+  const alt = ghlAltIds(req && req.body, body); let found = null, via = null;
+  for (const a of alt.appts) { found = db.sales.find((s) => s.ghlOpportunityId === a || s.ghlAppointmentId === a); if (found) { via = "GHL's own appointment ID"; break; } }
+  if (!found && alt.contactId && endpoint !== "delete") {
+    const live = db.sales.filter((s) => s.contactId === alt.contactId && ["pending", "arrived"].includes(s.status || "pending")), at = Date.parse(alt.start);
+    const fits = live.filter((s) => { const hasInfo = !isNaN(at) || alt.calId || alt.title; if (!hasInfo) return true; return (!isNaN(at) && Math.abs(Date.parse(s.date) - at) <= 15 * 60000) || (alt.calId && s.calendarId && String(s.calendarId) === alt.calId) || (alt.title && titlesMatch(s.car, alt.title)); });
+    if (fits.length === 1) { found = fits[0]; via = "the customer (their only live booking that fits)"; } else if (fits.length > 1) return { sale: null, several: fits.length };
+  }
+  if (!found) return { sale: null };
+  const r = resolveByGhlId(db, { ...body, ghlOpportunityId: found.ghlOpportunityId }, endpoint, req); r.via = via; return r;
+}
+
 // Cancellation — deliberately separate from the main webhook above. This one ONLY updates
 // a job that already exists (matched by ghlOpportunityId); it never creates a new one.
 // If the appointment was cancelled before it ever hit "Confirmed," there's nothing in the
@@ -1843,18 +1873,18 @@ app.post("/api/webhook/ghl/cancel", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return badHookSecret(res, "cancelled");
   const db = loadDB();
   const payload = ghlPayload(req.body);
-  if (!payload.ghlOpportunityId) { hookNote(db, { route: "cancelled", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
+  if (!payload.ghlOpportunityId && !ghlAltIds(req.body, payload).hasId) { hookNote(db, { route: "cancelled", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
   const target = resolveGhlTarget(db, payload, "cancel", req);
-  if (target.ambiguous) { hookNote(db, { route: "cancelled", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  if (target.ambiguous) { hookNote(db, { route: "cancelled", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: seenId(payload, req) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const sale = target.sale;
-  if (!sale) { hookNote(db, { route: "cancelled", outcome: "not found", reason: "the tracker has no job for this appointment", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: false }); }
+  if (!sale) { hookNote(db, { route: "cancelled", outcome: "not found", reason: notFoundReason(target, req, payload), appt: seenId(payload, req), contactId: ghlAltIds(req.body, payload).contactId }); saveDB(db); return res.json({ ok: true, found: false }); }
   const wasCancelled = sale.status === "cancelled";
   if (!wasCancelled) sale.preCancelStatus = sale.status || "pending";       // remembered, so confirming it again in GHL puts it back as it was
   delete sale.cancelledManually;                                            // this cancel came from GHL, not from a person tapping Cancel
   sale.status = "cancelled";
   if (!wasCancelled) sale.endedAt = new Date().toISOString();                // when it ended, so a re-booking right after can be recognised as a reschedule
   if (!wasCancelled) maybeQueueMissedText(db, sale, "cancelled");
-  hookNote(db, { route: "cancelled", outcome: "cancelled", appt: String(payload.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
+  hookNote(db, { route: "cancelled", outcome: "cancelled", reason: target.via ? `matched by ${target.via}: the ID in the workflow didn't match the booking's` : undefined, appt: seenId(payload, req), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
   saveDB(db);
   res.json({ ok: true, found: true, saleId: sale.id });
 });
@@ -1866,14 +1896,14 @@ app.post("/api/webhook/ghl/unconfirm", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return badHookSecret(res, "unconfirmed");
   const db = loadDB();
   const payload = ghlPayload(req.body);
-  if (!payload.ghlOpportunityId) { hookNote(db, { route: "unconfirmed", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
+  if (!payload.ghlOpportunityId && !ghlAltIds(req.body, payload).hasId) { hookNote(db, { route: "unconfirmed", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
   const target = resolveGhlTarget(db, payload, "unconfirm", req);
-  if (target.ambiguous) { hookNote(db, { route: "unconfirmed", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  if (target.ambiguous) { hookNote(db, { route: "unconfirmed", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: seenId(payload, req) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const sale = target.sale;
-  if (!sale) { hookNote(db, { route: "unconfirmed", outcome: "not found", reason: "the tracker has no job for this appointment", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: false }); }
+  if (!sale) { hookNote(db, { route: "unconfirmed", outcome: "not found", reason: notFoundReason(target, req, payload), appt: seenId(payload, req), contactId: ghlAltIds(req.body, payload).contactId }); saveDB(db); return res.json({ ok: true, found: false }); }
   if (sale.status !== "unconfirmed") sale.endedAt = new Date().toISOString();
   sale.status = "unconfirmed";
-  hookNote(db, { route: "unconfirmed", outcome: "marked unconfirmed", appt: String(payload.ghlOpportunityId), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
+  hookNote(db, { route: "unconfirmed", outcome: "marked unconfirmed", reason: target.via ? `matched by ${target.via}: the ID in the workflow didn't match the booking's` : undefined, appt: seenId(payload, req), customer: sale.customerName || "", car: sale.car || "", saleId: sale.id });
   saveDB(db);
   res.json({ ok: true, found: true, saleId: sale.id });
 });
@@ -1886,13 +1916,13 @@ app.post("/api/webhook/ghl/delete", (req, res) => {
   if (req.query.secret !== WEBHOOK_SECRET) return badHookSecret(res, "deleted");
   const db = loadDB();
   const payload = ghlPayload(req.body);
-  if (!payload.ghlOpportunityId) { hookNote(db, { route: "deleted", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
+  if (!payload.ghlOpportunityId && !ghlAltIds(req.body, payload).hasId) { hookNote(db, { route: "deleted", outcome: "refused", reason: "no opportunity ID in what GHL sent" }); saveDB(db); return res.status(400).json({ error: "ghlOpportunityId is required." }); }
   const target = resolveGhlTarget(db, payload, "delete", req);
-  if (target.ambiguous) { hookNote(db, { route: "deleted", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: String(payload.ghlOpportunityId) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
+  if (target.ambiguous) { hookNote(db, { route: "deleted", outcome: "not applied", reason: "could not tell which job (more than one match)", appt: seenId(payload, req) }); saveDB(db); return res.json({ ok: true, found: true, ambiguous: true }); }
   const before = db.sales.length, gone = target.sale;
   if (target.sale) db.sales = db.sales.filter((s) => s !== target.sale);
   const found = db.sales.length < before;
-  hookNote(db, found ? { route: "deleted", outcome: "deleted the job", appt: String(payload.ghlOpportunityId), customer: gone.customerName || "", car: gone.car || "" } : { route: "deleted", outcome: "not found", reason: "the tracker has no job for this appointment", appt: String(payload.ghlOpportunityId) });
+  hookNote(db, found ? { route: "deleted", outcome: "deleted the job", reason: target.via ? `matched by ${target.via}: the ID in the workflow didn't match the booking's` : undefined, appt: seenId(payload, req), customer: gone.customerName || "", car: gone.car || "" } : { route: "deleted", outcome: "not found", reason: notFoundReason(target, req, payload), appt: seenId(payload, req), contactId: ghlAltIds(req.body, payload).contactId });
   saveDB(db);
   res.json({ ok: true, found });
 });
