@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 // Release label shown on screen so a half-updated deploy (one file replaced, not the other)
 // is obvious at a glance instead of just looking "broken". Bump this with each release.
-const BUILD = "2026-11-25-cancelmatch";
+const BUILD = "2026-11-25-onedeal";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -589,6 +589,15 @@ function carsDiffer(a, b) {
 }
 // "Same car and service". Comparing the raw text broke the moment anyone touched the deposit or added "WS" while
 // rescheduling, which made a plain reschedule look like a brand-new deal (and a new close today).
+// Stricter than titlesMatch, for "is this booking the SAME DEAL as that one": the same car AND the same words about the work. titlesMatch lets "S+R tint" and "windshield tint" through (the car and year are most of the words), which is
+// fine for finding a reschedule but not for deciding that two live appointments are one sale. Prices, deposits and markers like "rescheduled" don't count; any other word that only one of the two titles has does.
+const SAME_DEAL_NOISE = new Set(["depo", "deposit", "dep", "same", "day", "sameday", "walk", "in", "updated", "update", "redo"]);
+function sameDealTitles(a, b) {
+  if (!titlesMatch(a, b)) return false;
+  const A = new Set(titleTokens(a)), B = new Set(titleTokens(b));
+  const only = [...A].filter((t) => !B.has(t)).concat([...B].filter((t) => !A.has(t))).filter((t) => !/^\d+(depo|deposit|dep)?$/.test(t) && !SAME_DEAL_NOISE.has(t));
+  return only.length === 0;
+}
 function titlesMatch(a, b) {
   const na = normalizeTitle(a), nb = normalizeTitle(b);
   if (!na || !nb) return false;
@@ -3181,6 +3190,12 @@ function reschedulePartnerOf(db, j, byKey) {
 const RESCHEDULE_WINDOW_MS = (parseFloat(process.env.RESCHEDULE_WINDOW_MINUTES) || 60) * 60000;
 const RESCHEDULE_MISSED_MS = (parseFloat(process.env.RESCHEDULE_MISSED_DAYS) || 3) * 86400000;
 const DEAD_NOW = ["cancelled", "no_show", "unconfirmed"];
+// A CANCELLED booking never counts as a close (cancelled jobs are excluded everywhere), so a new booking that is that same deal under a new appointment must CARRY the close: it takes the original close time, so the deal counts once, on the day it
+// was really closed, and nothing new lands on today. (Flagging the new one as a reschedule instead left the deal counted nowhere.)
+function takeOverClose(db, j, partner, who) {
+  const orig = partner.closedAt || partner.date, was = j.closedAt; j.tookOverClose = partner.id;
+  if (orig && Date.parse(was) > Date.parse(orig)) { j.closedAtBefore = was; j.closedAtSourceBefore = j.closedAtSource || null; j.closedAt = orig; j.closedAtSource = "reschedule"; j.closedAtKept = partner.id; logAudit(db, { auth: { label: who || "Auto (this booking replaced a cancelled one)", role: "system" } }, j, "Closed At (took over the cancelled booking's close)", was || "", orig); }
+}
 function stampEnded(sale, before) { if (DEAD_NOW.includes(sale.status) && sale.status !== before) sale.endedAt = new Date().toISOString(); }
 function quickReschedulePartner(db, j) {
   const k = customerKeyOf(j); if (!k) return null;
@@ -3193,6 +3208,8 @@ function quickReschedulePartner(db, j) {
     if (!(Date.parse(e.closedAt || e.date) < jc - 60000)) return false;
     if (e.endedAt && DEAD_NOW.includes(e.status)) { const ago = now - Date.parse(e.endedAt); if (ago >= -60000 && ago <= RESCHEDULE_WINDOW_MS) { e.__why = "rebooked-right-after"; return true; } }
     if (e.status !== "cancelled" && (isDeadBooking(e) || sameDayLapsed(e))) { const since = now - Date.parse(e.date); if (since >= 0 && since <= RESCHEDULE_MISSED_MS) { e.__why = "rebooked-after-miss"; return true; } }
+    // the earlier booking is STILL BOOKED and this is a second appointment for the same car and service with the same words in the title: a rep who "updates" by booking again. The first one carries the close; this one is not a new close.
+    if (["pending", "unconfirmed"].includes(e.status || "pending") && sameDealTitles(e.car, j.car)) { e.__why = "second-appointment"; return true; }
     return false;
   }).sort((a, b) => (a.date < b.date ? 1 : -1))[0] || null;
   if (e) { reason = e.__why; db.sales.forEach((x) => { delete x.__why; }); }
@@ -3201,6 +3218,7 @@ function quickReschedulePartner(db, j) {
 function autoFlagQuickReschedule(db, j) {
   if (!j || j.isReschedule || j.rescheduleDismissed || j.isRedo || j.status === "cancelled" || !j.salesRepId || !afterRevenueStart(j, db)) return false;
   const found = quickReschedulePartner(db, j); if (!found) return false;
+  if (found.partner.status === "cancelled") { takeOverClose(db, j, found.partner); return true; }
   j.isReschedule = true; j.rescheduleAutoFlagged = true; j.rescheduleAutoReason = found.reason;
   if (sameDayOut(found.partner)) j.reschedulesSameDay = true;          // that same-day deal (no deposit) is out: this booking carries its credit when the customer shows. With a deposit the earlier deal already counts, so this one is simply left out.
   if (!db.auditLog) db.auditLog = [];
@@ -3208,6 +3226,16 @@ function autoFlagQuickReschedule(db, j) {
   db.auditLog = db.auditLog.slice(0, AUDIT_KEEP);
   keepOriginalCloseTimes(db, j);
   return true;
+}
+function healLostCloses(db) {
+  const byKey = customerIndex(db); let n = 0;
+  db.sales.filter((j) => j.isReschedule && j.rescheduleAutoFlagged && !j.rescheduleDismissed && !j.reschedulesSameDay).forEach((j) => {
+    const p = reschedulePartnerOf(db, j, byKey);
+    if (!p || p.status !== "cancelled") return;                       // only when the original is cancelled (so it cannot carry the close); a flag the owner set by hand is never touched
+    j.isReschedule = false; j.rescheduleAutoFlagged = false; delete j.rescheduleAutoReason;
+    takeOverClose(db, j, p, "Auto (this booking replaced a cancelled one: it carries the close)"); n++;
+  });
+  return n;
 }
 function keepOriginalCloseTimes(db, onlyJob) {
   const byKey = customerIndex(db), sys = { auth: { label: "Auto (a reschedule keeps its original close time)", role: "system" } }; let fixed = 0;
@@ -3260,6 +3288,7 @@ function autoFlagRescheduleFromTitle(db, onlyJob) {
     const partner = reschedulePartnerOf(db, j, byKey);
     if (!partner) return;
     if (!says && !(partner.status === "no_show" || sameDayOut(partner) || (isDeadBooking(partner) && partner.status !== "cancelled" && partner.status !== "unconfirmed"))) return;
+    if (partner.status === "cancelled") { takeOverClose(db, j, partner); flagged += 1; return; }       // the cancelled one cannot carry the close, so this booking does
     j.isReschedule = true;
     j.rescheduleAutoFlagged = true; j.rescheduleAutoReason = says ? "title" : "same-day-rebook";
     if (sameDayOut(partner)) j.reschedulesSameDay = true;        // that same-day deal is out; this booking carries its credit when the customer shows
@@ -5182,7 +5211,7 @@ function runTitleSweep() {
   if (changed) saveDB(db);
   return { changed, waiting: fresh.length, asked };
 }
-function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db), b = backfillCloseAppt(db), k = keepOriginalCloseTimes(db); if (r.count || m.count || l || c || b || k) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
+function runAutoMerge() { const db = loadDB(), r = autoMergeDuplicates(db), m = autoMergeMoved(db), l = autoLinkRedos(db), c = autoAssignWalkInClosers(db), b = backfillCloseAppt(db), h = healLostCloses(db), k = keepOriginalCloseTimes(db); if (r.count || m.count || l || c || b || h || k) saveDB(db); return { duplicates: r.count, edited: m.count, linked: l, closers: c }; }
 
 // ===== REDO TRACKING =====
 // A redo record belongs to the ORIGINAL job and to the people who worked it (the techs, and any manager who helped hands-on), because their work is what came back.
